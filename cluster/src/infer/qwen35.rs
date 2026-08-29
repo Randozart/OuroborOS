@@ -282,6 +282,11 @@ impl Card {
         (il + 1) % self.full_attention_interval != 0
     }
 
+    /// Tied-head fallback allowed only for families without untied export.
+    pub fn tie_fallback(&self) -> bool {
+        self.architecture != "qwen35"
+    }
+
     /// Coarse ArchConfig for Stage validation (dims used by wm/row checks).
     pub fn to_arch(&self) -> crate::infer::ArchConfig {
         crate::infer::ArchConfig {
@@ -321,6 +326,7 @@ pub struct Qwen35Stage {
     pub inner: Stage,
     delta: Vec<(u32, DeltaRuntime)>,
     attn: Vec<(u32, AttnKv)>,
+    pub seq: usize,
     /// capture intermediates for differential testing vs oracle
     pub tap: bool,
     pub last_qkv: Option<Vec<f32>>,
@@ -358,7 +364,7 @@ impl Qwen35Stage {
             .map(|&l| (l, AttnKv::default()))
             .collect();
         Ok(Self {
-            card, inner, delta, attn,
+            card, inner, delta, attn, seq: 0,
             tap: false,
             last_qkv: None, last_conv_out: None, last_q: None, last_beta: None,
             last_gate: None, last_delta_o: None, last_state: None, last_delta_out: None,
@@ -383,6 +389,55 @@ impl Qwen35Stage {
             a.k.clear();
             a.v.clear();
             a.seq = 0;
+        }
+    }
+
+    pub fn has_embed(&self) -> bool {
+        self.inner.tensors.contains_key("token_embd.weight")
+    }
+
+    pub fn embed(&self, token: usize) -> Result<Vec<f32>> {
+        self.inner.row("token_embd.weight", token)
+    }
+
+    /// Run this stage's whole slice at absolute position `pos`.
+    /// Contract: positions must arrive strictly in sequence.
+    pub fn forward(&mut self, x: &[f32], pos: usize) -> Result<Vec<f32>> {
+        if pos != self.seq {
+            anyhow::bail!("qwen stage expects pos {}, got {}", self.seq, pos);
+        }
+        let layers = self.layers().to_vec();
+        let mut h = x.to_vec();
+        for il in layers {
+            h = self.run_layer(il, &h, pos)?;
+        }
+        if self.inner.output_norm_present() {
+            h = self.inner.apply_output_norm(&h)?;
+        }
+        self.seq += 1;
+        Ok(h)
+    }
+
+    /// Greedy sample if this stage owns an lm_head (untied or tied).
+    pub fn sample(&self, h: &[f32]) -> Result<Option<usize>> {
+        if self.inner.has_output_head() {
+            let l = self.inner.logits_untied(h)?;
+            return Ok(Some(crate::infer::finite_argmax(&l)));
+        }
+        if self.inner.has_head() && self.card.tie_fallback() {
+            let l = self.inner.logits(h)?;
+            return Ok(Some(crate::infer::finite_argmax(&l)));
+        }
+        Ok(None)
+    }
+
+    pub fn head_kind(&self) -> &'static str {
+        if self.inner.has_output_head() {
+            "untied"
+        } else if self.inner.has_head() && self.card.tie_fallback() {
+            "tied"
+        } else {
+            "none"
         }
     }
 
@@ -654,6 +709,10 @@ impl Qwen35Model {
         }
         let _ = c;
         Ok(x)
+    }
+
+    pub fn argmax(logits: &[f32]) -> usize {
+        crate::infer::finite_argmax(logits)
     }
 
     pub fn logits(&self, h: &[f32]) -> Result<Vec<f32>> {

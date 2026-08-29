@@ -103,12 +103,17 @@ pub fn run(nodes: &[PipelineNode], ids: &[i32], n_gen: u32) -> Result<PipelineRu
     }
     let mut hops = Hops::new();
 
+    let mut sample_addr = None;
     for n in nodes {
-        call(&n.addr, "stage_setup", "su", n.shard_path.clone(), &mut hops)?;
+        let summary = call(&n.addr, "stage_setup", "su", n.shard_path.clone(), &mut hops)?;
+        if summary.contains("head=tied") || summary.contains("head=untied") {
+            sample_addr = Some(n.addr.clone());
+        }
         call(&n.addr, "stage_reset", "sr", String::new(), &mut hops)?;
     }
 
-    let head = &nodes[0]; // stage 0 owns token_embd (embed + tied head)
+    let head = &nodes[0]; // stage 0 owns token_embd (embed side)
+    let sampler = sample_addr.clone().unwrap_or_else(|| nodes[0].addr.clone());
 
     // Prefill token by token; sample only after the final prompt position.
     let mut pos: usize = 0;
@@ -121,7 +126,7 @@ pub fn run(nodes: &[PipelineNode], ids: &[i32], n_gen: u32) -> Result<PipelineRu
         pos += 1;
     }
     let gen_start = Instant::now();
-    let mut cur: i32 = call(&head.addr, "stage_sample", "pf", acts, &mut hops)?
+    let mut cur: i32 = call(&sampler, "stage_sample", "pf", acts, &mut hops)?
         .trim()
         .parse()?;
     let mut out_ids = vec![cur];
@@ -132,7 +137,7 @@ pub fn run(nodes: &[PipelineNode], ids: &[i32], n_gen: u32) -> Result<PipelineRu
             acts = call(&n.addr, "stage_step", "gn", acts, &mut hops)?;
         }
         pos += 1;
-        cur = call(&head.addr, "stage_sample", "gn", acts, &mut hops)?
+        cur = call(&sampler, "stage_sample", "gn", acts, &mut hops)?
             .trim()
             .parse()?;
         out_ids.push(cur);
@@ -140,7 +145,7 @@ pub fn run(nodes: &[PipelineNode], ids: &[i32], n_gen: u32) -> Result<PipelineRu
 
     let tok_per_sec = out_ids.len() as f64 / gen_start.elapsed().as_secs_f64().max(1e-6);
     let csv = out_ids.iter().map(|t| t.to_string()).collect::<Vec<_>>().join(",");
-    let text = call(&head.addr, "detok", "dt", csv, &mut hops).unwrap_or_default();
+    let text = call(&sampler, "detok", "dt", csv, &mut hops).unwrap_or_default();
 
     Ok(PipelineRun {
         token_ids: out_ids,

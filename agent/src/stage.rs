@@ -3,22 +3,36 @@
 
 use anyhow::{bail, Result};
 use ouro_cluster::bmts::BmtsShard;
+use ouro_cluster::infer::qwen35::{Card, Qwen35Stage};
 use ouro_cluster::infer::{ArchConfig, LayerKv, Stage};
 use ouro_cluster::pipeline::{from_hex, to_hex, Activation};
 use std::sync::{Mutex, OnceLock};
-
-/// Loaded stage + its KV state.
-pub struct StageSlot {
-    pub stage: Stage,
-    pub kv: Vec<LayerKv>,
-}
 
 fn slot() -> &'static Mutex<Option<StageSlot>> {
     static SLOT: OnceLock<Mutex<Option<StageSlot>>> = OnceLock::new();
     SLOT.get_or_init(|| Mutex::new(None))
 }
 
-fn arch_from_env() -> ArchConfig {
+/// Which model family a loaded slot speaks.
+pub enum Loaded {
+    Bitnet { stage: Stage, kv: Vec<LayerKv> },
+    Qwen(Qwen35Stage),
+}
+
+/// Loaded stage + its KV state.
+pub struct StageSlot {
+    pub model: Loaded,
+}
+
+/// Architecture summary returned by stage_setup.
+fn arch_from_env() -> Option<Card> {
+    match std::env::var("OURO_ARCH") {
+        Ok(json) => serde_json::from_str::<Card>(&json).ok(),
+        Err(_) => None,
+    }
+}
+
+fn bitnet_arch_from_env() -> ArchConfig {
     match std::env::var("OURO_ARCH") {
         Ok(json) => serde_json::from_str(&json).unwrap_or_else(|e| {
             eprintln!("bad OURO_ARCH json ({}), using bitnet_2b default", e);
@@ -40,27 +54,40 @@ pub fn handle(kind: &str, payload: &str) -> Result<String> {
         "stage_setup" => {
             let path = payload.trim();
             let shard = BmtsShard::open(path)?;
-            let cfg = arch_from_env();
-            let stage = Stage::from_shard(&shard, cfg)?;
-            let n = stage.layers.len();
-            let summary = format!(
-                "node={} layers={:?} tensors={}",
-                shard.node,
-                stage.layers,
-                stage.tensor_count()
-            );
-            *guard = Some(StageSlot {
-                stage,
-                kv: vec![LayerKv::default(); n],
-            });
+            let (model, summary) = if let Some(card) = arch_from_env() {
+                let st = Qwen35Stage::from_shard(&shard, card)?;
+                let head = st.head_kind();
+                let embed = st.has_embed();
+                let summary = format!(
+                    "node={} family=qwen35 layers={:?} tensors={} head={} embed={}",
+                    shard.node, st.layers(), st.inner.tensor_count(), head, embed
+                );
+                (Loaded::Qwen(st), summary)
+            } else {
+                let cfg = bitnet_arch_from_env();
+                let stage = Stage::from_shard(&shard, cfg)?;
+                let n = stage.layers.len();
+                let head = if stage.has_head() { "tied" } else { "none" };
+                let summary = format!(
+                    "node={} family=bitnet layers={:?} tensors={} head={} embed={}",
+                    shard.node, stage.layers, stage.tensor_count(), head, stage.has_head()
+                );
+                (Loaded::Bitnet { stage, kv: vec![LayerKv::default(); n] }, summary)
+            };
+            *guard = Some(StageSlot { model });
             Ok(summary)
         }
         "stage_reset" => {
             let s = guard.as_mut().ok_or_else(|| anyhow::anyhow!("no stage loaded"))?;
-            for k in &mut s.kv {
-                k.k.clear();
-                k.v.clear();
-                k.seq = 0;
+            match &mut s.model {
+                Loaded::Bitnet { kv, .. } => {
+                    for k in kv {
+                        k.k.clear();
+                        k.v.clear();
+                        k.seq = 0;
+                    }
+                }
+                Loaded::Qwen(st) => st.reset(),
             }
             Ok("reset".to_string())
         }
@@ -71,55 +98,78 @@ pub fn handle(kind: &str, payload: &str) -> Result<String> {
             let pos: usize = pos_s.parse()?;
             let token: usize = tok_s.trim().parse()?;
             let s = guard.as_mut().ok_or_else(|| anyhow::anyhow!("no stage loaded"))?;
-            check_pos(s, pos)?;
-            let mut x = s.stage.embed(token)?;
-            x = run_layers(s, &x, pos)?;
+            let x = match &mut s.model {
+                Loaded::Qwen(st) => {
+                    let e = st.embed(token)?;
+                    st.forward(&e, pos)?
+                }
+                Loaded::Bitnet { stage, kv } => {
+                    check_pos_bitnet(&*kv, pos)?;
+                    let mut x = stage.embed(token)?;
+                    x = run_layers_bitnet(stage, kv, &x, pos)?;
+                    x
+                }
+            };
             Ok(to_hex(&pack(x, pos)))
         }
         "stage_step" => {
             let act = Activation::decode(&from_hex(payload.trim())?)?;
             let s = guard.as_mut().ok_or_else(|| anyhow::anyhow!("no stage loaded"))?;
-            check_pos(s, act.token_pos as usize)?;
-            if act.data.len() != s.stage.cfg().n_embd {
-                bail!("acts dim {} != n_embd {}", act.data.len(), s.stage.cfg().n_embd);
-            }
-            let x = run_layers(s, &act.data, act.token_pos as usize)?;
-            Ok(to_hex(&pack(x, act.token_pos as usize)))
+            let pos = act.token_pos as usize;
+            let x = match &mut s.model {
+                Loaded::Qwen(st) => st.forward(&act.data, pos)?,
+                Loaded::Bitnet { stage, kv } => {
+                    check_pos_bitnet(&*kv, pos)?;
+                    if act.data.len() != stage.cfg().n_embd {
+                        bail!("acts dim {} != n_embd {}", act.data.len(), stage.cfg().n_embd);
+                    }
+                    run_layers_bitnet(stage, kv, &act.data, pos)?
+                }
+            };
+            Ok(to_hex(&pack(x, pos)))
         }
         "stage_sample" => {
             let act = Activation::decode(&from_hex(payload.trim())?)?;
             let s = guard.as_ref().ok_or_else(|| anyhow::anyhow!("no stage loaded"))?;
-            if !s.stage.has_head() {
-                bail!("stage lacks token_embd; sample must target stage 0");
+            let tok = match &s.model {
+                Loaded::Qwen(st) => st.sample(&act.data)?,
+                Loaded::Bitnet { stage, .. } => {
+                    if !stage.has_head() {
+                        bail!("stage lacks token_embd; sample must target a head stage");
+                    }
+                    Some(stage.argmax_token(&act.data)?)
+                }
+            };
+            match tok {
+                Some(t) => Ok(t.to_string()),
+                None => bail!("this stage has no lm_head; route sample to a head=true stage"),
             }
-            let tok = s.stage.argmax_token(&act.data)?;
-            Ok(tok.to_string())
         }
         other => bail!("unknown stage task {}", other),
     }
 }
 
 /// Contract: stages execute positions strictly in sequence.
-fn check_pos(s: &StageSlot, pos: usize) -> Result<()> {
-    if s.kv.is_empty() {
+fn check_pos_bitnet(kv: &[LayerKv], pos: usize) -> Result<()> {
+    if kv.is_empty() {
         bail!("stage has no layers");
     }
-    let expected = s.kv[0].seq;
+    let expected = kv[0].seq;
     if pos != expected {
         bail!("out-of-order step: got pos {}, stage expects {}", pos, expected);
     }
     Ok(())
 }
 
-fn run_layers(s: &mut StageSlot, x: &[f32], pos: usize) -> Result<Vec<f32>> {
+fn run_layers_bitnet(stage: &Stage, kv: &mut [LayerKv], x: &[f32], pos: usize) -> Result<Vec<f32>> {
     let mut h = x.to_vec();
-    for li in 0..s.kv.len() {
-        let layer = s.stage.layers[li];
-        h = s.stage.run_layer(layer, &h, pos, &mut s.kv[li])?;
+    for li in 0..kv.len() {
+        let layer = stage.layers[li];
+        h = stage.run_layer(layer, &h, pos, &mut kv[li])?;
     }
     // output_norm lives on the last stage (its shard owns the tensor)
-    if s.stage.output_norm_present() {
-        h = s.stage.apply_output_norm(&h)?;
+    if stage.output_norm_present() {
+        h = stage.apply_output_norm(&h)?;
     }
     Ok(h)
 }
