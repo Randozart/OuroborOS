@@ -70,3 +70,40 @@ fn test_qwen_layer0_delta_diff() {
         assert!(c > 0.999, "{} diverged: cos {}", name, c);
     }
 }
+
+/// Full 9B: 4 stages, single-token prefill, logits vs oracle.
+#[test]
+#[ignore] // heavy: full model
+fn test_qwen_full_logits_diff() {
+    let r = root();
+    let model = std::env::var("CAP_MODEL")
+        .unwrap_or("/home/randozart/Downloads/Qwen3.8-9B-Q6_K.gguf".into());
+    if !std::path::Path::new(&model).exists() {
+        return;
+    }
+    let card = Card::load(r.join("shards9b/model.json").to_str().unwrap()).unwrap();
+
+    // Oracle logits first (then free the mmap).
+    let (ref_logits, tok) = {
+        let m = bitnet_rs::BitNetModel::load(&model, 64, 4).unwrap();
+        let ids = m.tokenize("Hello", true);
+        let cap = m.decode_capture(&vec![ids[0]]).unwrap();
+        let logits = cap.iter().find(|n| n.name == "result_output").map(|n| n.data.clone());
+        (logits.expect("no result_output node"), ids[0] as usize)
+    };
+
+    // Rust: full 4-stage model.
+    let paths: Vec<String> = (1..=4).map(|i| r.join(format!("shards9b/shard_{}.bmts", i)).to_str().unwrap().to_string()).collect();
+    let refs: Vec<&str> = paths.iter().map(|p| p.as_str()).collect();
+    let mut model = ouro_cluster::infer::qwen35::Qwen35Model::load(&refs, card).unwrap();
+    let h = model.step(tok).unwrap();
+    let mine = model.logits(&h).unwrap();
+
+    let c = cos(&ref_logits, &mine);
+    let ref_top = ref_logits.iter().enumerate().max_by(|a, b| a.1.partial_cmp(b.1).unwrap()).unwrap().0;
+    let mine_top = mine.iter().enumerate().max_by(|a, b| a.1.partial_cmp(b.1).unwrap()).unwrap().0;
+    let maxd = ref_logits.iter().zip(&mine).fold(0.0f32, |m, (a, b)| m.max((a - b).abs()));
+    eprintln!("9B logits: cos={:.6} ref_top={} mine_top={} max_delta={:.4}", c, ref_top, mine_top, maxd);
+    assert!(c > 0.999, "logit cos {}", c);
+    assert_eq!(ref_top, mine_top, "greedy token must match");
+}
