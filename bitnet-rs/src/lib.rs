@@ -56,6 +56,9 @@ pub struct BitNetModel {
     n_ctx: u32,
 }
 
+/// Token id type alias for callers.
+pub type LlamaToken = i32;
+
 unsafe impl Send for BitNetModel {}
 
 impl BitNetModel {
@@ -94,6 +97,21 @@ impl BitNetModel {
                 ctx,
                 n_ctx: actual_n_ctx,
             })
+        }
+    }
+
+    /// Load tokenizer/vocab only — no weights, no context. For tokenize/detok.
+    pub fn load_vocab_only(model_path: &str) -> Result<Self> {
+        unsafe {
+            llama_backend_init();
+            let mut mparams = llama_model_default_params();
+            mparams.vocab_only = true;
+            let c_path = CString::new(model_path)?;
+            let model = llama_model_load_from_file(c_path.as_ptr(), mparams);
+            if model.is_null() {
+                anyhow::bail!("Failed to load vocab-only model: {}", model_path);
+            }
+            Ok(Self { model, ctx: std::ptr::null_mut(), n_ctx: 0 })
         }
     }
 

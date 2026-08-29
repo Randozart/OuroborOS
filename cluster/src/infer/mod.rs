@@ -23,7 +23,7 @@ use crate::bmts::BmtsShard;
 use ops::{f16_row, matvec_f16, rmsnorm, rope_neox, silu, softmax};
 
 /// Transformer hyper-parameters for a BitNet model.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, serde::Deserialize, serde::Serialize)]
 pub struct ArchConfig {
     pub n_embd: usize,
     pub n_head: usize,
@@ -60,6 +60,22 @@ impl ArchConfig {
 }
 
 const DTYPE_F16: u32 = 1;
+
+/// Argmax ignoring NaN (NaN logits only arise from garbage weights).
+pub fn finite_argmax(l: &[f32]) -> usize {
+    let mut best = 0usize;
+    let mut found = false;
+    for (i, &v) in l.iter().enumerate() {
+        if v.is_nan() {
+            continue;
+        }
+        if !found || v > l[best] {
+            best = i;
+            found = true;
+        }
+    }
+    best
+}
 
 /// KV cache for ONE layer (rows of n_embd_gqa, one row per token).
 #[derive(Debug, Clone, Default)]
@@ -123,6 +139,56 @@ impl Stage {
             bail!("tensor {}: in_len {} != x len {}", name, w.in_len, x.len());
         }
         Ok(ops::matvec_q(&w.payload, w.kind, w.out_len, w.in_len, x))
+    }
+
+    /// Embedding lookup: token row of `token_embd.weight` as f32.
+    pub fn embed(&self, token: usize) -> Result<Vec<f32>> {
+        let w = self.tensors.get("token_embd.weight")
+            .ok_or_else(|| anyhow::anyhow!("stage has no token_embd"))?;
+        if w.kind != QuantKind::F16 {
+            bail!("token_embd not f16");
+        }
+        if token >= w.out_len {
+            bail!("token {} out of vocab {}", token, w.out_len);
+        }
+        Ok(ops::f16_row(&w.payload, token, w.in_len))
+    }
+
+    /// Logits over the vocab via this stage's `token_embd` (tied lm_head).
+    pub fn logits(&self, hidden: &[f32]) -> Result<Vec<f32>> {
+        if !self.tensors.contains_key("token_embd.weight") {
+            bail!("stage has no tied head");
+        }
+        Ok(self.wm("token_embd.weight", hidden)?)
+    }
+
+    /// Greedy next-token over the tied head (NaN-robust).
+    pub fn argmax_token(&self, hidden: &[f32]) -> Result<usize> {
+        let l = self.logits(hidden)?;
+        Ok(finite_argmax(&l))
+    }
+
+    pub fn has_head(&self) -> bool {
+        self.tensors.contains_key("token_embd.weight")
+    }
+
+    pub fn cfg(&self) -> ArchConfig {
+        self.cfg
+    }
+
+    pub fn tensor_count(&self) -> usize {
+        self.tensors.len()
+    }
+
+    /// Does this stage own the final output_norm tensor (last stage)?
+    pub fn output_norm_present(&self) -> bool {
+        self.tensors.contains_key("output_norm.weight")
+    }
+
+    /// Apply final RMSNorm (last stage only).
+    pub fn apply_output_norm(&self, x: &[f32]) -> Result<Vec<f32>> {
+        let w = self.vec("output_norm.weight")?;
+        Ok(rmsnorm(x, &w, self.cfg.eps))
     }
 
     /// 1-D vector tensor (norm gains) as f32.
@@ -314,15 +380,9 @@ impl PipelineModel {
         matvec_f16(&self.tok_embd, c.n_vocab, c.n_embd, hidden)
     }
 
-    /// Greedy argmax over logits.
+    /// Greedy argmax over logits (NaN-robust).
     pub fn argmax(logits: &[f32]) -> usize {
-        let mut best = 0usize;
-        for i in 1..logits.len() {
-            if logits[i] > logits[best] {
-                best = i;
-            }
-        }
-        best
+        finite_argmax(logits)
     }
 
     /// Process a token sequence (prefill), return hidden state of the last token.

@@ -50,6 +50,22 @@ pub fn execute(task: &Task) -> Result<TaskResult> {
             Ok(out) => (TaskStatus::Success, out),
             Err(e) => (TaskStatus::Failed, format!("bitnet error: {}", e)),
         },
+        #[cfg(feature = "bitnet")]
+        "tokenize" => match run_tokenize(&task.payload) {
+            Ok(out) => (TaskStatus::Success, out),
+            Err(e) => (TaskStatus::Failed, format!("tokenize error: {}", e)),
+        },
+        #[cfg(feature = "bitnet")]
+        "detok" => match run_detok(&task.payload) {
+            Ok(out) => (TaskStatus::Success, out),
+            Err(e) => (TaskStatus::Failed, format!("detok error: {}", e)),
+        },
+        "stage_setup" | "stage_reset" | "stage_token" | "stage_step" | "stage_sample" => {
+            match crate::stage::handle(task.name.as_str(), &task.payload) {
+                Ok(out) => (TaskStatus::Success, out),
+                Err(e) => (TaskStatus::Failed, format!("stage error: {}", e)),
+            }
+        }
         _ => (
             TaskStatus::Failed,
             format!("unknown task: {}", task.name),
@@ -64,6 +80,45 @@ pub fn execute(task: &Task) -> Result<TaskResult> {
         elapsed_ms: elapsed.as_millis() as u64,
         peak_watts,
     })
+}
+
+/// Tokenize using a vocab-only model load (cheap: no weights).
+#[cfg(feature = "bitnet")]
+fn vocab_slot() -> &'static std::sync::Mutex<Option<bitnet_rs::BitNetModel>> {
+    static SLOT: std::sync::OnceLock<std::sync::Mutex<Option<bitnet_rs::BitNetModel>>> =
+        std::sync::OnceLock::new();
+    SLOT.get_or_init(|| std::sync::Mutex::new(None))
+}
+
+#[cfg(feature = "bitnet")]
+fn with_vocab<T>(f: impl FnOnce(&bitnet_rs::BitNetModel) -> T) -> Result<T> {
+    let model_path = std::env::var("OURO_MODEL_PATH")
+        .map_err(|_| anyhow::anyhow!("OURO_MODEL_PATH not set"))?;
+    let mut guard = vocab_slot()
+        .lock()
+        .map_err(|_| anyhow::anyhow!("vocab slot poisoned"))?;
+    if guard.is_none() {
+        *guard = Some(bitnet_rs::BitNetModel::load_vocab_only(&model_path)?);
+    }
+    Ok(f(guard.as_ref().unwrap()))
+}
+
+#[cfg(feature = "bitnet")]
+fn run_tokenize(payload: &str) -> Result<String> {
+    let text = payload.strip_prefix('|').unwrap_or(payload);
+    let ids = with_vocab(|m| m.tokenize(text, true))?;
+    Ok(ids.iter().map(|t| t.to_string()).collect::<Vec<_>>().join(","))
+}
+
+#[cfg(feature = "bitnet")]
+fn run_detok(payload: &str) -> Result<String> {
+    let mut out = String::new();
+    for part in payload.split(',') {
+        if let Ok(id) = part.trim().parse::<bitnet_rs::LlamaToken>() {
+            out.push_str(&with_vocab(|m| m.token_to_piece(id))?);
+        }
+    }
+    Ok(out)
 }
 
 /// Simple benchmark: sum integers up to N.

@@ -111,8 +111,8 @@ pub fn execute_timeout(
 ) -> Result<AgentTaskResult> {
     let json = serde_json::to_string(task)?;
     let resp = send_raw_timeout(addr, &json, timeout)?;
-    let result: AgentTaskResult =
-        serde_json::from_str(&resp).with_context(|| "parse task result")?;
+    let result: AgentTaskResult = serde_json::from_str(&resp)
+        .with_context(|| format!("parse task result from {} (raw {:?})", addr, &resp[..resp.len().min(80)]))?;
     Ok(result)
 }
 

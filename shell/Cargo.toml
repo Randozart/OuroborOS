@@ -14,6 +14,7 @@ name = "ouro_shell"
 path = "src/lib.rs"
 
 [dev-dependencies]
+bitnet-rs = { path = "../bitnet-rs" }
 tokio = { version = "1", features = ["full"] }
 serde_json.workspace = true
 

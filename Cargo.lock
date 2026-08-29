@@ -260,6 +260,7 @@ name = "ouro-shell"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "bitnet-rs",
  "ouro-cluster",
  "serde",
  "serde_json",

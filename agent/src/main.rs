@@ -1,4 +1,5 @@
 mod executor;
+mod stage;
 mod telemetry;
 
 use std::net::SocketAddr;
