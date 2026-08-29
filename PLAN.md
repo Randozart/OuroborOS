@@ -761,3 +761,88 @@ reads per-node probe (FLOPS class + VRAM) and emits stage -> [layer list].
 
 **Non-goals (explicit):** training 20B+ BitNet (compute reality: ~10^22 FLOPs vs
 cluster ~50 TFLOPS), FPGA interconnect, Unikraft until CPU stages prove out.
+
+## 14. Heterogeneous Weight Placement (2026-08-29)
+
+**Principle:** every weight is computed where it is *most easily calculated*.
+The cluster does not assign layers to machines — it assigns **operations to
+devices**, within the limits physics imposes.
+
+### 14.1 The Evidence: real 27B quant mix
+
+`Qwen3.8-27B-Q3_K_M.gguf` (parsed from disk): 866 tensors —
+213× Q3_K (FFN gate/up, attn_gate, embeddings), 189× Q4_K (delta out-proj),
+6× Q5_K (attention qkv + FFN down — the important ones), 1× Q6_K
+(204 MB lm_head), 456× f32 vectors (SSM alpha/beta/dt, conv1d, norms;
+KB-sized). Each layer = ~4 heavy matrices + ~10 tiny ops + recurrent state.
+This is not one workload. It is three, wearing one model's clothes.
+
+### 14.2 Placement math (decode, batch-1 = bandwidth-bound)
+
+Every token reads every weight once; arithmetic intensity equalizes across
+quant types (~2-4 MAC/byte) -> cost ~ bytes/token / device-GB/s:
+
+| Device | ~Bandwidth | ~Watts | GB/s/W | Sweet spot |
+|--------|-----------|--------|--------|-----------|
+| RTX 3060 (master) | 360 GB/s | 170 W | 2.1 | heaviest layers + 204 MB lm_head |
+| GTX 1080 (slave) | 320 GB/s | 180 W | 1.8 | heavy layers |
+| GTX 1070 Ti (master) | 256 GB/s | 120 W | 2.1 | heavy layers |
+| GTX 960 (slave) | 112 GB/s | ~120 W | ~1.0 | light layers or control plane |
+| i7-3770 CPU | 20 GB/s | 45 W | 0.45 | f32 micro-ops (conv, gates, norms) — us each |
+
+Spec numbers are placeholders: agents MEASURE bandwidth at registration
+(memcpy GB/s probe), and the partitioner consumes measured profiles only.
+
+27B = ~13.8 GB of weight reads per token. Aggregate GPU bandwidth ~1 GB/s/W:
+theoretical ceiling ~75 tok/s; realistic M4 target **30 tok/s**. CPU-only:
+~1.4 tok/s. The f32 SSM tensors (<2 MB total/layer) cost GPU launch overhead
+(10-20 us) exceeding their compute, but run in us on the host CPU.
+
+### 14.3 Two regimes (the honesty constraint)
+
+- **Within one box** (CPU + 2 GPUs on master): per-tensor routing is nearly
+  free — activations cross PCIe in us. GPUs eat big matvecs; CPU runs
+  norms/gates/conv; recurrent state never leaves host RAM.
+- **Across boxes** (1 GbE): each cut costs one 20 KB activation hop ~160 us.
+  Per-tensor freedom across LAN = ~3000 hops/token = death. Cross-machine
+  placement = contiguous layer groups, few cuts (classical pipeline).
+
+### 14.4 The design: compile the model to the topology
+
+`PlacementPlan` — static artifact computed from (model card + measured device
+profiles), versioned like BMTS:
+- per-tensor device assignment within each machine
+- group cuts between machines (min-cut over byte-weighted op graph)
+- per-cut activation buffer specs (ACTS frames carry them)
+
+Algorithm: sort ops by bytes desc; greedy-place by GB/s-per-watt under VRAM
+capacity; merge to minimize cuts; lm_head pinned to fastest card.
+
+**The OS trick:** `budget 120w.` re-partitions *between requests*. Heavy
+tensors migrate toward efficient devices, the 960 idles out, tok/s moves,
+watts obey. The cluster recompiles itself to the power budget.
+
+Objective: Pareto (tok/s vs W/token) with contracts per run. Default:
+maximize tok/s under energy constraint.
+
+MoE extension (later): same problem — router picks experts per token;
+experts placed by aggregate touch-rate; hot experts replicated on the
+highest-bandwidth device.
+
+### 14.5 Plan amendments
+
+| Was | Becomes |
+|-----|---------|
+| `StageExecutor` trait | **`OpExecutor`** trait: per-tensor op dispatch (CpuMt today, wgpu next) |
+| QuantKind Tq1/Q8/Q4K | + Q3_K (84 B/blk), Q5_K (110 B), Q6_K (210 B); then IQ4_XS/IQ3_* — each with C-parity bit tests |
+| Fixed packing [4,17,17,26] | partitioner output from measured profiles |
+| Telemetry: power/temp/load | + measured memory bandwidth per device class |
+| New qwen35 ops needed | gated delta-rule state update, causal conv1d(4), partial MRoPE (sections [11,11,10], base 1e7), double norms |
+| Milestones | M1 gains ladder rung: **9B-Q6_K (7.5 GB) fits one 3060** = first single-GPU sanity run before 27B multi-card |
+
+### 14.6 Open decisions
+
+1. llama.cpp oracle for qwen35/delta arch (fork is Feb-2026; model is Aug) —
+   which build ran the user's downloads?
+2. Objective exposure: per-run contract (tok/s floor, W ceiling) — agreed.
+3. 960 role: light stage member vs control plane — decide after M3 measurement.
