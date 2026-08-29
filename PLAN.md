@@ -1101,3 +1101,19 @@ the combination, none of which we found together in any system:
 Next: r580 driver (2 GPUs live here) → bridge benchmark M2; 27B forward
 (its Q3_K/Q4_K/Q5_K mix already executes — needs swap-friendly loading or
 the slave RAM); slave bring-up; scx + ClassAd + modem per §16 deferred list.
+
+## 16.2 Build-Now Backlog (settled 2026-08-29 — this box, zero user action)
+
+Order: **A → B → E → C → D → F** (prove-it-then-speed-it).
+
+| # | Build | Success rationale | Gate |
+|---|-------|-------------------|------|
+| A | mmap shard loading → **27B full-model Rust differential** | The mountain itself runs on our kernels; page cache does the paging; oracle+Rust share clean pages of the same file | 27B logits vs llama.cpp: cos>0.999, top-1 equal |
+| B | GPU probe (nvidia-smi/Vulkan) + NodeEntry vram/compute fields + scheduler ranking + `n1.gpu?` | 3060 live NOW; slaves join a GPU-literate graph | probe test vs recorded CSV + real 3060 |
+| E | `tools/m2_bridge.sh` — pre-staged CUDA build + benchmark script (needs user `pacman -S cuda`) | One user command turns into M2 baseline + wgpu-priority data | produces PLAN results table |
+| C | AVX1 fused dequant-dot (Q6_K/Q4_K hot loops) + head-parallel delta recurrence | measurable here (i7-3770 has AVX1); runtime-gated AVX2 later; kills "glacial CPU" objection | parity cos>0.999 vs scalar; tok/s reported |
+| D | bring-up kit: `discover.` subnet sweep, `deploy --shards` (checksum+resume), `--packing w1,w2,..` weighted layers | hardware weekend becomes hours; kills hardcoded IPs | synthetic + loopback tests |
+| F | CI: fast tier on commit, `--ignored` parity ladder nightly | the discipline becomes infrastructure | scripts/ci |
+
+**Not now (by decision):** wgpu kernels (wait for E's numbers), HDMI modem,
+chunked-delta prefill, 27B *throughput*.
