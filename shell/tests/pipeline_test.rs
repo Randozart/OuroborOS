@@ -62,7 +62,7 @@ fn tq1(payload_len_rows: usize, in_len: usize, rng: &mut Rng) -> Vec<u8> {
 }
 
 /// Build one shard file; returns path.
-fn make_shard(dir: &PathBuf, node: u16, layers: &[u32], cfg: &ArchConfig, rng: &mut Rng, first: bool, last: bool) -> PathBuf {
+fn make_shard(dir: &std::path::Path, node: u16, layers: &[u32], cfg: &ArchConfig, rng: &mut Rng, first: bool, last: bool) -> PathBuf {
     let mut tensors: Vec<BmtsTensor> = Vec::new();
     let mut data: Vec<u8> = Vec::new();
     let mut off = 0u64;
@@ -230,7 +230,7 @@ fn test_rung_b_real_model() {
     let refs: Vec<String> = plan.nodes.iter().map(|s| s.file.clone()).collect();
     let refsl: Vec<&str> = refs.iter().map(|r| r.as_str()).collect();
     let mut m = PipelineModel::load(&refsl, cfg).expect("oracle load");
-    let mut mparams = None;
+    let mparams;
     {
         // tokenize once via a throwaway vocab-only load in THIS process
         let v = bitnet_rs::BitNetModel::load_vocab_only(&model).unwrap();
@@ -238,7 +238,7 @@ fn test_rung_b_real_model() {
     }
     let toks = mparams.unwrap();
     assert!(!toks.is_empty(), "tokenizer produced nothing");
-    let ids32: Vec<i32> = toks.iter().map(|t| *t as i32).collect();
+    let ids32: Vec<i32> = toks.to_vec();
     let idus: Vec<usize> = ids32.iter().map(|i| *i as usize).collect();
     let mut h = m.prefill(&idus).unwrap();
     let mut pos = idus.len();

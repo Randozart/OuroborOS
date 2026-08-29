@@ -19,6 +19,7 @@ fn agent_binary() -> PathBuf {
 }
 
 /// Start an agent process on a random port. Returns (child, port).
+#[allow(clippy::zombie_processes)]
 fn start_agent() -> (Child, u16) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();

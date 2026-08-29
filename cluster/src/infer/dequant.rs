@@ -57,20 +57,20 @@ fn tq1_block(bytes: &[u8], out: &mut [f32]) {
 
     let mut o = 0;
     for n in 0..5 {
-        for m in 0..32 {
-            out[o] = trit(qs[m], n);
+        for &b in qs.iter().take(32) {
+            out[o] = trit(b, n);
             o += 1;
         }
     }
     for n in 0..5 {
-        for m in 0..16 {
-            out[o] = trit(qs[32 + m], n);
+        for &b in &qs[32..48] {
+            out[o] = trit(b, n);
             o += 1;
         }
     }
     for n in 0..4 {
-        for j in 0..4 {
-            out[o] = trit(qh[j], n);
+        for &b in qh.iter() {
+            out[o] = trit(b, n);
             o += 1;
         }
     }
@@ -79,7 +79,7 @@ fn tq1_block(bytes: &[u8], out: &mut [f32]) {
 /// Dequantize a full TQ1_0 tensor row-major payload into new f32 vec.
 /// `bytes` length must be a multiple of 54 (k = len/54*256).
 pub fn dequant_tq1_0(bytes: &[u8]) -> Vec<f32> {
-    assert!(bytes.len() % TQ1_0_BLOCK_BYTES == 0, "misaligned TQ1_0 payload");
+    assert!(bytes.len().is_multiple_of(TQ1_0_BLOCK_BYTES), "misaligned TQ1_0 payload");
     let n = bytes.len() / TQ1_0_BLOCK_BYTES * QK_K;
     let mut out = vec![0.0f32; n];
     for (bi, chunk) in bytes.chunks_exact(TQ1_0_BLOCK_BYTES).enumerate() {
@@ -123,7 +123,7 @@ fn q8_block(bytes: &[u8], out: &mut [f32]) {
 
 /// Dequantize a full Q8_0 payload.
 pub fn dequant_q8_0(bytes: &[u8]) -> Vec<f32> {
-    assert!(bytes.len() % Q8_0_BLOCK_BYTES == 0, "misaligned Q8_0 payload");
+    assert!(bytes.len().is_multiple_of(Q8_0_BLOCK_BYTES), "misaligned Q8_0 payload");
     let n = bytes.len() / Q8_0_BLOCK_BYTES * 32;
     let mut out = vec![0.0f32; n];
     for (bi, chunk) in bytes.chunks_exact(Q8_0_BLOCK_BYTES).enumerate() {
@@ -172,7 +172,7 @@ fn q4k_block(bytes: &[u8], out: &mut [f32]) {
 
 /// Dequantize a full Q4_K payload.
 pub fn dequant_q4_k(bytes: &[u8]) -> Vec<f32> {
-    assert!(bytes.len() % Q4_K_BLOCK_BYTES == 0, "misaligned Q4_K payload");
+    assert!(bytes.len().is_multiple_of(Q4_K_BLOCK_BYTES), "misaligned Q4_K payload");
     let n = bytes.len() / Q4_K_BLOCK_BYTES * QK_K;
     let mut out = vec![0.0f32; n];
     for (bi, chunk) in bytes.chunks_exact(Q4_K_BLOCK_BYTES).enumerate() {
@@ -287,7 +287,7 @@ fn q3k_block(bytes: &[u8], out: &mut [f32]) {
     const K1: u32 = 0x03030303;
     const K2: u32 = 0x0f0f0f0f;
     let tmp = aux[2];
-    let na0 = (aux[0] & K2) | (((tmp >> 0) & K1) << 4);
+    let na0 = (aux[0] & K2) | ((tmp & K1) << 4);
     let na1 = (aux[1] & K2) | (((tmp >> 2) & K1) << 4);
     let na2 = ((aux[0] >> 4) & K2) | (((tmp >> 4) & K1) << 4);
     let na3 = ((aux[1] >> 4) & K2) | (((tmp >> 6) & K1) << 4);
@@ -405,7 +405,7 @@ pub fn dequant_q6_k(bytes: &[u8]) -> Vec<f32> {
 }
 
 fn qk_full(bytes: &[u8], blk: usize, f: fn(&[u8], &mut [f32])) -> Vec<f32> {
-    assert!(bytes.len() % blk == 0, "misaligned payload");
+    assert!(bytes.len().is_multiple_of(blk), "misaligned payload");
     let mut out = vec![0.0f32; bytes.len() / blk * QK_K];
     for (i, chunk) in bytes.chunks_exact(blk).enumerate() {
         f(chunk, &mut out[i * QK_K..(i + 1) * QK_K]);
@@ -444,7 +444,7 @@ mod tests {
         assert_eq!(f16_to_f32(0xbc00), -1.0);
         assert_eq!(f16_to_f32(0x3800), 0.5);
         assert_eq!(f16_to_f32(0x7c00), f32::INFINITY);
-        assert!((f16_to_f32(0x3555) - 0.333251953125).abs() < 1e-9);
+        assert!((f16_to_f32(0x3555) - 0.333_251_95).abs() < 1e-9);
         // smallest subnormal f16 = 2^-24
         assert!((f16_to_f32(0x0001) - 5.9604645e-8).abs() < 1e-12);
     }

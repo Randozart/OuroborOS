@@ -84,13 +84,13 @@ pub fn matvec_q(payload: &[u8], kind: QuantKind, out_len: usize, in_len: usize, 
 /// y = W * x with W raw f32 row-major payload.
 pub fn matvec_f32raw(payload: &[u8], out_len: usize, in_len: usize, x: &[f32]) -> Vec<f32> {
     let mut y = vec![0.0f32; out_len];
-    let f = |i: usize| f32::from_le_bytes(payload[i * 4..i * 4 + 4].try_into().unwrap());
-    for o in 0..out_len {
+    for (o, oy) in y.iter_mut().enumerate() {
+        let base = &payload[o * in_len * 4..(o + 1) * in_len * 4];
         let mut s = 0.0f32;
-        for i in 0..in_len {
-            s += f(o * in_len + i) * x[i];
+        for (xi, w) in x.iter().zip(base.chunks_exact(4)) {
+            s += f32::from_le_bytes(w.try_into().unwrap()) * xi;
         }
-        y[o] = s;
+        *oy = s;
     }
     y
 }

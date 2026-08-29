@@ -84,11 +84,11 @@ fn test_q356_k_parity_with_c() {
 
     // sanitize scale bytes so we never touch inf/nan f16 patterns:
     // f16 bytes: high byte < 0x7c -> finite/normal
-    let mut buf = raw.clone();
+    let _buf = raw.clone();
     fn sanitize(b: &mut [u8], blk: usize, scale_offsets: &[usize]) {
         for chunk in b.chunks_mut(blk) {
             for &o in scale_offsets {
-                chunk[o + 1] = chunk[o + 1] % 0x78; // high byte of half keeps exp < inf
+                chunk[o + 1] %= 0x78; // high byte of half keeps exp < inf
             }
         }
     }

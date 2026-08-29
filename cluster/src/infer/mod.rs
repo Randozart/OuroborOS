@@ -10,6 +10,7 @@
 //! - final: output_norm -> tied lm_head (token_embd^T)
 
 mod dequant;
+pub mod qwen35;
 mod ops;
 
 pub use dequant::{
@@ -160,7 +161,7 @@ impl Stage {
         if !self.tensors.contains_key("token_embd.weight") {
             bail!("stage has no tied head");
         }
-        Ok(self.wm("token_embd.weight", hidden)?)
+        self.wm("token_embd.weight", hidden)
     }
 
     /// Greedy next-token over the tied head (NaN-robust).
@@ -259,16 +260,16 @@ impl Stage {
             let qh = &q[h * hd..(h + 1) * hd];
             let kvh = h / groups;
             let mut scores = vec![0.0f32; seq];
-            for t in 0..seq {
+            for (t, sc) in scores.iter_mut().enumerate() {
                 let kt = &kv.k[t * c.kv_dim() + kvh * hd..t * c.kv_dim() + (kvh + 1) * hd];
-                scores[t] = ops::dot(qh, kt) * scale;
+                *sc = ops::dot(qh, kt) * scale;
             }
             softmax(&mut scores);
             let o = &mut out[h * hd..(h + 1) * hd];
-            for t in 0..seq {
+            for (t, &w) in scores.iter().enumerate() {
                 let vt = &kv.v[t * c.kv_dim() + kvh * hd..t * c.kv_dim() + (kvh + 1) * hd];
                 for i in 0..hd {
-                    o[i] += scores[t] * vt[i];
+                    o[i] += w * vt[i];
                 }
             }
         }
