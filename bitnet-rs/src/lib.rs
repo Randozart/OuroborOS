@@ -1,0 +1,208 @@
+use anyhow::Result;
+use std::ffi::CString;
+use std::os::raw::{c_char, c_int};
+use std::ptr;
+
+mod bindings {
+    #![allow(dead_code, non_snake_case, non_camel_case_types, non_upper_case_globals, clippy::all)]
+    include!(concat!(env!("OUT_DIR"), "/bindings.rs"));
+}
+
+use bindings::*;
+
+/// Safe wrapper around a loaded BitNet model + inference context.
+pub struct BitNetModel {
+    model: *mut llama_model,
+    ctx: *mut llama_context,
+    n_ctx: u32,
+}
+
+unsafe impl Send for BitNetModel {}
+
+impl BitNetModel {
+    /// Load a BitNet GGUF model and create an inference context.
+    pub fn load(model_path: &str, n_ctx: u32, n_threads: u32) -> Result<Self> {
+        unsafe {
+            llama_backend_init();
+
+            let mut mparams = llama_model_default_params();
+            mparams.n_gpu_layers = 0;
+            mparams.use_mmap = true;
+
+            let c_path = CString::new(model_path)?;
+            let model = llama_model_load_from_file(c_path.as_ptr(), mparams);
+            if model.is_null() {
+                anyhow::bail!("Failed to load model: {}", model_path);
+            }
+
+            let mut cparams = llama_context_default_params();
+            cparams.n_ctx = n_ctx;
+            cparams.n_batch = 512;
+            cparams.n_ubatch = 512;
+            cparams.n_threads = n_threads as c_int;
+            cparams.n_threads_batch = n_threads as c_int;
+
+            let ctx = llama_init_from_model(model, cparams);
+            if ctx.is_null() {
+                llama_model_free(model);
+                anyhow::bail!("Failed to create context");
+            }
+
+            let actual_n_ctx = llama_n_ctx(ctx);
+
+            Ok(Self {
+                model,
+                ctx,
+                n_ctx: actual_n_ctx,
+            })
+        }
+    }
+
+    pub fn n_ctx(&self) -> u32 {
+        self.n_ctx
+    }
+
+    pub fn model_ptr(&self) -> *mut llama_model {
+        self.model
+    }
+
+    /// Tokenize text into token IDs.
+    pub fn tokenize(&self, text: &str, add_special: bool) -> Vec<llama_token> {
+        unsafe {
+            let vocab = llama_model_get_vocab(self.model);
+            let c_text = match CString::new(text) {
+                Ok(c) => c,
+                Err(_) => return Vec::new(),
+            };
+            let text_len = text.len() as c_int;
+
+            let need = llama_tokenize(
+                vocab,
+                c_text.as_ptr(),
+                text_len,
+                ptr::null_mut(),
+                0,
+                add_special,
+                false,
+            );
+            if need == 0 {
+                return Vec::new();
+            }
+            // Negative return = required buffer size (llama.cpp convention)
+            let cap = if need < 0 { (-need) as usize } else { need as usize };
+
+            let mut tokens = vec![0 as llama_token; cap];
+            let got = llama_tokenize(
+                vocab,
+                c_text.as_ptr(),
+                text_len,
+                tokens.as_mut_ptr(),
+                cap as c_int,
+                add_special,
+                false,
+            );
+            if got < 0 {
+                return Vec::new();
+            }
+            tokens.truncate(got as usize);
+            tokens
+        }
+    }
+
+    /// Detokenize a single token to text.
+    pub fn token_to_piece(&self, token: llama_token) -> String {
+        unsafe {
+            let vocab = llama_model_get_vocab(self.model);
+            let mut buf = vec![0u8; 256];
+            let n = llama_token_to_piece(vocab, token, buf.as_mut_ptr() as *mut c_char, buf.len() as c_int, 0, false);
+            if n <= 0 {
+                return String::new();
+            }
+            buf.truncate(n as usize);
+            String::from_utf8_lossy(&buf).into_owned()
+        }
+    }
+
+    /// Run one decode step on a single token, return sampled token.
+    pub fn step(&self, smpl: *mut llama_sampler, mut last_token: llama_token) -> Result<llama_token> {
+        unsafe {
+            let batch = llama_batch_get_one(&mut last_token, 1);
+            let ret = llama_decode(self.ctx, batch);
+            if ret != 0 {
+                anyhow::bail!("llama_decode failed: {}", ret);
+            }
+            let tok = llama_sampler_sample(smpl, self.ctx, -1);
+            Ok(tok)
+        }
+    }
+
+    /// Generate text autoregressively (greedy).
+    pub fn generate(&self, prompt: &str, max_tokens: u32) -> Result<String> {
+        unsafe {
+            let mut tokens = self.tokenize(prompt, true);
+            if tokens.is_empty() {
+                anyhow::bail!("Failed to tokenize prompt");
+            }
+
+            let chain_params = llama_sampler_chain_default_params();
+            let smpl = llama_sampler_chain_init(chain_params);
+            llama_sampler_chain_add(smpl, llama_sampler_init_greedy());
+
+            let vocab = llama_model_get_vocab(self.model);
+            let mut out = String::new();
+
+            // Prefill: all prompt tokens at once.
+            let prefill = llama_batch_get_one(tokens.as_mut_ptr(), tokens.len() as c_int);
+            if llama_decode(self.ctx, prefill) != 0 {
+                llama_sampler_free(smpl);
+                anyhow::bail!("prefill decode failed");
+            }
+            let mut cur = llama_sampler_sample(smpl, self.ctx, -1);
+
+            for _ in 0..max_tokens {
+                if llama_vocab_is_eog(vocab, cur) {
+                    break;
+                }
+                out.push_str(&self.token_to_piece(cur));
+                match self.step(smpl, cur) {
+                    Ok(next) => cur = next,
+                    Err(_) => break,
+                }
+            }
+
+            llama_sampler_free(smpl);
+            Ok(out)
+        }
+    }
+
+    /// Benchmark prompt processing + generation, return tok/s for both phases.
+    pub fn benchmark(&self, prompt: &str, n_gen: u32) -> Result<(f64, f64)> {
+        let tokens = self.tokenize(prompt, true);
+        if tokens.is_empty() {
+            anyhow::bail!("Failed to tokenize prompt");
+        }
+
+        let t0 = std::time::Instant::now();
+        let out = self.generate(prompt, n_gen)?;
+        let elapsed = t0.elapsed().as_secs_f64();
+
+        let pp = tokens.len() as f64 / elapsed;
+        let tg = if n_gen > 0 { n_gen as f64 / elapsed } else { 0.0 };
+        let _ = out;
+        Ok((pp, tg))
+    }
+}
+
+impl Drop for BitNetModel {
+    fn drop(&mut self) {
+        unsafe {
+            if !self.ctx.is_null() {
+                llama_free(self.ctx);
+            }
+            if !self.model.is_null() {
+                llama_model_free(self.model);
+            }
+            llama_backend_free();
+        }
+    }
+}

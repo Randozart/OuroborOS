@@ -1,5 +1,5 @@
 [workspace]
-members = ["cluster", "shell", "agent"]
+members = ["cluster", "shell", "agent", "bitnet-rs"]
 resolver = "2"
 
 [workspace.package]
