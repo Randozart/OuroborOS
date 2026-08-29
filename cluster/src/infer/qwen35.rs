@@ -241,6 +241,8 @@ pub struct Card {
     pub n_head_kv: usize,
     pub n_ff: usize,
     pub n_vocab: usize,
+    #[serde(default)]
+    pub head_dim: usize,
     pub eps: f32,
     pub rope_base: f32,
     pub n_rot: usize,
@@ -257,8 +259,13 @@ impl Card {
         self.ssm.d_inner / self.ssm.n_v_heads
     }
     pub fn attn_head_dim(&self) -> usize {
-        self.n_embd / self.n_head
+        if self.head_dim > 0 {
+            self.head_dim
+        } else {
+            self.n_embd / self.n_head
+        }
     }
+
     /// true if layer il uses gated delta-net, false = full attention
     pub fn is_delta(&self, il: usize) -> bool {
         !(il + 1).is_multiple_of(self.full_attention_interval)
@@ -540,7 +547,7 @@ impl Qwen35Stage {
         let nh = c.n_head;
         let nkv = c.n_head_kv;
         let hd = c.attn_head_dim();
-        let dim = c.n_embd;
+        let qdim = nh * hd;
 
         let qfull = self.inner.wmat(&format!("blk.{}.attn_q.weight", il), h)?;
         let qn = self.inner.vec_gain(&format!("blk.{}.attn_q_norm.weight", il))?;
@@ -548,17 +555,16 @@ impl Qwen35Stage {
         let mut k = self.inner.wmat(&format!("blk.{}.attn_k.weight", il), h)?;
         let v = self.inner.wmat(&format!("blk.{}.attn_v.weight", il), h)?;
 
-        let mut q = vec![0.0f32; dim];
-        let mut gate = vec![0.0f32; dim];
+        // attn_q output is per-head [q(hd) | gate(hd)] interleaved
+        let mut q = vec![0.0f32; qdim];
+        let mut gate = vec![0.0f32; qdim];
         for hi in 0..nh {
-            let (mut qh, gh): (Vec<f32>, Vec<f32>) = (
-                qfull[hi * hd * 2..hi * hd * 2 + hd].to_vec(),
-                qfull[hi * hd * 2 + hd..hi * hd * 2 + hd * 2].to_vec(),
-            );
+            let mut qh = qfull[hi * hd * 2..hi * hd * 2 + hd].to_vec();
+            let gh = &qfull[hi * hd * 2 + hd..hi * hd * 2 + hd * 2];
             let y = rmsnorm_head(&qh, &qn, c.eps);
             qh.copy_from_slice(&y);
             q[hi * hd..(hi + 1) * hd].copy_from_slice(&qh);
-            gate[hi * hd..(hi + 1) * hd].copy_from_slice(&gh);
+            gate[hi * hd..(hi + 1) * hd].copy_from_slice(gh);
         }
         for hi in 0..nkv {
             let kh = &k[hi * hd..(hi + 1) * hd];
@@ -579,11 +585,11 @@ impl Qwen35Stage {
         a.seq += 1;
 
         let ctx = AttnCtx { hd, kv_dim: nkv * hd, scale: 1.0 / (hd as f32).sqrt(), seq: a.seq, k: &a.k, v: &a.v };
-        let mut o = vec![0.0f32; dim];
+        let mut o = vec![0.0f32; qdim];
         for hi in 0..nh {
             attn_head(&q[hi * hd..(hi + 1) * hd], &ctx, hi / (nh / nkv), &mut o[hi * hd..(hi + 1) * hd])?;
         }
-        for i in 0..dim {
+        for i in 0..qdim {
             o[i] *= 1.0 / (1.0 + (-gate[i]).exp());
         }
         self.inner.wmat(&format!("blk.{}.attn_output.weight", il), &o)

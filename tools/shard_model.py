@@ -86,6 +86,8 @@ def build_model_card(kv):
         "eps": p.get("attention.layer_norm_rms_epsilon", 1e-5),
         "rope_base": p.get("rope.freq_base", 10000.0),
         "n_rot": p.get("rope.dimension_count", 0),
+        "head_dim": p.get("attention.key_length", 0),
+        "head_v_dim": p.get("attention.value_length", 0),
         "full_attention_interval": p.get("full_attention_interval", 1),
         "nextn": p.get("nextn_predict_layers", 0),
         "ssm": {
