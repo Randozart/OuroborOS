@@ -270,3 +270,33 @@ Words that must never be load-bearing again in this codebase:
 Replacements: *measured, priced, reserved, revoked, fused, capable, chosen.*
 
 When the i7 is an IO device, the vocabulary follows.
+
+## Appendix C — Lineage and Delta (see PLAN.md §15 for full provenance)
+
+**Doctrine adopted here has names and dates. We inherit deliberately; we
+extend precisely.** The failure this appendix prevents is the conceit that no
+one ever thought this — the mirror image of cargo-culting.
+
+| Ancestor | Era | Claim on our Articles | What we add beyond it |
+|---|---|---|---|
+| LOCUS → OpenSSI → Kerrighed (single-system-image clusters) | 1980s-2012 | Art. 3 ("one machine") | SSI presented a cluster as one Unix box; none placed *model operations* on a *cost-priced* graph, none gated moves on equivalence proofs |
+| Exokernel (Aegis/ExOS, Engler/Kaashoek, SOSP'95) | 1995 | Art. 2, 7, 10 wholesale: expose hardware/names/events, secure bindings, **visible revocation** | Our "library OS" is one workload — an LLM compute-graph spanning *multiple chassis*; watts are policy inputs; rebindings re-verified by parity contracts |
+| Multikernel/Barrelfish (SOSP'09) | 2009 | Art. 3, 5 (machine = network of substrates) | We move the abstraction one octave up: cores → whole machines, CPU-driver → per-chassis graph fragment |
+| Beowulf (Sterling/Becker, 1994) | 1994 | The economic thesis (COTS scrap → capable machine); their dual-Ethernet **channel bonding** from *the network being inadequate* | Same bottleneck finding 31 years later, same answer, new ports: GbE + display cables bonded by one arbiter |
+| HTCondor (ICDCS'88→) | 1988 | Art. 9-5 (idle = reserved), opportunistic + checkpoint-migrate | ClassAd-style matchmaking adopted for PlacementPlan; we migrate *stateful GPU-resident* computation under equivalence gates |
+| sched_ext (mainline Linux 6.12+, Meta/Google) | 2024 | Art. 2/6 legitimacy: replacing kernel defaults is *sanctioned engineering*, with watchdog-safe fallback | We run it across chassis and against a model-graph, not per-box threads |
+| Singularity (arXiv 2202.07848), GPUVM (2411.05309) | 2021-2024 | Art. 6 proof-of-direction: OS removal from critical path is where modern systems work is happening | They move memory/jobs around the host OS; the Ouroboros clause moves the OS's own brain (bootstrap-seed invariant, Art. 4) |
+| GeForce-P2P unlock (tinygrad 565.x → aikitoria → QuixiAI 610.57.04; NCCL 2.7→24.7 GB/s measured) | 2023-2026 | **Art. 8 exhibit A**: the "hard limit" was a driver *policy*; fuses (HDCP) vs locks (P2P allowlist) are distinguishable and the distinction is profitable | We keep the audit discipline: every "can't" re-checked for a lockpick *and* a price |
+| APEnet+/FPGA² (2013-2014), SDI IP cores, Numato Opsis FOSS DisplayPort, Nyuzi/Vortex open GPGPUs | 2013-2021 | Art. 1 hardware evidence: video-serial PHYs, open display-protocol gateware, and FPGA↔GPU direct DMA are a decade of practice | We wire them as *online fabric of one OS*, feeding a pipeline-parallel LLM, scheduled by watts |
+
+**Honest gaps in this ledger:** the SDI GPGPU project recalled as
+"Interocitor" remains **[unverified]** — search resolves to a 1949 novel;
+APEnet+ and FPGA² stand as verified substitutes. "SING: OS abstractions for
+CPUs+GPUs" is likewise recalled from memory, not verified this pass;
+Singularity/GPUVM above are its verified successors. Neither unverified item
+bears load on any article.
+
+**Standing rule (Art. 11 extension):** any future claim of novelty in this
+project must survive a provenance check logged in PLAN.md §15 before it
+appears in an abstract or a README. Inheritance cited; deltas numbered;
+nothing else.

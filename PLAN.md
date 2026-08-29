@@ -9,7 +9,8 @@ cargo cult and must be rejected at review (Constitution Art. 11).
 
 **Reading guide:** §1-4 = why (the thesis), §5-9 = how (phases, protocol,
 weights), §13 = the Qwen Program (the summit), §14 = heterogeneous weight
-placement + HDMI modem (the constitution's first full applications).
+placement + HDMI modem (the constitution's first full applications), §15 = prior art
+& lineage (provenance; read before claiming novelty).
 
 ---
 
@@ -919,3 +920,141 @@ paths, R3 EDID limits (the stick's own EDID caps at 1080p60 - fine).
 **Why it belongs:** it is the thesis in hardware - ports everyone dismissed as
 display-only, repurposed as data planes by an OS that owns the whole stack.
 Prior art validates the class: Interocitor (GPGPU<->FPGA over SDI, 2015).
+
+## 15. Prior Art & Lineage (verified 2026-08-29, provenance below)
+
+**Purpose of this section:** every claim we make is checked against what the
+world has already built — so we cargo-cult neither OS conventions nor our own
+originality. Items marked **[unverified]** are recalled, not confirmed this
+pass. Confidence in the six surviving deltas (15.9) rises *because* the
+surrounding space is occupied by excellent work.
+
+### 15.1 Distributed LLM inference on commodity hardware
+
+| Work | Provenance | What it establishes | Status vs us |
+|------|-----------|--------------------|--------------|
+| llama.cpp RPC backend | github.com/ggml-org/llama.cpp/tree/master/tools/rpc | Official distributed path: `ggml-rpc-server` exposes devices; weights+KV split proportionally to device memory; `--tensor-split` override; worker-side tensor cache (`-c`); **RDMA auto-negotiated over RoCEv2 when libibverbs present**; documented "proof-of-concept, fragile and insecure" | Reinvented at tool level; their worker cache is our shard-deploy resume design; their insecurity is our contract-Article-10 opening |
+| Distributed-inference field survey + benchmarks | localaimaster.com/blog/distributed-inference-local-ai (2026-02-26) | 70B Q4_K_M 2-node: **2.8 tok/s @1GbE, 6.1 @2.5GbE, 7.4 @10GbE, 7.6 @TB4**; pipeline carries only ~8-16 KB activations/token; cross-machine vLLM TP "unusable on 1GbE"; tool comparison table (RPC 6.1, exo 4.3, Petals 0.9 tok/s); verdict: "distributed inference on old GPUs is a Saturday afternoon project" | Sets our honest baseline: capability is commodity — see 15.9 |
+| Multi-node guide | fungies.io/multi-node-local-llm-inference-guide-2026 (2026-07-01) | 10GbE = practical home minimum ($200 used ConnectX pair); PP cross-node + TP intra-node doctrine; heterogeneous mixing "performance limited by slowest card — isolate via PP" | Confirms §14.3 two-regimes independently |
+| exo | cited in llms.blog/decentralized-llm-inference (2026-08-23) | **Ring memory-weighted partitioning** across heterogeneous fleets (Mac/Linux/GPU); mDNS/UDP-multicast zero-config discovery; heartbeat + **cluster re-benchmark on node churn** | Our PlacementPlan = its compute-weighted generalization; steal discovery + churn re-plan |
+| Petals (NeurIPS 2023) | llms.blog + petals papers | Public volunteer swarm: Hivemind/libp2p DHT advertises layer blocks; latency-aware path construction; **8-bit activation quantization on the wire**; redundancy per block | Wire-activation quant = optional ACTS v2 mode for bad links |
+| CrossPipe (2025) | arxiv.org/html/2507.00217 (Hoefler group, ETH) | Latency-aware pipeline schedules via **MILP-solver or greedy** over bandwidth/latency models; 33.6% faster than naive under cross-DC constraints; MoE shifts preference further to PP | Validates §14.4 partitioner as solved-science shape; adopt solver-then-greedy pattern |
+| Decentralized inference survey | llms.blog (2026-08-23) | 160 syncs/token at 80 layers; PP = the only viable WAN strategy at ms latencies; KV loss on disconnect => re-evaluate prompt from scratch | Our per-stage KV = accepted risk; §2.6 checkpointing addresses it |
+
+### 15.2 Display links as data links (the HDMI modem question)
+
+| Work | Provenance | What it establishes | Status vs us |
+|------|-----------|--------------------|--------------|
+| hdmifiletransporter | github.com/MrDesjardins/hdmifiletransporter + docs.rs 1.0.0 (real transfer logged June 2025) | **Rust file-over-HDMI-to-USB-capture end to end.** Solved exactly our listed risks: captured frames are offset/scaled/overscanned/recompressed → **calibration ring with 3 finder patterns + affine registration**; per-frame CRC32 headers; density ladder (bw = 1bit/cell robust ↔ quantized 8 levels ↔ RGB); loop-and-retransmit reliability; a **planner** that searches (cell size × levels × fps) for fastest byte-exact config | Prior art for the channel; its registration ring, density ladder, and planner fold into our §14.7 design (15.10) |
+| vdxpy / VDX | github.com/blackocean-tech/vdxpy | Commercial-grade framing: Reed-Solomon per frame, SHA256 verified, profiled per capture device — **sold for air-gapped defense/OT/financial transfers** (display channel as data diode) | Second use case for our modem: one-way data diode falls out free |
+| hdmiFileTransfer | github.com/yesyesno8/hdmiFileTransfer (2025-04) | 720p@5fps QR-style, ~4.4 Mbps, 1px=1bit, no FEC — fragile PoC tier | Floor, not ceiling |
+| MS2130 capture IC | doc.ultrasemi.com/en/ic/macrosilicon/ms2130.html | HDMI-in ≤4K30; USB3.0 UVC; **YUV422 or MJPEG USB-out, default max 1080p60** (RGB444 needs MS2130S/MS2131) | Our 230-250 MB/s/dir figures grounded; YUY2 Y-passthrough = data channel confirmed by IC capability list |
+| YuzukiLOHCC-PRO | github.com/YuzukiHD/YuzukiLOHCC-PRO | Open-source MS2130 board with HDMI **loop-out** (monitor + capture on one cable path) | Enables the "console visible while carrying weights" mode (§14.7) |
+| SDI IP cores | Microchip SDI_TX user guide; AMD/Xilinx XAPP1290 | 270 Mbps–12 Gbps uncompressed serial-video is **standard FPGA transceiver protocol** with scrambling/CRC framing in silicon | Video-serial data planes are turnkey on the Kria; no capture chip needed FPGA↔FPGA |
+| Numato Opsis / hdmi2usb + FOSS DisplayPort core | hackaday.com 2015-10-02 (+comments: Mike Field's open DP core, 4K30 working) | Open-source FPGA implementations of display protocols exist (HDMI & DisplayPort PHY in free gateware) | Our modem TX/RX can be pure FOSS incl. PHY |
+| Nyuzi GPGPU | hackaday.com 2016-03-30 + github.com/jbush001/NyuziProcessor | Fully open 32-bit VLIW GPGPU SoC on FPGA, runs Quake | Deep-time proof of "FPGA as GPU" in our own lineage |
+| Vortex | MICRO'21, doi 10.1145/3466752.3480128 | RISC-V ISA extended for GPGPU; PCIe soft-GPU with OpenCL, up to 32 cores on Stratix-10/Alveo | Kria long game: carrier becomes a compute stage with its own ISA |
+| "Interocitor" (SDI GPGPU-FPGA link, ~2015) | **[unverified]** — searches resolve to the 1949 novel and unrelated repos; original project not confirmed this pass | Recalled as 1.5 Gbps SDI cross-machine GPGPU memory link | Cited as possibly-myth; verified substitutes: APEnet+, FPGA² (15.7) |
+
+### 15.3 Operating-system lineage (our school of thought)
+
+| Work | Provenance | Core idea | Relation to Constitution |
+|------|-----------|----------|--------------------------|
+| **Exokernel** (Aegis/ExOS) | Engler/Kaashoek/O'Toole, SOSP'95 PDF (research.cs.wisc.edu mirror; JHU mirror) + Engler thesis 1998 (hdl.handle.net/1721.1/16713) | "Operating systems limit performance/flexibility by *policy they impose*; **securely multiplex physical resources and let application-level software implement abstractions**." Principles: expose hardware, expose names, expose events, **visible revocation**, fine-grained protection. Measured: primitives 10-100× cheaper, web server ~10× faster | This *is* Articles 2/7/10 with 30 years of citations. Our delta: (a) the "application" is one model's op-graph, (b) resources span **multiple chassis**, (c) watts enter the policy, (d) parity contracts gate every re-binding |
+| **Multikernel / Barrelfish** | Baumann et al., SOSP'09 (barrelfish.org/publications) | Treat one machine as a **network of independent cores**; message-passing, state replication, hardware-neutrality across ISA-heterogeneous cores | Art. 3 inverted: they federated one box's cores; we federated whole boxes — same doctrine, one octave up |
+| **OpenSSI** | Wikipedia (verified 2026-08-29) | Single-system-image clustering: Compaq 2001, lineage LOCUS (UCLA, early '80s) → Locus Computing Corp → UnixWare NonStop Clusters → Linux port | "PCs that consider themselves separate work as one machine" is a named, 40-year-old program — we cite the line, and note none of the SSIs optimized *tensor placement* |
+| **Kerrighed** | Wikipedia + Lottiaux et al. CCGRID'05 comparative study (hal-01271223) | SSI with **process migration** over cluster (INRIA 1998-2012) | Ouroboros clause (Art. 4) has precedent for processes; moving the *scheduler itself* with the graph's authority (bootstrap-seed invariant) remains ours |
+| **HTCondor** | Litzkow et al., ICDCS 1988; Thain et al. "Cheap cycles…" + "Distributed Computing in Practice" (htcondor.org) | Opportunistic cycle scavenging of idle desktops; **ClassAd matchmaking language**; checkpoint-migrate; preemptive-resume | Art. 9-item-5 (idle=reserved) ancestor; ClassAd = ready-made formalism for our PlacementPlan request/offer matching (adopt, 15.10) |
+| **Beowulf** | Sterling/Becker et al., ICPP'95 (webhome.phy.duke.edu mirror); NASA history (ntrs.nasa.gov 20150001285); beowulf.org | 16 commodity 486 boards + **two channel-bonded Ethernets** ("the network, even in its dual configuration, is inadequate" — same finding, 31 yrs old); origin quote: "Cheap high-performance computing systems are virtually non existent… PC-compatible hardware is cheap and supports… Linux" | Our thesis is Beowulf's thesis for the GPU era; our bonded GbE + HDMI downlink is Becker's bonding move applied to *display ports* |
+
+### 15.4 GPU-OS integration & removing the host OS from the critical path
+
+| Work | Provenance | Finding | Relation |
+|------|-----------|---------|----------|
+| **Singularity** | arxiv.org/abs/2202.07848 | Device-proxy intercepts CUDA via LD_PRELOAD; GPU state decoupled from host address space → **transparent checkpoint/restore + live migration + time-slicing of GPU DNN jobs** (2-3% context switch overhead) | Live state relocation for *accelerated jobs* is production-proven; our Art. 4 (moving the orchestrator itself) extends beyond it |
+| **GPUVM** | arxiv.org/abs/2411.05309 | GPU threads drive paging **through the NIC** (one-sided RDMA), host OS removed from critical path, 4× UVM | Direct precedent for Art. 6: measured hop-killing, not vibes |
+| CUDA unified memory / HMM / ATS | docs.nvidia.com CUDA Programming Guide §2.6 | Industry converging on "all memory is one pool" from above (Grace-Hopper C2C hardware coherence) | We do it from below, on the cards the above-market rejects |
+| **sched_ext** | docs.kernel.org/scheduler/sched_ext.html + github.com/sched-ext/scx | Mainline Linux: BPF schedulers with DSQ queues, verifier safety, **watchdog auto-revert to fair scheduler**; Meta/Google production use; shipped by gaming distros incl. CachyOS | Article 6's first sanctioned lever: `scx` for stage-host isolation is a config file away on the master today |
+
+### 15.5 Energy-first scheduling
+
+| Work | Provenance | Finding | Relation |
+|------|-----------|---------|----------|
+| Black-box energy-aware CPU/GPU partitioning | Barik et al., doi 10.1145/2854038.2854052 (PODS'16) | Power-model + workload profiling partitions kernels across CPU/GPU to 93-96% of oracle **energy-delay product** | Same optimization at core level; nobody runs it over a LAN fabric |
+| Co-Cap | CECS-TR-15-05 (UC Irvine) | Coordinated CPU+GPU frequency capping, 10-23% energy/frame | Confirms: independent governors leave energy on table — same logic as independent *schedulers* |
+| CGM-DVFS | MDPI Future Internet 14(3):91, 2022 | DVFS extended to **memory** too: +26% power, +21% thermal efficiency | When we control clocks we'll price memory rails too |
+
+### 15.6 Ternary/low-bit inference (our model class)
+
+| Work | Provenance | Finding | Relation |
+|------|-----------|---------|----------|
+| Microsoft BitNet repo | github.com/microsoft/BitNet | **Official GPU kernel released 2025-05-20** ("extending 1-bit inference beyond CPUs"); CPU kernels: x86 up to 6.17× speedup, 82.2% energy cut; ARM 5.07×/70%; **100B b1.58 model at 5-7 tok/s on ONE CPU** | The industry's answer to "big BitNet" is a monster single CPU — our counter: price/W of the cards that CUDA-13 orphans, and 100B weights remain research-only |
+| bitnet.cpp (ACL 2025) | arxiv.org/abs/2502.11880 | TL1 (ARM), **TL2 (x86 LUT)**, I2_S (MAD, lossless); TL2_0 beats TQ1_0 1.33-1.65×; model-support table: 2B-4T x86 = I2_S+TL2 | Confirms our fork finding (TQ1_0 native runs fine; TL2 optional); our Rust parity path must eventually benchmark vs TL2 not just TQ1 |
+
+### 15.7 PCIe peer-to-peer: "policy, not a wall" case study (Article 2's proof)
+
+| Step | Provenance | Fact |
+|------|-----------|------|
+| 1. The lock | NVIDIA drivers refuse P2P on GeForce | every GPU-GPU byte staged through host RAM |
+| 2. The crack | github.com/tinygrad/open-gpu-kernel-modules (cited in forks as 565.57.01-era patch, George Hotz) | hand-built BAR1 page-table aliases: **P2P shown to be driver policy** |
+| 3. Simplification | github.com/aikitoria/open-gpu-kernel-modules (610.43.03) | clean port; `RMForceP2PType=1`; requires `iommu=pt` + **ACS override** ("ACS on root ports forces all GPU-to-GPU traffic through the CPU root complex") |
+| 4. Productionization | github.com/QuixiAI/open-gpu-kernel-modules (Eric Hartford, 610.57.04) | 610 driver ships NVIDIA's own BAR1-P2P path, never selected on GeForce; one-commit force-enable over Turing/Ampere/Ada/Blackwell (open kernel module floor = **Turing**; Pascal/Maxwell stay locked out — legacy driver branch has no open modules). Verified: **NCCL all-reduce busbw 2.7 → 24.7 GB/s** (8×3090); needs BAR1 ≥ VRAM (ReBAR/resize dance) |
+| 5. FPGA analogues | FPGA² (doi 10.1109/reconfig.2013.6732296): open-source **direct FPGA↔GPU DMA**, >5 GB/s, needed gdev/nouveau to even read GPU buffer physical addresses; APEnet+ (INFN): FPGA PCIe board, GPU BAR access, custom torus fabric, 34 Gbps/link, RDMA semantics in fabric | Direct-DMA bypass of host staging across vendors is a decade-old open practice |
+
+**Consequence:** our master's 3060+1070Ti pair cannot use this unlock (mixed generations + Pascal lacks open modules + no P2P need at 1 GPU per box today) — but the case is *exhibit A* for Article 8's distinction and Article 2's program. Documented so future silicon (a pair of 3090s from the e-waste stream) activates a known path.
+
+### 15.8 Optical/side channels (lowered expectations)
+
+LiFi-class: OpenVLC ~150 Kbps @4m; LiFOD 400 Kbps (doi in TOSN; MCU-rate-limited, "FPGA could reach MHz/GHz"). Verdict: hobby optical = Kbps tier; interesting only as the audio-jack **clock-distribution** microsecond idea (no prior art found either way — [open probe], cheap to test, tiny reward).
+
+### 15.9 What survives scrutiny — the six deltas
+
+The capability ("run 70B across old machines") is **commodity**: llama.cpp RPC
+does it tonight with no auth and no contracts. OurobourOS is differentiated by
+the combination, none of which we found together in any system:
+
+1. **Contract-gated re-placement** — no prior live-migration (exo churn,
+   Singularity checkpoint, llama RPC split) re-verifies model *equivalence*
+   (bit-identity parity ladder) after every hardware change. Contracts are the
+   safety case for radical flexibility (Art. 10).
+2. **Watts as a fabric-level recompile axis** — energy scheduling exists at
+   DVFS/core-partition level; `budget 120w.` physically **relocating tensors
+   between cards and regenerating PlacementPlan** we found nowhere.
+3. **Online bonded affordance fabric** — HDMI-modem prior art is all
+   *offline file transfer*; carrying a *running pipeline's* weight streams over
+   bonded display+Ethernet edges chosen by measured per-flow price is new
+   territory (Beowulf's bonding, applied to purpose-free ports).
+4. **Ouroboros control plane** — SSI/Condor/exo migrate applications; the OS
+   migrating **its own scheduler with bootstrap-seed invariant** we did not
+   find.
+5. **CUDA-orphan compute pooling** — bitnet.cpp's GPU kernel + vLLM/Triton
+   ecosystems assume CUDA≥Turing/Volta-class or recent ROCm. Deliberately
+   building the long tail of Maxwell/Pascal *because* the industry just
+   deprecated them, via wgpu-first kernels: unclaimed ground.
+6. **Ownership of the whole path** — display server, NIC queues, 1588,
+   revocation, scanout DMA in one arbiter (Art. 3). Tools above the OS can't
+   reach these levers; that is structural, not effort.
+
+### 15.10 Adoption list (concrete, from provenance above)
+
+1. **Modem v1 design inputs** (hdmifiletransporter/vdxpy): calibration ring +
+   affine registration; per-frame CRC + sequence; Reed-Solomon option;
+   density ladder (robust bw ↔ dense quantized); **encoding-speed planner**
+   that searches (resolution×levels×fps) for max byte-exact throughput —
+   fold all into §14.7 implementation.
+2. **Worker-side tensor cache** (llama RPC `-c` pattern) → `deploy.` shard
+   resume: hash BMTS tensor table per node, transfer only deltas.
+3. **ClassAd-style match language** (Condor) → PlacementPlan v2 request/offer
+   predicates (device ads: bw, vram, watts; op ads: bytes, MACs, cuts).
+4. **Solve-then-greedy schedule search** (CrossPipe) for stage packing.
+5. **RDMA path reservation**: ConnectX-3/4 used NICs (R150-400) would make
+   llama-RPC bridge benchmarks RDMA-fast AND are graph edges for us
+   (kernel-bypass, GPUVM-adjacent). Add to hardware shopping list as optional
+   measurement instrument, not dependency.
+6. **sched_ext (scx) lever** on master now: CachyOS ships it; stage-host
+   cores under `scx` with pinned/busy-poll class = Art. 6's first priced hop-kill.
+7. **8-bit activation wire mode** (Petals) as ACTS v2 flag for 2.5G-class
+   links (halves activation bytes if we ever bottleneck).
+8. **BitNet kernel target shift**: benchmark our Rust Q4/TQ1 path not just
+   vs TQ1_0 but vs **TL2/I2_S** (their tables: 1.33-1.65× and lossless-1.58×
+   expectations) so our contracts cite the current SOTA bar.
