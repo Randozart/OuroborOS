@@ -3,9 +3,17 @@ use std::ffi::CString;
 use std::os::raw::{c_char, c_int};
 use std::ptr;
 
-mod bindings {
+/// Generated llama bindings (re-exported for verification tests).
+pub mod ffi {
     #![allow(dead_code, non_snake_case, non_camel_case_types, non_upper_case_globals, clippy::all)]
     include!(concat!(env!("OUT_DIR"), "/bindings.rs"));
+}
+
+#[allow(unused_imports)]
+use ffi as bindings_unused;
+
+mod bindings {
+    pub use crate::ffi::*;
 }
 
 use bindings::*;
@@ -91,6 +99,27 @@ impl BitNetModel {
 
     pub fn n_ctx(&self) -> u32 {
         self.n_ctx
+    }
+
+    /// Clear KV, prefill tokens, return logits after the last position.
+    pub fn logits_for_tokens(&self, tokens: &[llama_token]) -> Result<Vec<f32>> {
+        unsafe {
+            self.reset_context();
+            if tokens.is_empty() {
+                anyhow::bail!("empty tokens");
+            }
+            let mut toks = tokens.to_vec();
+            let batch = llama_batch_get_one(toks.as_mut_ptr(), toks.len() as c_int);
+            if llama_decode(self.ctx, batch) != 0 {
+                anyhow::bail!("decode failed");
+            }
+            let n_vocab = llama_vocab_n_tokens(llama_model_get_vocab(self.model)) as usize;
+            let ptr = llama_get_logits_ith(self.ctx, -1);
+            if ptr.is_null() {
+                anyhow::bail!("no logits");
+            }
+            Ok(std::slice::from_raw_parts(ptr, n_vocab).to_vec())
+        }
     }
 
     pub fn model_ptr(&self) -> *mut llama_model {

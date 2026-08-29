@@ -297,9 +297,9 @@ extern "C" {
 | Step | File | Description |
 |------|------|-------------|
 | 2.1 | ✅ `tools/shard_model.py` | Writes byte-exact .bmts shards (30L/2B -> 3 nodes) |
-| 2.2 | `cluster/weight_dist.rs` | Weight distribution protocol |
-| 2.3 | `cluster/pipeline.rs` | Pipeline orchestrator |
-| 2.4 | `cluster/kv_cache.rs` | Local KV-cache management |
+| 2.2 | 🔲 `cluster/weight_dist.rs` | Weight distribution protocol (scp today) |
+| 2.3 | ✅ `cluster/src/infer/` | **Pure-Rust forward validated: cos 0.99998 vs llama.cpp, top-1 match**, 1.6s/tok release-MT |
+| 2.4 | ✅ (in infer) | Per-layer KV owned by stage, never on wire |
 | 2.5 | `cluster/error_recovery.rs` | Node crash detection + restart |
 | 2.6 | `cluster/checkpoint.rs` | Pipeline state checkpointing |
 | 2.7 | `cluster/hot_swap.rs` | Weight update without restart |

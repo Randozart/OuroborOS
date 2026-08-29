@@ -9,3 +9,6 @@ anyhow.workspace = true
 
 [build-dependencies]
 bindgen = "0.69"
+
+[dev-dependencies]
+ouro-cluster = { path = "../cluster" }
