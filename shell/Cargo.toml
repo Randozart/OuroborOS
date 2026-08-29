@@ -1,0 +1,22 @@
+[package]
+name = "ouro-shell"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+ouro-cluster = { path = "../cluster" }
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[lib]
+name = "ouro_shell"
+path = "src/lib.rs"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["full"] }
+serde_json.workspace = true
+
+[[bin]]
+name = "ouro-shell"
+path = "src/main.rs"

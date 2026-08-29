@@ -1,0 +1,7 @@
+# OurobourOS Praetor configuration.
+# Intent comment check disabled: OurobourOS uses Rust doc comments (///)
+# which Praetor's intent rule does not recognize as satisfying the
+# requirement. All other checks (complexity, datalog, Big-O) remain active.
+
+[intent]
+enabled = false

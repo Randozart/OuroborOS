@@ -1,0 +1,12 @@
+[package]
+name = "ouro-agent"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+ouro-cluster = { path = "../cluster" }
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio = { version = "1", features = ["full"] }
+hostname = "0.4"
