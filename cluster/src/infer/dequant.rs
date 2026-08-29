@@ -109,6 +109,153 @@ pub fn dequant_f16(bytes: &[u8]) -> Vec<f32> {
         .collect()
 }
 
+/// Bytes per Q8_0 block (32 elements).
+pub const Q8_0_BLOCK_BYTES: usize = 34;
+/// Bytes per Q4_K block (256 elements).
+pub const Q4_K_BLOCK_BYTES: usize = 144;
+/// Decode one 34-byte Q8_0 block into 32 f32.
+fn q8_block(bytes: &[u8], out: &mut [f32]) {
+    let d = f16_to_f32(u16::from_le_bytes([bytes[0], bytes[1]]));
+    for j in 0..32 {
+        out[j] = bytes[2 + j] as i8 as f32 * d;
+    }
+}
+
+/// Dequantize a full Q8_0 payload.
+pub fn dequant_q8_0(bytes: &[u8]) -> Vec<f32> {
+    assert!(bytes.len() % Q8_0_BLOCK_BYTES == 0, "misaligned Q8_0 payload");
+    let n = bytes.len() / Q8_0_BLOCK_BYTES * 32;
+    let mut out = vec![0.0f32; n];
+    for (bi, chunk) in bytes.chunks_exact(Q8_0_BLOCK_BYTES).enumerate() {
+        q8_block(chunk, &mut out[bi * 32..(bi + 1) * 32]);
+    }
+    out
+}
+
+/// Q4_K 6-bit scale/min unpack (mirrors get_scale_min_k4 in ggml-quants.c).
+fn scale_min_k4(j: usize, sc: &[u8]) -> (u8, u8) {
+    if j < 4 {
+        (sc[j] & 63, sc[j + 4] & 63)
+    } else {
+        let d = (sc[j + 4] & 0xF) | ((sc[j - 4] >> 6) << 4);
+        let m = (sc[j + 4] >> 4) | ((sc[j] >> 6) << 4);
+        (d, m)
+    }
+}
+
+/// Decode one 144-byte Q4_K block into 256 f32.
+fn q4k_block(bytes: &[u8], out: &mut [f32]) {
+    let d = f16_to_f32(u16::from_le_bytes([bytes[0], bytes[1]]));
+    let min = f16_to_f32(u16::from_le_bytes([bytes[2], bytes[3]]));
+    let scales = &bytes[4..16];
+    let mut q = &bytes[16..16 + 128];
+    let mut is = 0usize;
+    let mut o = 0usize;
+    for _ in 0..4 {
+        let (s1, m1) = scale_min_k4(is, scales);
+        let (s2, m2) = scale_min_k4(is + 1, scales);
+        let d1 = d * s1 as f32;
+        let d2 = d * s2 as f32;
+        let mm1 = min * m1 as f32;
+        let mm2 = min * m2 as f32;
+        for l in 0..32 {
+            out[o + l] = d1 * (q[l] & 0xF) as f32 - mm1;
+        }
+        for l in 0..32 {
+            out[o + 32 + l] = d2 * (q[l] >> 4) as f32 - mm2;
+        }
+        o += 64;
+        q = &q[32..];
+        is += 2;
+    }
+}
+
+/// Dequantize a full Q4_K payload.
+pub fn dequant_q4_k(bytes: &[u8]) -> Vec<f32> {
+    assert!(bytes.len() % Q4_K_BLOCK_BYTES == 0, "misaligned Q4_K payload");
+    let n = bytes.len() / Q4_K_BLOCK_BYTES * QK_K;
+    let mut out = vec![0.0f32; n];
+    for (bi, chunk) in bytes.chunks_exact(Q4_K_BLOCK_BYTES).enumerate() {
+        q4k_block(chunk, &mut out[bi * QK_K..(bi + 1) * QK_K]);
+    }
+    out
+}
+
+/// Dequantize one Q4_K row (k elements) from row-major payload.
+pub fn dequant_q4k_row(payload: &[u8], row: usize, row_bytes: usize, out: &mut [f32]) {
+    let start = row * row_bytes;
+    let blocks = row_bytes / Q4_K_BLOCK_BYTES;
+    for b in 0..blocks {
+        q4k_block(
+            &payload[start + b * Q4_K_BLOCK_BYTES..start + (b + 1) * Q4_K_BLOCK_BYTES],
+            &mut out[b * QK_K..(b + 1) * QK_K],
+        );
+    }
+}
+
+/// Dequantize one Q8_0 row (k elements) from row-major payload.
+pub fn dequant_q8_row(payload: &[u8], row: usize, row_bytes: usize, out: &mut [f32]) {
+    let start = row * row_bytes;
+    let blocks = row_bytes / Q8_0_BLOCK_BYTES;
+    for b in 0..blocks {
+        q8_block(
+            &payload[start + b * Q8_0_BLOCK_BYTES..start + (b + 1) * Q8_0_BLOCK_BYTES],
+            &mut out[b * 32..(b + 1) * 32],
+        );
+    }
+}
+
+/// Quant kind dispatch, keyed by ggml type id.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QuantKind {
+    F32,
+    F16,
+    Tq1_0,
+    Q8_0,
+    Q4K,
+}
+
+impl QuantKind {
+    /// From ggml type id; None for unsupported types.
+    pub fn from_dtype(id: u32) -> Option<Self> {
+        match id {
+            0 => Some(Self::F32),
+            1 => Some(Self::F16),
+            8 => Some(Self::Q8_0),
+            12 => Some(Self::Q4K),
+            34 => Some(Self::Tq1_0),
+            _ => None,
+        }
+    }
+
+    /// Bytes per block.
+    pub fn block_bytes(self) -> usize {
+        match self {
+            Self::F32 => 4,
+            Self::F16 => 2,
+            Self::Tq1_0 => TQ1_0_BLOCK_BYTES,
+            Self::Q8_0 => Q8_0_BLOCK_BYTES,
+            Self::Q4K => Q4_K_BLOCK_BYTES,
+        }
+    }
+
+    /// Elements per block.
+    pub fn block_elems(self) -> usize {
+        match self {
+            Self::F32 | Self::F16 => 1,
+            Self::Q8_0 => 32,
+            Self::Tq1_0 | Self::Q4K => QK_K,
+        }
+    }
+
+    /// Row byte size for an input dimension of k elements.
+    pub fn row_bytes(self, k: usize) -> usize {
+        let be = self.block_elems();
+        k / be * self.block_bytes()
+    }
+}
+
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -169,5 +316,60 @@ mod tests {
         assert!(row.iter().all(|x| x.is_finite()));
         let scale: f32 = row.iter().fold(0.0f32, |a, &x| a.max(x.abs()));
         assert!(scale > 0.0);
+    }
+}
+
+#[cfg(test)]
+mod kquant_tests {
+    use super::*;
+
+    #[test]
+    fn test_q8_block_simple() {
+        let mut blk = [0u8; Q8_0_BLOCK_BYTES];
+        blk[0..2].copy_from_slice(&0x3c00u16.to_le_bytes()); // d = 1.0
+        for j in 0..32 { blk[2 + j] = j as u8; } // 0..31 (i8 positive)
+        blk[2 + 31] = 0x80; // -128
+        let v = dequant_q8_0(&blk);
+        assert_eq!(v[0], 0.0);
+        assert_eq!(v[10], 10.0);
+        assert_eq!(v[31], -128.0);
+    }
+
+    #[test]
+    fn test_q4k_scale_nibble_math() {
+        // d=1, dmin=0; scale[0]=30, scale[1]=2; qs bytes 0xF0 -> lo nibble 0, hi 15
+        // first 32 out = 1*30*0 = 0 ; next 32 = 1*2*15 = 30 ; rest = 0
+        let mut blk = [0u8; Q4_K_BLOCK_BYTES];
+        blk[0..2].copy_from_slice(&0x3c00u16.to_le_bytes());
+        blk[2..4].copy_from_slice(&0x0000u16.to_le_bytes());
+        blk[4] = 30;
+        blk[5] = 2;
+        for b in blk[16..].iter_mut() {
+            *b = 0xF0;
+        }
+        let v = dequant_q4_k(&blk);
+        assert!(v[0..32].iter().all(|&x| x == 0.0), "lo nibbles: {:?}", &v[..2]);
+        assert!(v[32..64].iter().all(|&x| x == 30.0), "hi nibbles: {:?}", &v[32..34]);
+        assert!(v[64..256].iter().all(|&x| x == 0.0));
+    }
+
+    #[test]
+    fn test_q4k_min_offsets() {
+        // verify mins subtract: dmin = 1/16, m nibble nonzero, scale = 0
+        let mut blk = [0u8; Q4_K_BLOCK_BYTES];
+        blk[0..2].copy_from_slice(&0x3c00u16.to_le_bytes());
+        blk[2..4].copy_from_slice(&0x2c00u16.to_le_bytes()); // dmin = 1/16
+        for b in blk[4..16].iter_mut() { *b = 0; } // sc=0, m=0 -> expect 0
+        let v = dequant_q4_k(&blk);
+        assert!(v.iter().all(|&x| x == 0.0));
+    }
+
+    #[test]
+    fn test_quantkind_row_bytes() {
+        assert_eq!(QuantKind::Q4K.row_bytes(5120), 20 * 144);
+        assert_eq!(QuantKind::Tq1_0.row_bytes(2560), 10 * 54);
+        assert_eq!(QuantKind::Q8_0.row_bytes(512), 16 * 34);
+        assert_eq!(QuantKind::from_dtype(12), Some(QuantKind::Q4K));
+        assert_eq!(QuantKind::from_dtype(13), None);
     }
 }

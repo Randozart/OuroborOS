@@ -12,13 +12,15 @@
 mod dequant;
 mod ops;
 
-pub use dequant::{dequant_f16, dequant_tq1_0, f16_to_f32};
+pub use dequant::{
+    dequant_f16, dequant_q4_k, dequant_q8_0, dequant_tq1_0, f16_to_f32, QuantKind,
+};
 
 use anyhow::{bail, Result};
 use std::collections::HashMap;
 
 use crate::bmts::BmtsShard;
-use ops::{f16_row, matvec_f16, matvec_tq, rmsnorm, rope_neox, silu, softmax};
+use ops::{f16_row, matvec_f16, rmsnorm, rope_neox, silu, softmax};
 
 /// Transformer hyper-parameters for a BitNet model.
 #[derive(Debug, Clone, Copy)]
@@ -57,9 +59,7 @@ impl ArchConfig {
     }
 }
 
-const DTYPE_F32: u32 = 0;
 const DTYPE_F16: u32 = 1;
-const DTYPE_TQ1_0: u32 = 34;
 
 /// KV cache for ONE layer (rows of n_embd_gqa, one row per token).
 #[derive(Debug, Clone, Default)]
@@ -69,24 +69,37 @@ pub struct LayerKv {
     pub seq: usize,
 }
 
-/// A pipeline stage: raw shard payloads + the layers it owns.
+/// A quantized weight: raw payload + shape.
+#[derive(Clone)]
+struct Weight {
+    payload: Vec<u8>,
+    kind: QuantKind,
+    in_len: usize,
+    out_len: usize,
+}
+
+/// A pipeline stage: dequantizable weights + the layers it owns.
 #[derive(Clone)]
 pub struct Stage {
     cfg: ArchConfig,
-    tensors: HashMap<String, Vec<u8>>,
+    tensors: HashMap<String, Weight>,
     pub layers: Vec<u32>,
 }
 
 impl Stage {
-    /// Load all tensors of a shard into memory (raw quantized payloads).
+    /// Load all tensors of a shard (raw quantized payloads + shapes).
     pub fn from_shard(shard: &BmtsShard, cfg: ArchConfig) -> Result<Self> {
         let mut tensors = HashMap::new();
         for t in &shard.tensors {
+            let kind = QuantKind::from_dtype(t.dtype)
+                .ok_or_else(|| anyhow::anyhow!("unsupported dtype {} on {}", t.dtype, t.name))?;
             let bytes = shard.read_tensor(&t.name)?;
-            if t.dtype != DTYPE_F32 && t.dtype != DTYPE_F16 && t.dtype != DTYPE_TQ1_0 {
-                bail!("unsupported dtype {} on {}", t.dtype, t.name);
-            }
-            tensors.insert(t.name.clone(), bytes);
+            let (in_len, out_len) = match t.shape.len() {
+                1 => (t.shape[0] as usize, 1usize),
+                2 => (t.shape[0] as usize, t.shape[1] as usize),
+                n => bail!("tensor {} has rank {}", t.name, n),
+            };
+            tensors.insert(t.name.clone(), Weight { payload: bytes, kind, in_len, out_len });
         }
         let mut layers: Vec<u32> = tensors
             .keys()
@@ -100,14 +113,29 @@ impl Stage {
         Ok(Self { cfg, tensors, layers })
     }
 
-    fn tensor(&self, name: &str) -> Result<&Vec<u8>> {
-        self.tensors
+    /// y = W * x for a matrix tensor by name.
+    fn wm(&self, name: &str, x: &[f32]) -> Result<Vec<f32>> {
+        let w = self
+            .tensors
             .get(name)
-            .ok_or_else(|| anyhow::anyhow!("missing tensor {}", name))
+            .ok_or_else(|| anyhow::anyhow!("missing tensor {}", name))?;
+        if w.in_len != x.len() {
+            bail!("tensor {}: in_len {} != x len {}", name, w.in_len, x.len());
+        }
+        Ok(ops::matvec_q(&w.payload, w.kind, w.out_len, w.in_len, x))
     }
 
-    fn f32_tensor(&self, name: &str) -> Result<Vec<f32>> {
-        Ok(self.tensor(name)?.chunks_exact(4).map(|c| f32::from_le_bytes(c.try_into().unwrap())).collect())
+    /// 1-D vector tensor (norm gains) as f32.
+    fn vec(&self, name: &str) -> Result<Vec<f32>> {
+        let w = self
+            .tensors
+            .get(name)
+            .ok_or_else(|| anyhow::anyhow!("missing tensor {}", name))?;
+        match w.kind {
+            QuantKind::F32 => Ok(w.payload.chunks_exact(4).map(|c| f32::from_le_bytes(c.try_into().unwrap())).collect()),
+            QuantKind::F16 => Ok(w.payload.chunks_exact(2).map(|c| f16_to_f32(u16::from_le_bytes([c[0], c[1]]))).collect()),
+            other => bail!("tensor {} not a vector dtype {:?}", name, other),
+        }
     }
 
     /// One decoder layer forward. `x` is the hidden state (n_embd).
@@ -116,15 +144,11 @@ impl Stage {
         let p = format!("blk.{}.", layer);
 
         // --- attention block ---
-        let anorm = self.f32_tensor(&format!("{}attn_norm.weight", p))?;
-        let a = rmsnorm(x, &anorm, c.eps);
+        let a = rmsnorm(x, &self.vec(&format!("{}attn_norm.weight", p))?, c.eps);
 
-        let wq = self.tensor(&format!("{}attn_q.weight", p))?;
-        let wk = self.tensor(&format!("{}attn_k.weight", p))?;
-        let wv = self.tensor(&format!("{}attn_v.weight", p))?;
-        let mut q = matvec_tq(wq, c.n_embd, c.n_embd, &a);
-        let mut k = matvec_tq(wk, c.kv_dim(), c.n_embd, &a);
-        let v = matvec_tq(wv, c.kv_dim(), c.n_embd, &a);
+        let mut q = self.wm(&format!("{}attn_q.weight", p), &a)?;
+        let mut k = self.wm(&format!("{}attn_k.weight", p), &a)?;
+        let v = self.wm(&format!("{}attn_v.weight", p), &a)?;
 
         for h in 0..c.n_head {
             rope_neox(&mut q[h * c.head_dim()..(h + 1) * c.head_dim()], pos, c.n_rot, c.rope_base);
@@ -139,25 +163,18 @@ impl Stage {
 
         let attn_out = self.attend(&q, kv)?;
 
-        let sbuf = self.f32_tensor(&format!("{}attn_sub_norm.weight", p))?;
-        let b = rmsnorm(&attn_out, &sbuf, c.eps);
-        let wo = self.tensor(&format!("{}attn_output.weight", p))?;
-        let o = matvec_tq(wo, c.n_embd, c.n_embd, &b);
+        let b = rmsnorm(&attn_out, &self.vec(&format!("{}attn_sub_norm.weight", p))?, c.eps);
+        let o = self.wm(&format!("{}attn_output.weight", p), &b)?;
         let h1: Vec<f32> = (0..c.n_embd).map(|i| x[i] + o[i]).collect();
 
         // --- FFN block ---
-        let fnorm = self.f32_tensor(&format!("{}ffn_norm.weight", p))?;
-        let f = rmsnorm(&h1, &fnorm, c.eps);
-        let up = self.tensor(&format!("{}ffn_up.weight", p))?;
-        let gate = self.tensor(&format!("{}ffn_gate.weight", p))?;
-        let up_y = matvec_tq(up, c.n_ff, c.n_embd, &f);
-        let gate_y = matvec_tq(gate, c.n_ff, c.n_embd, &f);
+        let f = rmsnorm(&h1, &self.vec(&format!("{}ffn_norm.weight", p))?, c.eps);
+        let up_y = self.wm(&format!("{}ffn_up.weight", p), &f)?;
+        let gate_y = self.wm(&format!("{}ffn_gate.weight", p), &f)?;
         let act: Vec<f32> = gate_y.iter().zip(&up_y).map(|(g, u)| silu(*g) * u).collect();
 
-        let fsbuf = self.f32_tensor(&format!("{}ffn_sub_norm.weight", p))?;
-        let s = rmsnorm(&act, &fsbuf, c.eps);
-        let down = self.tensor(&format!("{}ffn_down.weight", p))?;
-        let d = matvec_tq(down, c.n_embd, c.n_ff, &s);
+        let s = rmsnorm(&act, &self.vec(&format!("{}ffn_sub_norm.weight", p))?, c.eps);
+        let d = self.wm(&format!("{}ffn_down.weight", p), &s)?;
 
         Ok((0..c.n_embd).map(|i| h1[i] + d[i]).collect())
     }
@@ -322,6 +339,7 @@ impl PipelineModel {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ops::matvec_q;
 
     #[test]
     fn test_arch_dims() {
@@ -371,7 +389,7 @@ mod tests {
         assert_eq!(t.shape, vec![2560, 640]);
         let payload = shard.read_tensor(&t.name).unwrap();
         let x = vec![0.1; 2560];
-        let y = matvec_tq(&payload, 640, 2560, &x);
+        let y = matvec_q(&payload, QuantKind::Tq1_0, 640, 2560, &x);
         assert_eq!(y.len(), 640);
         assert!(y.iter().all(|v| v.is_finite()));
     }

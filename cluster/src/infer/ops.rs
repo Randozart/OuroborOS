@@ -3,7 +3,7 @@
 //! All matrices are row-major: W[out][in], y = W * x.
 //! GGML stores tensors with the input dim contiguous, which matches this.
 
-use super::dequant::{dequant_tq1_row, f16_to_f32, TQ1_0_BLOCK_BYTES};
+use super::dequant::{dequant_q4k_row, dequant_q8_row, dequant_tq1_row, f16_to_f32, QuantKind};
 
 /// RMSNorm: y = x / sqrt(mean(x^2) + eps) * w
 pub fn rmsnorm(x: &[f32], w: &[f32], eps: f32) -> Vec<f32> {
@@ -69,9 +69,32 @@ pub fn mt_threads() -> usize {
     })
 }
 
-/// y = W * x with W TQ1_0 packed payload, rows of `in_len` elements.
-pub fn matvec_tq(payload: &[u8], out_len: usize, in_len: usize, x: &[f32]) -> Vec<f32> {
-    let row_bytes = in_len / QK * TQ1_0_BLOCK_BYTES;
+/// y = W * x with any supported quant kind, rows of `in_len` elements.
+pub fn matvec_q(payload: &[u8], kind: QuantKind, out_len: usize, in_len: usize, x: &[f32]) -> Vec<f32> {
+    match kind {
+        QuantKind::F16 => matvec_f16(payload, out_len, in_len, x),
+        QuantKind::F32 => matvec_f32raw(payload, out_len, in_len, x),
+        _ => matvec_qblock(payload, kind, out_len, in_len, x),
+    }
+}
+
+/// y = W * x with W raw f32 row-major payload.
+pub fn matvec_f32raw(payload: &[u8], out_len: usize, in_len: usize, x: &[f32]) -> Vec<f32> {
+    let mut y = vec![0.0f32; out_len];
+    let f = |i: usize| f32::from_le_bytes(payload[i * 4..i * 4 + 4].try_into().unwrap());
+    for o in 0..out_len {
+        let mut s = 0.0f32;
+        for i in 0..in_len {
+            s += f(o * in_len + i) * x[i];
+        }
+        y[o] = s;
+    }
+    y
+}
+
+/// Block-quantized row-parallel matvec.
+pub fn matvec_qblock(payload: &[u8], kind: QuantKind, out_len: usize, in_len: usize, x: &[f32]) -> Vec<f32> {
+    let rb = kind.row_bytes(in_len);
     let mut y = vec![0.0f32; out_len];
     let nt = mt_threads().min(out_len).max(1);
     let chunk = out_len.div_ceil(nt);
@@ -81,7 +104,13 @@ pub fn matvec_tq(payload: &[u8], out_len: usize, in_len: usize, x: &[f32]) -> Ve
             sc.spawn(move || {
                 let mut row = vec![0.0f32; in_len];
                 for (j, oy) in blk.iter_mut().enumerate() {
-                    dequant_tq1_row(payload, base + j, row_bytes, &mut row);
+                    let r = base + j;
+                    match kind {
+                        QuantKind::Tq1_0 => dequant_tq1_row(payload, r, rb, &mut row),
+                        QuantKind::Q4K => dequant_q4k_row(payload, r, rb, &mut row),
+                        QuantKind::Q8_0 => dequant_q8_row(payload, r, rb, &mut row),
+                        _ => unreachable!("handled by matvec_q"),
+                    }
                     *oy = dot(&row, x);
                 }
             });
@@ -128,9 +157,6 @@ pub fn f16_row(payload: &[u8], row: usize, in_len: usize) -> Vec<f32> {
         })
         .collect()
 }
-
-/// Elements per quant block (re-exported length scale).
-pub const QK: usize = 256;
 
 #[cfg(test)]
 mod tests {
