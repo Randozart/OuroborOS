@@ -1058,3 +1058,32 @@ the combination, none of which we found together in any system:
 8. **BitNet kernel target shift**: benchmark our Rust Q4/TQ1 path not just
    vs TQ1_0 but vs **TL2/I2_S** (their tables: 1.33-1.65× and lossless-1.58×
    expectations) so our contracts cite the current SOTA bar.
+
+## 16. Build Schedule (approved 2026-08-29)
+
+**Track R — Rung B, cluster-as-one-machine (FIRST, everything else rides it):**
+1. Agent stage slot: `stage_setup|shard_path`, `stage_token|pos|id`,
+   `stage_step|acts_hex` (ACTS carries pos; out-of-order rejected against
+   kv.seq), `stage_sample|hidden_hex` (argmax over tied head, token id out —
+   logits never cross the wire), `stage_reset`.
+2. `ouro-pipeline` binary (shell crate): shard_map -> stage/node plan ->
+   prefill tokenwise -> greedy generate -> token-id + hop-timing report;
+   text via `tokenize|detok` tasks (agent's vocab_only-side bitnet slot).
+3. Tests: synthetic 3-shard toy model (f32/tq1/f16, tiny dims) — TCP result
+   == in-process PipelineModel exactly; `#[ignore]` real 3×TQ1 shards TCP ==
+   rung-A greedy ids. Gate = token-id equality (text is convenience, not
+   contract).
+4. M3 readiness: same binary against LAN addresses when slaves arrive.
+
+**Track Q — ladder to the 27B summit:**
+5. cb_eval oracle harness (fork exposes `llama_context_params.cb_eval`) —
+   validate dump mechanism on the proven TQ1_0 model first.
+6. Q5_K + Q3_K + Q6_K dequant, C-parity bit tests (27B's real quant mix).
+7. Shard Qwen3.8-9B-Q6_K (7.56 GB — fits this 16 GB box; 27B after r580).
+8. ArchSpec: sharder emits model card (arch/dims/layer pattern/partial RoPE
+   [11,11,10]/untied head); graph templated by family.
+9. GatedDeltaNet + conv1d + gated attention ops — each differential vs
+   cb_eval dumps (cos > 0.999), the discipline that caught everything so far.
+
+**Deferred by decision:** scx lever, ClassAd plan language, HDMI modem build,
+27B on this box (RAM-capped), slave bring-up (hands).
