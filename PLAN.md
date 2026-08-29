@@ -746,9 +746,9 @@ reads per-node probe (FLOPS class + VRAM) and emits stage -> [layer list].
 
 | Milestone | Gate (contract) |
 |-----------|-----------------|
-| M1: 27B forward in pure-Rust on CPU (this box, 32 GB RAM) | per-layer differential vs llama.cpp oracle: cosine > 0.999; dequant bit-identical to C |
+| M1: big-model forward in pure-Rust on CPU | ✅ **9B achieved** (all-9-tensor layer-0 diff cos≥0.9998; full-logit cos 0.9994, top-1 match). 27B pending RAM/swap or r580 box |
 | M2: bridge benchmark — llama.cpp CUDA tensor-split 27B on 3060+1070 Ti (post r580) | reference tok/s bar recorded (est. 10-15) |
-| M3: 27B alive across 3 chassis, CPU-mode stages | same greedy tokens as M1 over TCP; hop RTT logged |
+| M3: model alive across chassis, CPU-mode | **architecture proven**: 9B over 4 localhost TCP agents == in-process stream exactly; remaining work is physical wiring |
 | M4: wgpu GPU stages | **dense 27B >= 10 tok/s; 35B-A3B >= 30 tok/s**; shell reports W/token, budget never exceeded |
 
 ### 13.5 Remaining Work (full)
@@ -1085,5 +1085,19 @@ the combination, none of which we found together in any system:
 9. GatedDeltaNet + conv1d + gated attention ops — each differential vs
    cb_eval dumps (cos > 0.999), the discipline that caught everything so far.
 
-**Deferred by decision:** scx lever, ClassAd plan language, HDMI modem build,
-27B on this box (RAM-capped), slave bring-up (hands).
+
+## 16.1 Status (2026-08-29, end of session)
+
+| Item | State |
+|------|-------|
+| Rung B agent stage tasks + ouro-pipeline | ✅ commits e70f7dc..81d96fc |
+| Q1 oracle harness (cb_eval capture) | ✅ deterministic, 846/1492-node maps |
+| Q2 kernels Q3_K/Q5_K/Q6_K | ✅ bit-exact vs C |
+| Q3 9B model card + shards (vision/nextn filtered) | ✅ 4 stages, 7548 MB accounted |
+| Q4 delta + gated-attn in Rust | ✅ layer-0 9/9 tensors + full 32-layer logits |
+| M3-sim: 9B x 4 TCP agents == in-process | ✅ [17018, 7529, 998, 14541, 364] |
+| Gates | 119 fast tests, clippy 0 |
+
+Next: r580 driver (2 GPUs live here) → bridge benchmark M2; 27B forward
+(its Q3_K/Q4_K/Q5_K mix already executes — needs swap-friendly loading or
+the slave RAM); slave bring-up; scx + ClassAd + modem per §16 deferred list.
