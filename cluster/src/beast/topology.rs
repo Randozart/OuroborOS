@@ -17,6 +17,36 @@ pub struct NodeEntry {
     pub has_sse42: bool,
     pub ram_mib: u64,
     pub tdp_watts: u32,
+    #[serde(default)]
+    pub has_gpu: bool,
+    #[serde(default)]
+    pub gpu_model: String,
+    #[serde(default)]
+    pub gpu_vram_mib: u64,
+    #[serde(default)]
+    pub gpu_driver: String,
+}
+
+impl Default for NodeEntry {
+    fn default() -> Self {
+        Self {
+            id: String::new(),
+            hostname: String::new(),
+            ip: String::new(),
+            cpu_model: String::new(),
+            cores: 0,
+            threads: 0,
+            has_avx: false,
+            has_avx2: false,
+            has_sse42: false,
+            ram_mib: 0,
+            tdp_watts: 0,
+            has_gpu: false,
+            gpu_model: String::new(),
+            gpu_vram_mib: 0,
+            gpu_driver: String::new(),
+        }
+    }
 }
 
 /// A workload known to the cluster.
@@ -76,6 +106,10 @@ impl ClusterTopology {
             has_sse42: info.cpu.has_sse42,
             ram_mib: info.memory.total_mib,
             tdp_watts: info.cpu.tdp_watts,
+            has_gpu: false,
+            gpu_model: String::new(),
+            gpu_vram_mib: 0,
+            gpu_driver: String::new(),
         };
         self.nodes.push(entry.clone());
         entry

@@ -15,6 +15,14 @@ pub struct Telemetry {
     pub power_watts: u32,
     pub temp_c: u32,
     pub load_avg: f64,
+    #[serde(default, skip_serializing_if="Vec::is_empty")]
+    pub gpus: Vec<ouro_cluster::probe::gpu::GpuInfo>,
+}
+
+/// GPU inventory, cached (nvidia-smi spawns a process).
+fn cached_gpus() -> &'static Vec<ouro_cluster::probe::gpu::GpuInfo> {
+    static GPUS: std::sync::OnceLock<Vec<ouro_cluster::probe::gpu::GpuInfo>> = std::sync::OnceLock::new();
+    GPUS.get_or_init(ouro_cluster::probe::gpu::detect_gpus)
 }
 
 /// Collect a telemetry snapshot from the local system.
@@ -40,6 +48,7 @@ pub fn collect() -> Result<Telemetry> {
         power_watts: power,
         temp_c: temp,
         load_avg: load,
+        gpus: cached_gpus().clone(),
     })
 }
 

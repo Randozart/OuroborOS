@@ -41,6 +41,10 @@ fn demo_topology() -> ClusterTopology {
         has_sse42: true,
         ram_mib: 16384,
         tdp_watts: 35,
+        has_gpu: false,
+        gpu_model: String::new(),
+        gpu_vram_mib: 0,
+        gpu_driver: String::new(),
     });
 
     topo.nodes.push(NodeEntry {
@@ -55,6 +59,10 @@ fn demo_topology() -> ClusterTopology {
         has_sse42: true,
         ram_mib: 8192,
         tdp_watts: 35,
+        has_gpu: false,
+        gpu_model: String::new(),
+        gpu_vram_mib: 0,
+        gpu_driver: String::new(),
     });
 
     topo.nodes.push(NodeEntry {
@@ -69,9 +77,20 @@ fn demo_topology() -> ClusterTopology {
         has_sse42: true,
         ram_mib: 32768,
         tdp_watts: 84,
+        has_gpu: false,
+        gpu_model: String::new(),
+        gpu_vram_mib: 0,
+        gpu_driver: String::new(),
     });
 
     topo.power_budget_watts = 500;
+    // the box we're literally sitting on has an RTX 3060
+    if let Some(n1) = topo.nodes.iter_mut().find(|n| n.id == "n1") {
+        n1.has_gpu = true;
+        n1.gpu_model = "NVIDIA GeForce RTX 3060".to_string();
+        n1.gpu_vram_mib = 12288;
+        n1.gpu_driver = "610.57.04".to_string();
+    }
     topo
 }
 
@@ -85,6 +104,10 @@ fn tel_props(tel: &ouro_shell::agent_client::AgentTelemetry) -> std::collections
     props.insert("cpu".to_string(), tel.cpu_model.clone());
     props.insert("status".to_string(), "AWAKE".to_string());
     props.insert("load".to_string(), format!("{:.2}", tel.load_avg));
+    if !tel.gpus.is_empty() {
+        let g = &tel.gpus[0];
+        props.insert("gpu".to_string(), format!("{} ({}MiB)", g.model, g.vram_mib));
+    }
     props
 }
 

@@ -44,14 +44,14 @@ pub fn handle(
             let total = topology.node_count();
             let power: u32 = topology.nodes.iter().map(|n| n.tdp_watts).sum();
             let budget = topology.power_budget_watts;
-            Ok(fmt.cluster_summary(total, 0, power, budget, 0, 0))
+            Ok(with_gpu_census(fmt.cluster_summary(total, 0, power, budget, 0, 0), topology))
         }
 
         Command::ClusterQuery => {
             let total = topology.node_count();
             let power: u32 = topology.nodes.iter().map(|n| n.tdp_watts).sum();
             let budget = topology.power_budget_watts;
-            Ok(fmt.cluster_summary(total, 0, power, budget, 0, 0))
+            Ok(with_gpu_census(fmt.cluster_summary(total, 0, power, budget, 0, 0), topology))
         }
 
         Command::NodeQuery { node } => {
@@ -68,6 +68,7 @@ pub fn handle(
                 status: "IDLE".to_string(),
                 power_watts: entry.tdp_watts,
                 temp_c: 0,
+                gpu: entry_gpu(topology, &entry.id),
             };
             Ok(fmt.node_query(&display))
         }
@@ -106,6 +107,7 @@ pub fn handle(
                     status: "IDLE".to_string(),
                     power_watts: n.tdp_watts,
                     temp_c: 0,
+                    gpu: entry_gpu(topology, &n.id),
                 })
                 .collect();
             Ok(fmt.bulk_query(&filter, &nodes))
@@ -186,6 +188,7 @@ pub fn handle(
                     status: "IDLE".to_string(),
                     power_watts: n.tdp_watts,
                     temp_c: 0,
+                    gpu: entry_gpu(topology, &n.id),
                 })
                 .collect();
             Ok(fmt.probe_result(&nodes))
@@ -384,6 +387,28 @@ fn deploy_agent(ip: &str) -> String {
     }
 }
 
+/// Append GPU census line to a cluster summary when any node has a GPU.
+fn with_gpu_census(mut s: String, topology: &ClusterTopology) -> String {
+    let gpus: Vec<String> = topology
+        .nodes
+        .iter()
+        .filter(|n| n.has_gpu)
+        .map(|n| format!("{}:{}MiB", n.gpu_model.replace("NVIDIA GeForce ", ""), n.gpu_vram_mib))
+        .collect();
+    if !gpus.is_empty() {
+        s.push_str(&format!("\n  GPUs:   {} (vram: {})", gpus.len(), gpus.join(", ")));
+    }
+    s
+}
+
+fn entry_gpu(topology: &ClusterTopology, id: &str) -> String {
+    topology
+        .get_node(id)
+        .filter(|n| n.has_gpu)
+        .map(|n| format!("{} ({}MiB)", n.gpu_model, n.gpu_vram_mib))
+        .unwrap_or_default()
+}
+
 /// Resolve a property: live agent cache first, static topology as fallback.
 fn resolve_node_property(node: &ouro_cluster::beast::topology::NodeEntry, property: &str, ctx: &Context) -> String {
     if let Some(live) = ctx.get_property(&node.id, property) {
@@ -412,6 +437,13 @@ fn resolve_node_property(node: &ouro_cluster::beast::topology::NodeEntry, proper
                 parts.join(", ")
             }
         }
+        "gpu" => {
+            if node.has_gpu {
+                format!("{} ({}MiB)", node.gpu_model, node.gpu_vram_mib)
+            } else {
+                "none".to_string()
+            }
+        }
         "status" => "IDLE".to_string(),
         _ => format!("unknown property: {}", property),
     }
@@ -437,6 +469,10 @@ mod tests {
             has_sse42: true,
             ram_mib: 8192,
             tdp_watts: 35,
+            has_gpu: false,
+            gpu_model: String::new(),
+            gpu_vram_mib: 0,
+            gpu_driver: String::new(),
         });
         topo
     }
@@ -486,6 +522,10 @@ mod tests {
             has_sse42: false,
             ram_mib: 4096,
             tdp_watts: 35,
+            has_gpu: false,
+            gpu_model: String::new(),
+            gpu_vram_mib: 0,
+            gpu_driver: String::new(),
         };
         assert_eq!(resolve_node_property(&node, "power", &ctx), "12W (live)");
     }
@@ -524,6 +564,10 @@ mod tests {
             has_sse42: true,
             ram_mib: 8192,
             tdp_watts: 35,
+            has_gpu: false,
+            gpu_model: String::new(),
+            gpu_vram_mib: 0,
+            gpu_driver: String::new(),
         };
         let ctx = Context::new();
         assert_eq!(resolve_node_property(&node, "power", &ctx), "35W");

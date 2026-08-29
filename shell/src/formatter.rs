@@ -60,14 +60,15 @@ impl Formatter {
     /// Format node discovery output.
     pub fn node_query(&self, node: &NodeDisplay) -> String {
         format!(
-            "NODE_{}\n  CPU:    {}\n  RAM:    {}MiB\n  SIMD:   {}\n  Status: {}\n  Power:  {}W | Temp: {}C",
+            "NODE_{}\n  CPU:    {}\n  RAM:    {}MiB\n  SIMD:   {}\n  Status: {}\n  Power:  {}W | Temp: {}C{}",
             node.id,
             node.cpu_model,
             node.ram_mib,
             simd_list(node),
             node.status,
             node.power_watts,
-            node.temp_c
+            node.temp_c,
+            if node.gpu.is_empty() { String::new() } else { format!("\n  GPU:    {}", node.gpu) }
         )
     }
 
@@ -170,6 +171,7 @@ pub struct NodeDisplay {
     pub status: String,
     pub power_watts: u32,
     pub temp_c: u32,
+    pub gpu: String,
 }
 
 fn simd_list(node: &NodeDisplay) -> String {
@@ -223,6 +225,7 @@ mod tests {
             status: "IDLE".to_string(),
             power_watts: 12,
             temp_c: 42,
+            gpu: String::new(),
         };
         let out = fmt.node_query(&node);
         assert!(out.contains("i5-7200U"));

@@ -1,4 +1,5 @@
 pub mod cpu;
+pub mod gpu;
 pub mod energy;
 pub mod memory;
 pub mod network;

@@ -20,6 +20,14 @@ pub struct AgentTelemetry {
     pub power_watts: u32,
     pub temp_c: u32,
     pub load_avg: f64,
+    #[serde(default)]
+    pub gpus: Vec<GpuMini>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+pub struct GpuMini {
+    pub model: String,
+    pub vram_mib: u64,
 }
 
 /// Task sent to a node agent.

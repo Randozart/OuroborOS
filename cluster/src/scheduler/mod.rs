@@ -110,8 +110,18 @@ impl Scheduler {
         } else {
             0
         };
-        // Score combines SIMD capability with efficiency; lower TDP preferred.
-        (simd << 8) + (100 - node.tdp_watts)
+        // GPU capacity dominates (VRAM-class buckets), then SIMD, then TDP
+        // efficiency. A decode step is bandwidth-bound: the biggest card wins.
+        let gpu = if !node.has_gpu {
+            0
+        } else if node.gpu_vram_mib >= 8192 {
+            12
+        } else if node.gpu_vram_mib >= 4096 {
+            8
+        } else {
+            4
+        };
+        (gpu << 16) + (simd << 8) + (100 - node.tdp_watts.min(100))
     }
 
     fn mark_working(&mut self, node_id: &str) {
@@ -143,6 +153,10 @@ impl Scheduler {
             has_sse42: true,
             ram_mib: 8192,
             tdp_watts: tdp,
+            has_gpu: false,
+            gpu_model: String::new(),
+            gpu_vram_mib: 0,
+            gpu_driver: String::new(),
         }
     }
 
@@ -159,6 +173,10 @@ impl Scheduler {
             has_sse42: sse42,
             ram_mib: 8192,
             tdp_watts: tdp,
+            has_gpu: false,
+            gpu_model: String::new(),
+            gpu_vram_mib: 0,
+            gpu_driver: String::new(),
         }
     }
 
@@ -188,6 +206,43 @@ impl Scheduler {
             }
             _ => panic!("expected dispatch"),
         }
+    }
+
+    #[test]
+    fn test_gpu_node_ranked_first() {
+        let mut cpu = NodeEntry {
+            id: "cpu1".into(),
+            hostname: "thinkpad".into(),
+            ip: "10.0.0.2".into(),
+            cpu_model: "i5-3320M".into(),
+            cores: 2,
+            threads: 4,
+            has_avx: true,
+            has_avx2: false,
+            has_sse42: true,
+            ram_mib: 8192,
+            tdp_watts: 35,
+            has_gpu: false,
+            gpu_model: String::new(),
+            gpu_vram_mib: 0,
+            gpu_driver: String::new(),
+        };
+        cpu.has_gpu = false;
+        let mut gpu = cpu.clone();
+        gpu.id = "gpunode".into();
+        gpu.has_gpu = true;
+        gpu.gpu_model = "RTX 3060".into();
+        gpu.gpu_vram_mib = 12288;
+        gpu.tdp_watts = 170; // even at higher TDP the GPU wins: bandwidth rules
+
+        let topo = ClusterTopology { nodes: vec![cpu, gpu], power_budget_watts: 500, ..ClusterTopology::new() };
+        let sched = Scheduler::new(topo);
+        let cand = vec![
+            sched.topology.nodes[0].clone(),
+            sched.topology.nodes[1].clone(),
+        ];
+        let best = sched.rank_candidates(cand).unwrap();
+        assert_eq!(best.id, "gpunode");
     }
 
     #[test]
