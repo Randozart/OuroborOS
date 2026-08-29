@@ -7,10 +7,29 @@
 /// Delta-net head dimension (d_state), fixed for the qwen35 family.
 pub const S: usize = 128;
 
-/// Runtime-dim variant (same math as delta_head, dim passed in).
-fn delta_head_generic(state: &mut [f32], sdim: usize, q: &[f32], k: &[f32], v: &[f32], gate: f32, beta: f32, out: &mut [f32]) {
-    let decay = gate.exp();
-    let mut sk = vec![0f32; sdim];
+/// Per-head gate and beta scalars for one recurrence step.
+#[derive(Debug, Clone, Copy)]
+pub struct DeltaStep {
+    pub gate: f32,
+    pub beta: f32,
+}
+
+/// One autoregressive gated-delta-net step for a single head (S=128).
+///
+/// `state` is row-major S×S (element (i,j) at i + j*S, matching ggml's
+/// [S_v, S_v] tensor). `q` is scaled by the caller. Updates state in place
+/// and writes the head output to `out`.
+pub fn delta_head(state: &mut [f32], q: &[f32], k: &[f32], v: &[f32], step: DeltaStep, out: &mut [f32]) {
+    delta_head_dim(state, S, q, k, v, step, out)
+}
+
+/// Runtime-dim variant of the recurrence.
+pub fn delta_head_dim(state: &mut [f32], sdim: usize, q: &[f32], k: &[f32], v: &[f32], step: DeltaStep, out: &mut [f32]) {
+    debug_assert_eq!(state.len(), sdim * sdim);
+    let decay = step.gate.exp();
+
+    // sk[j] = sum_i S[i,j] * k[i]   (S^T k), pre-decay read folded via decay mult
+    let mut sk = vec![0.0f32; sdim];
     for j in 0..sdim {
         let mut acc = 0.0f32;
         for (i, &ki) in k.iter().enumerate() {
@@ -18,57 +37,20 @@ fn delta_head_generic(state: &mut [f32], sdim: usize, q: &[f32], k: &[f32], v: &
         }
         sk[j] = acc * decay;
     }
-    let d: Vec<f32> = (0..sdim).map(|j| beta * (v[j] - sk[j])).collect();
+
+    // d[j] = beta * (v[j] - sk[j]); S[i,j] = S[i,j]*decay + k[i]*d[j]
+    let d: Vec<f32> = (0..sdim).map(|j| step.beta * (v[j] - sk[j])).collect();
     for j in 0..sdim {
-        for i in 0..sdim {
-            state[i + j * sdim] = state[i + j * sdim] * decay + k[i] * d[j];
+        for (i, &ki) in k.iter().enumerate() {
+            state[i + j * sdim] = state[i + j * sdim] * decay + ki * d[j];
         }
     }
+
+    // o[j] = sum_i S[i,j] * q[i]   (S^T q)
     for j in 0..sdim {
         let mut acc = 0.0f32;
         for (i, &qi) in q.iter().enumerate() {
             acc += state[i + j * sdim] * qi;
-        }
-        out[j] = acc;
-    }
-}
-
-/// One autoregressive gated-delta-net step for a single head.
-///
-/// `state` is row-major S×S (element (i,j) at i + j*S, matching ggml's
-/// [S_v, S_v] tensor). `q` is scaled by the caller. Updates state in place
-/// and writes the head output to `out`.
-pub fn delta_head(state: &mut [f32], q: &[f32], k: &[f32], v: &[f32], gate: f32, beta: f32, out: &mut [f32]) {
-    debug_assert_eq!(state.len(), S * S);
-    debug_assert_eq!(q.len(), S);
-    debug_assert_eq!(k.len(), S);
-    debug_assert_eq!(v.len(), S);
-
-    let decay = gate.exp();
-
-    // sk[j] = sum_i S[i,j] * k[i]      (S^T k)
-    let mut sk = [0f32; S];
-    for j in 0..S {
-        let mut acc = 0.0f32;
-        for (i, &ki) in k.iter().enumerate() {
-            acc += state[i + j * S] * ki;
-        }
-        sk[j] = acc * decay;
-    }
-
-    // d[j] = beta * (v[j] - sk[j]); S[i,j] = S[i,j]*decay + k[i]*d[j]
-    let d: [f32; S] = std::array::from_fn(|j| beta * (v[j] - sk[j]));
-    for (j, &dj) in d.iter().enumerate() {
-        for (i, &ki) in k.iter().enumerate() {
-            state[i + j * S] = state[i + j * S] * decay + ki * dj;
-        }
-    }
-
-    // o[j] = sum_i S[i,j] * q[i]       (S^T q)
-    for j in 0..S {
-        let mut acc = 0.0f32;
-        for (i, &qi) in q.iter().enumerate() {
-            acc += state[i + j * S] * qi;
         }
         out[j] = acc;
     }
@@ -139,7 +121,7 @@ mod tests {
         let v = vec![0.3f32; S];
         let mut out = vec![0.0f32; S];
         let gate = -0.25f32;
-        delta_head(&mut state, &q, &k, &v, gate, 0.0, &mut out);
+        delta_head(&mut state, &q, &k, &v, DeltaStep { gate, beta: 0.0 }, &mut out);
         let expect = 0.5f32 * gate.exp();
         assert!(state.iter().all(|&x| (x - expect).abs() < 1e-6));
         // o = (S*decay)^T q  with q pre-scaled
@@ -159,7 +141,7 @@ mod tests {
         let mut v = vec![0.0f32; S];
         v[7] = 4.0;
         let mut out = vec![0.0f32; S];
-        delta_head(&mut state, &q, &k, &v, 0.0, 1.0, &mut out);
+        delta_head(&mut state, &q, &k, &v, DeltaStep { gate: 0.0, beta: 1.0 }, &mut out);
         // S = outer(k, v): S[i,j] = k_i*v_j
         assert!((state[5 + 7 * S] - 8.0).abs() < 1e-6);
         assert!((state[9 + 7 * S] - 4.0).abs() < 1e-6);
@@ -176,8 +158,8 @@ mod tests {
         let mut s2 = s1.clone();
         let mut o1 = vec![0f32; S];
         let mut o2 = vec![0f32; S];
-        delta_head(&mut s1, &q, &k, &v, -0.1, 0.7, &mut o1);
-        delta_head(&mut s2, &q, &k, &v, -0.1, 0.7, &mut o2);
+        delta_head(&mut s1, &q, &k, &v, DeltaStep { gate: -0.1, beta: 0.7 }, &mut o1);
+        delta_head(&mut s2, &q, &k, &v, DeltaStep { gate: -0.1, beta: 0.7 }, &mut o2);
         assert_eq!(s1, s2, "must be deterministic");
         assert_eq!(o1, o2);
     }
@@ -279,7 +261,7 @@ impl Card {
     }
     /// true if layer il uses gated delta-net, false = full attention
     pub fn is_delta(&self, il: usize) -> bool {
-        (il + 1) % self.full_attention_interval != 0
+        !(il + 1).is_multiple_of(self.full_attention_interval)
     }
 
     /// Tied-head fallback allowed only for families without untied export.
@@ -446,7 +428,7 @@ impl Qwen35Stage {
         let c = self.card.clone();
         let inner = &self.inner;
         let h = rmsnorm(x, &inner.vec_gain(&format!("blk.{}.attn_norm.weight", il))?, c.eps);
-        let mut me = self;
+        let me = self;
 
         let o = if c.is_delta(il as usize) {
             me.run_delta(il, &h)?
@@ -524,16 +506,8 @@ impl Qwen35Stage {
             let qs: Vec<f32> = qh.iter().map(|x| x * scale).collect();
             let st_start = v_i * hd * hd;
             let st = &mut d.heads[st_start..st_start + hd * hd];
-            if hd == S && kd == S {
-                delta_head(st, &qs, &kh, vh, gate[v_i], beta[v_i], &mut o[v_i * hd..(v_i + 1) * hd]);
-            } else {
-                // generic path: copy out/in via temporaries
-                let mut buf = st.to_vec();
-                let mut oo = vec![0f32; hd];
-                delta_head_generic(&mut buf, hd, &qs, &kh, vh, gate[v_i], beta[v_i], &mut oo);
-                st.copy_from_slice(&buf);
-                o[v_i * hd..(v_i + 1) * hd].copy_from_slice(&oo);
-            }
+            let sp = DeltaStep { gate: gate[v_i], beta: beta[v_i] };
+            delta_head_dim(st, hd, &qs, &kh, vh, sp, &mut o[v_i * hd..(v_i + 1) * hd]);
         }
 
         if self.tap {

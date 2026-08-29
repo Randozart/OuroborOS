@@ -16,7 +16,7 @@ fn slot() -> &'static Mutex<Option<StageSlot>> {
 /// Which model family a loaded slot speaks.
 pub enum Loaded {
     Bitnet { stage: Stage, kv: Vec<LayerKv> },
-    Qwen(Qwen35Stage),
+    Qwen(Box<Qwen35Stage>),
 }
 
 /// Loaded stage + its KV state.
@@ -62,7 +62,7 @@ pub fn handle(kind: &str, payload: &str) -> Result<String> {
                     "node={} family=qwen35 layers={:?} tensors={} head={} embed={}",
                     shard.node, st.layers(), st.inner.tensor_count(), head, embed
                 );
-                (Loaded::Qwen(st), summary)
+                (Loaded::Qwen(Box::new(st)), summary)
             } else {
                 let cfg = bitnet_arch_from_env();
                 let stage = Stage::from_shard(&shard, cfg)?;
@@ -163,9 +163,8 @@ fn check_pos_bitnet(kv: &[LayerKv], pos: usize) -> Result<()> {
 
 fn run_layers_bitnet(stage: &Stage, kv: &mut [LayerKv], x: &[f32], pos: usize) -> Result<Vec<f32>> {
     let mut h = x.to_vec();
-    for li in 0..kv.len() {
-        let layer = stage.layers[li];
-        h = stage.run_layer(layer, &h, pos, &mut kv[li])?;
+    for (layer, k) in stage.layers.iter().zip(kv.iter_mut()) {
+        h = stage.run_layer(*layer, &h, pos, k)?;
     }
     // output_norm lives on the last stage (its shard owns the tensor)
     if stage.output_norm_present() {

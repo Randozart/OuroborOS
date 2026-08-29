@@ -205,14 +205,13 @@ impl Stage {
         let rb = w.kind.row_bytes(k);
         match w.kind {
             QuantKind::F32 => {
-                for i in 0..k {
-                    out[i] = f32::from_le_bytes(w.payload[(idx * k + i) * 4..(idx * k + i) * 4 + 4].try_into().unwrap());
+                for (o, w4) in out.iter_mut().zip(w.payload[idx * k * 4..(idx + 1) * k * 4].chunks_exact(4)) {
+                    *o = f32::from_le_bytes(w4.try_into().unwrap());
                 }
             }
             QuantKind::F16 => {
-                for i in 0..k {
-                    let b = (idx * k + i) * 2;
-                    out[i] = f16_to_f32(u16::from_le_bytes([w.payload[b], w.payload[b + 1]]));
+                for (o, w2) in out.iter_mut().zip(w.payload[idx * k * 2..(idx + 1) * k * 2].chunks_exact(2)) {
+                    *o = f16_to_f32(u16::from_le_bytes([w2[0], w2[1]]));
                 }
             }
             QuantKind::Tq1_0 => dequant::dequant_tq1_row(&w.payload, idx, rb, &mut out),

@@ -87,7 +87,7 @@ fn test_qwen_full_logits_diff() {
     let (ref_logits, tok) = {
         let m = bitnet_rs::BitNetModel::load(&model, 64, 4).unwrap();
         let ids = m.tokenize("Hello", true);
-        let cap = m.decode_capture(&vec![ids[0]]).unwrap();
+        let cap = m.decode_capture(&[ids[0]]).unwrap();
         let logits = cap.iter().find(|n| n.name == "result_output").map(|n| n.data.clone());
         (logits.expect("no result_output node"), ids[0] as usize)
     };
