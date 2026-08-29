@@ -846,3 +846,68 @@ highest-bandwidth device.
    which build ran the user's downloads?
 2. Objective exposure: per-run contract (tok/s floor, W ceiling) — agreed.
 3. 960 role: light stage member vs control plane — decide after M3 measurement.
+
+### 14.7 HDMI Video Modem Transport (GPU-to-GPU over display cables)
+
+**Question:** can we write GPU kernels to allow GPU-to-GPU contact over HDMI?
+**Verdict: yes, with one hardware truth — GPU HDMI ports are TMDS
+*transmitters* only. No receiver exists; wiring two outputs together fights
+drivers. Put a capture receiver on the far end and the HDMI stream becomes a
+bit-exact digital data link. This is a video modem, not an analog modem:
+TMDS 8b/10b arrives error-free over quality cable <= 3 m.
+
+**Receiver options (verified 2026-08-29):**
+- MacroSilicon MS2130 USB3 UVC stick (~R250): HDMI-in up to 4K30,
+  uncompressed **YUY2 1080p60 out = ~230 MB/s per direction**, driverless
+  Linux UVC. YUV *conversion* is lossy (255,0,0 -> 135,86,54) but YUY2
+  **passthrough preserves the Y channel per pixel -> one data byte per pixel**.
+- YuzukiLOHCC-PRO (open-source MS2130+MS8003 board, loop-out) - buildable.
+- Decklink-class PCIe capture: RGB444/4K60, 750-1500 MB/s, DMA near-VRAM.
+- Kria K26 wildcard: the FPGA itself decodes TMDS (HP banks + DVI-RX shield),
+  microsecond sync, no USB chain: GPU -> FPGA direct data-over-display.
+
+**Kernel design:**
+- TX (any GPU): encode payload into Y channel of a scanout framebuffer,
+  driven via DRM/KMS atomic plane from VRAM (zero copy). Frame layout:
+  `[preamble][seq][len][payload][Reed-Solomon parity]` across the pixel grid,
+  1080p60 -> ~230 MB/s effective after ~5% framing/parity tax.
+- RX (other box): V4L2 buffer -> wgpu deframe kernel (preamble search via
+  compute shader, payload extract, RS correct) -> VRAM destination.
+- MUST force source resolution == capture resolution (any scaler interpolation
+  destroys bits) and HDCP off (plain Linux framebuffers normally negotiate
+  unprotected; MS2130 keys are HDCP 1.x only).
+
+**Link comparison (per direction):**
+
+| Transport | BW | Latency | Cost |
+|-----------|-----|---------|------|
+| 1 GbE (existing) | 125 MB/s | ~160 us/hop | R0 |
+| HDMI modem (MS2130 stick) | ~230 MB/s | 33-66 ms (frame pipeline) | R250/box |
+| HDMI modem (RGB444/Decklink) | 750-1500 MB/s | 16-33 ms | R1500+ |
+| used 10 GbE (honest alternative) | 1250 MB/s | ~5 us | R150/card |
+
+**Role in the placement architecture:**
+- NOT for per-token activation hops: 33 ms frame latency vs 160 us Ethernet.
+  Pipeline hops stay on GbE/L2. The modem does not beat Ethernet where the
+  pipeline is latency-bound.
+- **Weight streaming on budget re-partition** (14.4): shifting ~3.5 GB onto a
+  card takes ~28 s over GbE, ~10 s over HDMI modem, ~2 s over Decklink.
+  `budget 120w.` recompiles become interactive; the OS can move the model
+  between devices between requests without stalling the cluster.
+- **MoE expert cold-fetch**, checkpoint replication, initial shard deploy
+  (15.4 GB one-time: 110 s -> 60 s per box).
+- Natural topology: **star downlink** - master's 3060 + 1070Ti HDMI-out feed
+  capture sticks in the two slave boxes (230 MB/s each way down); 1 GbE
+  carries the small return/control flow. Display cable = data plane,
+  Ethernet = signaling.
+
+**Implementation:** third backend behind `cluster/src/transport/` `Transport`
+trait (alongside TCP MVP + planned raw_l2): `HdmiModem` transport + framing/RS
+in a `ouro-modem` module; PlacementPlan gains per-edge link properties
+(bandwidth, latency, direction). Effort ~3-4 focused days incl. a throughput
+calibration rig. Risks: R1 HDCP negotiation (test first), R2 hidden scaler
+paths, R3 EDID limits (the stick's own EDID caps at 1080p60 - fine).
+
+**Why it belongs:** it is the thesis in hardware - ports everyone dismissed as
+display-only, repurposed as data planes by an OS that owns the whole stack.
+Prior art validates the class: Interocitor (GPGPU<->FPGA over SDI, 2015).
