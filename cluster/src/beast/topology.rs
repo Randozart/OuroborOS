@@ -4,7 +4,7 @@ use crate::probe::NodeInfo;
 use serde::{Deserialize, Serialize};
 
 /// A node in the cluster topology.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct NodeEntry {
     pub id: String,
     pub hostname: String,
@@ -27,27 +27,7 @@ pub struct NodeEntry {
     pub gpu_driver: String,
 }
 
-impl Default for NodeEntry {
-    fn default() -> Self {
-        Self {
-            id: String::new(),
-            hostname: String::new(),
-            ip: String::new(),
-            cpu_model: String::new(),
-            cores: 0,
-            threads: 0,
-            has_avx: false,
-            has_avx2: false,
-            has_sse42: false,
-            ram_mib: 0,
-            tdp_watts: 0,
-            has_gpu: false,
-            gpu_model: String::new(),
-            gpu_vram_mib: 0,
-            gpu_driver: String::new(),
-        }
-    }
-}
+
 
 /// A workload known to the cluster.
 #[derive(Debug, Clone, Serialize, Deserialize)]
