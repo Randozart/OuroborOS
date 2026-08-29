@@ -1,0 +1,8 @@
+/target
+*.gguf
+*.json
+*.beast
+*.o
+*.so
+*.dylib
+__pycache__/
