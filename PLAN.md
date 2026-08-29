@@ -682,3 +682,82 @@ NODE_2 HEALTH
 | 8 | Worker OS | NixOS vs CachyOS | CachyOS (GPU support) | Changed from NixOS |
 | 9 | Unikraft use | All nodes vs CPU-only | CPU-only workers | New decision |
 | 10 | Briev timeline | Now vs later | Later (compiler not ready) | New decision |
+
+## 13. The Qwen Program (2026-08-29) — THE SUMMIT
+
+**Thesis statement:** a 27B-class model, bigger than any single card in the
+cluster, streamed across four scrap GPUs by OurobourOS's own machinery,
+under a power budget, governed by the shell.
+
+### 13.1 Cluster Hardware (4 GPUs, 32 GB VRAM)
+
+| Node | GPU | VRAM | Arch | Driver | Role |
+|------|-----|------|------|--------|------|
+| Master (this box, CachyOS) | RTX 3060 LHR | 12 GB | sm_86 | r610 live | orchestrator + biggest stage + lm_head |
+| Master (second card) | GTX 1070 Ti | 8 GB | sm_61 | **needs r580** | stage |
+| IdeaPad/ThinkPad slave | GTX 1080 | 8 GB | sm_61 | r580 | stage |
+| Alienware Alpha R2 slave | GTX 960 | 4 GB | sm_52 | r580 (last Maxwell branch) | small stage |
+
+**Driver finding:** r610 dropped Pascal/Maxwell (1070 Ti invisible to
+nvidia-smi despite being bound). **r580 is the only branch covering
+Maxwell -> Ampere** -> single driver cluster-wide. CUDA 12.8 arch list:
+`52;61;86`. CUDA 13+ = dead end for the 960 -> our GPU kernels go **wgpu/
+Vulkan compute** (portable to all four).
+
+### 13.2 Target: Qwen3.8-27B (released 2026-08-14, Apache 2.0)
+
+- Dense 27.78B (LM 27B + vision), hidden 5120, **64 layers**, vocab 248,320,
+  **untied** lm_head, native 262K context, MTP heads.
+- Layout: `16 x (3 x (GatedDeltaNet -> FFN) -> 1 x (GatedAttention -> FFN))`
+  = 48 linear-attention + 16 softmax-attention layers.
+- Gated Attention: 24 Q / 4 KV heads, head_dim 256, **partial RoPE (64 dims)**.
+- Gated DeltaNet: 48 V / 16 QK heads, head_dim 128, constant-size state.
+- FFN: SwiGLU, intermediate 17,408.
+- **Vision tower skipped** (text-only).
+
+**Quantization budget (Q4_K_M):** weights ~15.4 GB + lm_head ~0.64 GB +
+DeltaNet state ~0.6 GB + attention KV ~0.06 GB/1K-tok -> **fits 32 GB
+comfortably, fits no single card -> the pipeline IS the product.**
+
+**Linear-attention gift:** constant per-layer state (no KV growth) makes
+262K context ~1 GB -> old cards + long context finally compatible.
+State lives on its stage; only hidden activations (20 KB/token) cross the wire.
+
+**Fast early win:** Qwen3.6-35B-A3B MoE (19 GB total, ~3B active) -> high
+tok/s achievable on this cluster before wgpu matures.
+
+### 13.3 Compute-Weighted Layer Packing
+
+Sequential pipeline: slowest stage sets tok/s. Pack by compute share, not
+equal layers, subject to VRAM: 960 (2.2 TF) ~4 layers; Pascals (9-11 TF)
+~17 each; 3060 (13 TF + tensor) ~26 layers incl. lm_head. Plan generator
+reads per-node probe (FLOPS class + VRAM) and emits stage -> [layer list].
+
+### 13.4 Milestones & Acceptance Contracts
+
+| Milestone | Gate (contract) |
+|-----------|-----------------|
+| M1: 27B forward in pure-Rust on CPU (this box, 32 GB RAM) | per-layer differential vs llama.cpp oracle: cosine > 0.999; dequant bit-identical to C |
+| M2: bridge benchmark — llama.cpp CUDA tensor-split 27B on 3060+1070 Ti (post r580) | reference tok/s bar recorded (est. 10-15) |
+| M3: 27B alive across 3 chassis, CPU-mode stages | same greedy tokens as M1 over TCP; hop RTT logged |
+| M4: wgpu GPU stages | **dense 27B >= 10 tok/s; 35B-A3B >= 30 tok/s**; shell reports W/token, budget never exceeded |
+
+### 13.5 Remaining Work (full)
+
+| # | Item | Where |
+|---|------|-------|
+| 1 | Q8_0/Q4_K (+later Q5_K/Q6_K, IQ) dequant + fused dot kernels | `cluster/src/infer/` |
+| 2 | `StageExecutor` trait: swappable CPU-MT / wgpu backend | `cluster/src/infer/` |
+| 3 | `ArchSpec`: sharder emits model card (hparams, family, layer types); graph templated by family (bitnet2b | qwen3.8 | llama-fam | qwen-moe) | tools + infer |
+| 4 | **GatedDeltaNet recurrence kernel** (gated delta rule, per-head state matrix) | `infer/ops` |
+| 5 | GatedAttention variant: head_dim 256, partial RoPE, QK-norm | `infer/ops` |
+| 6 | Rung B TCP: agent `stage_setup`/`stage_step` (holds Stage+KV per shard), `ouro-pipeline` orchestrator binary | agent + bin |
+| 7 | `probe/gpu.rs` (nvidia-smi csv, VITRIOL libvitriol/probe.rs to adapt) + NodeEntry GPU fields + scheduler VRAM/compute-aware packing | cluster |
+| 8 | wgpu compute backend: TQ1_0 first, then Q4_K gemv + delta state ops | new crate |
+| 9 | Shard shipping in `deploy.`: resume + checksum (15.4 GB over 1GbE ~25 min one-time) | shell/tools |
+| 10 | llama.cpp (fork has fused GatedDeltaNet; verify/refresh vs upstream) as test oracle only | tests |
+| 11 | Your hands: r580 on master (2 cards up), flash slaves (CachyOS minimal), wire LAN | - |
+| 12 | MTP speculative decoding head (throughput bonus) | later |
+
+**Non-goals (explicit):** training 20B+ BitNet (compute reality: ~10^22 FLOPs vs
+cluster ~50 TFLOPS), FPGA interconnect, Unikraft until CPU stages prove out.
