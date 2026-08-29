@@ -90,7 +90,7 @@ pub struct LayerKv {
 /// A quantized weight: raw payload + shape.
 #[derive(Clone)]
 struct Weight {
-    payload: Vec<u8>,
+    payload: crate::bmts::Payload,
     kind: QuantKind,
     in_len: usize,
     out_len: usize,
@@ -111,7 +111,7 @@ impl Stage {
         for t in &shard.tensors {
             let kind = QuantKind::from_dtype(t.dtype)
                 .ok_or_else(|| anyhow::anyhow!("unsupported dtype {} on {}", t.dtype, t.name))?;
-            let bytes = shard.read_tensor(&t.name)?;
+            let bytes = shard.tensor_bytes(&t.name)?;
             let (in_len, out_len) = match t.shape.len() {
                 1 => (t.shape[0] as usize, 1usize),
                 2 => (t.shape[0] as usize, t.shape[1] as usize),
@@ -140,7 +140,7 @@ impl Stage {
         if w.in_len != x.len() {
             bail!("tensor {}: in_len {} != x len {}", name, w.in_len, x.len());
         }
-        Ok(ops::matvec_q(&w.payload, w.kind, w.out_len, w.in_len, x))
+        Ok(ops::matvec_q(w.payload.bytes(), w.kind, w.out_len, w.in_len, x))
     }
 
     /// Embedding lookup: token row of `token_embd.weight` as f32.
@@ -153,7 +153,7 @@ impl Stage {
         if token >= w.out_len {
             bail!("token {} out of vocab {}", token, w.out_len);
         }
-        Ok(ops::f16_row(&w.payload, token, w.in_len))
+        Ok(ops::f16_row(w.payload.bytes(), token, w.in_len))
     }
 
     /// Logits over the vocab via this stage's `token_embd` (tied lm_head).
@@ -205,21 +205,21 @@ impl Stage {
         let rb = w.kind.row_bytes(k);
         match w.kind {
             QuantKind::F32 => {
-                for (o, w4) in out.iter_mut().zip(w.payload[idx * k * 4..(idx + 1) * k * 4].chunks_exact(4)) {
+                for (o, w4) in out.iter_mut().zip(w.payload.bytes()[idx * k * 4..(idx + 1) * k * 4].chunks_exact(4)) {
                     *o = f32::from_le_bytes(w4.try_into().unwrap());
                 }
             }
             QuantKind::F16 => {
-                for (o, w2) in out.iter_mut().zip(w.payload[idx * k * 2..(idx + 1) * k * 2].chunks_exact(2)) {
+                for (o, w2) in out.iter_mut().zip(w.payload.bytes()[idx * k * 2..(idx + 1) * k * 2].chunks_exact(2)) {
                     *o = f16_to_f32(u16::from_le_bytes([w2[0], w2[1]]));
                 }
             }
-            QuantKind::Tq1_0 => dequant::dequant_tq1_row(&w.payload, idx, rb, &mut out),
-            QuantKind::Q8_0 => dequant::dequant_q8_row(&w.payload, idx, rb, &mut out),
-            QuantKind::Q4K => dequant::dequant_q4k_row(&w.payload, idx, rb, &mut out),
-            QuantKind::Q3K => dequant::dequant_q3k_row(&w.payload, idx, rb, &mut out),
-            QuantKind::Q5K => dequant::dequant_q5k_row(&w.payload, idx, rb, &mut out),
-            QuantKind::Q6K => dequant::dequant_q6k_row(&w.payload, idx, rb, &mut out),
+            QuantKind::Tq1_0 => dequant::dequant_tq1_row(w.payload.bytes(), idx, rb, &mut out),
+            QuantKind::Q8_0 => dequant::dequant_q8_row(w.payload.bytes(), idx, rb, &mut out),
+            QuantKind::Q4K => dequant::dequant_q4k_row(w.payload.bytes(), idx, rb, &mut out),
+            QuantKind::Q3K => dequant::dequant_q3k_row(w.payload.bytes(), idx, rb, &mut out),
+            QuantKind::Q5K => dequant::dequant_q5k_row(w.payload.bytes(), idx, rb, &mut out),
+            QuantKind::Q6K => dequant::dequant_q6k_row(w.payload.bytes(), idx, rb, &mut out),
         }
         Ok(out)
     }
@@ -248,9 +248,10 @@ impl Stage {
             .tensors
             .get(name)
             .ok_or_else(|| anyhow::anyhow!("missing tensor {}", name))?;
+        let pb = w.payload.bytes();
         match w.kind {
-            QuantKind::F32 => Ok(w.payload.chunks_exact(4).map(|c| f32::from_le_bytes(c.try_into().unwrap())).collect()),
-            QuantKind::F16 => Ok(w.payload.chunks_exact(2).map(|c| f16_to_f32(u16::from_le_bytes([c[0], c[1]]))).collect()),
+            QuantKind::F32 => Ok(pb.chunks_exact(4).map(|c| f32::from_le_bytes(c.try_into().unwrap())).collect()),
+            QuantKind::F16 => Ok(pb.chunks_exact(2).map(|c| f16_to_f32(u16::from_le_bytes([c[0], c[1]]))).collect()),
             other => bail!("tensor {} not a vector dtype {:?}", name, other),
         }
     }

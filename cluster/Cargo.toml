@@ -5,6 +5,7 @@ edition.workspace = true
 
 [dependencies]
 anyhow.workspace = true
+memmap2 = "0.9"
 serde.workspace = true
 serde_json.workspace = true
 hostname = "0.4"
