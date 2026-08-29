@@ -11,6 +11,7 @@ use crate::parser::Command;
 pub struct ShellConfig {
     pub topology_file: String,
     pub node_addrs: Vec<(String, String)>,
+    pub shard_map: String,
 }
 
 impl ShellConfig {
@@ -18,6 +19,7 @@ impl ShellConfig {
         Self {
             topology_file: "cluster.beast".to_string(),
             node_addrs: Vec::new(),
+            shard_map: "shards/shard_map.json".to_string(),
         }
     }
 }
@@ -215,6 +217,65 @@ pub fn handle(
             let loaded = ClusterTopology::load_json(&path)?;
             *topology = loaded;
             Ok(format!("Cluster state loaded from {}. [DONE]", path))
+        }
+
+        Command::ShardStatus => {
+            let mut out = String::new();
+            if std::path::Path::new(&config.shard_map).exists() {
+                let plan = ouro_cluster::pipeline::PipelinePlan::load(&config.shard_map)?;
+                out.push_str(&format!("Pipeline plan: {} ({} stages)\n", plan.model, plan.stage_count()));
+                for s in &plan.nodes {
+                    let lo_hi = match (s.layers.first(), s.layers.last()) {
+                        (Some(a), Some(b)) => format!("{}..{}", a, b),
+                        _ => "-".to_string(),
+                    };
+                    out.push_str(&format!(
+                        "  node {}: layers {} | {} tensors | {:.1} MB | {}\n",
+                        s.node,
+                        lo_hi,
+                        s.tensors,
+                        s.bytes as f64 / 1e6,
+                        s.file
+                    ));
+                }
+            } else {
+                out.push_str(&format!(
+                    "No shard map at {}. Run: python3 tools/shard_model.py <model.gguf> <n>\n",
+                    config.shard_map
+                ));
+            }
+
+            if !config.node_addrs.is_empty() {
+                out.push_str("Activation transport probe (2560-dim f32 frame):\n");
+                let act = ouro_cluster::pipeline::Activation {
+                    sequence: 1,
+                    token_pos: 0,
+                    layer_start: 0,
+                    layer_end: 29,
+                    data: vec![0.0123; 2560],
+                };
+                let hex = ouro_cluster::pipeline::to_hex(&act.encode());
+                let task = crate::agent_client::AgentTask {
+                    id: "acts-probe".to_string(),
+                    name: "acts_echo".to_string(),
+                    payload: hex,
+                    estimated_watts: 5,
+                    estimated_seconds: 5,
+                };
+                for (id, addr) in &config.node_addrs {
+                    let t0 = std::time::Instant::now();
+                    match crate::agent_client::execute(addr, &task) {
+                        Ok(r) if r.status == "Success" => out.push_str(&format!(
+                            "  {} [{}]: {} ({:.1} ms rtt)\n",
+                            id, addr, r.output, t0.elapsed().as_secs_f64() * 1000.0
+                        )),
+                        Ok(r) => out.push_str(&format!("  {}: {} [{}]\n", id, r.output, r.status)),
+                        Err(e) => out.push_str(&format!("  {}: unreachable ({})\n", id, e)),
+                    }
+                }
+            }
+            out.push_str("[DONE]");
+            Ok(out)
         }
 
         Command::Generate { prompt } => {

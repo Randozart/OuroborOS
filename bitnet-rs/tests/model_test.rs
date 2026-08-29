@@ -44,7 +44,8 @@ fn test_bitnet_benchmark() {
         return;
     }
 
-    let model = BitNetModel::load(&path, 2048, 4).expect("Failed to load model");
+    let threads: u32 = std::env::var("OURO_N_THREADS").ok().and_then(|v| v.parse().ok()).unwrap_or(4);
+    let model = BitNetModel::load(&path, 2048, threads).expect("Failed to load model");
     let (pp, tg) = model.benchmark("The meaning of life is", 32).expect("benchmark failed");
     eprintln!("Benchmark: {:.2} tok/s prompt, {:.2} tok/s generate", pp, tg);
 }

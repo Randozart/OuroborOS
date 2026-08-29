@@ -117,6 +117,8 @@ pub enum Command {
     Load,
     /// `generate <text>.` — run BitNet generation on target nodes
     Generate { prompt: String },
+    /// `shards.` — show pipeline plan + activation transport probe
+    ShardStatus,
     /// `poetry on.` / `poetry off.`
     Poetry { enabled: bool },
     /// `cluster?` with assignment check
@@ -260,6 +262,9 @@ pub fn interpret(input: &str) -> Command {
         let prompt = rest.strip_suffix('.').unwrap_or(rest).trim().to_string();
         return Command::Generate { prompt };
     }
+    if trimmed == "shards." || trimmed.starts_with("shards ") {
+        return Command::ShardStatus;
+    }
     let tokens = lex(input);
     let stripped = strip_whitespace(tokens);
     parse(&stripped)
@@ -268,6 +273,11 @@ pub fn interpret(input: &str) -> Command {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_interpret_shards_command() {
+        assert!(matches!(interpret("shards."), Command::ShardStatus));
+    }
 
     #[test]
     fn test_interpret_generate_command() {

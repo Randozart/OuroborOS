@@ -6,3 +6,4 @@
 *.so
 *.dylib
 __pycache__/
+shards/

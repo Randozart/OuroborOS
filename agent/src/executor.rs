@@ -37,6 +37,14 @@ pub fn execute(task: &Task) -> Result<TaskResult> {
     let (status, output) = match task.name.as_str() {
         "echo" => (TaskStatus::Success, task.payload.clone()),
         "bench_sum" => (TaskStatus::Success, run_bench_sum(&task.payload)),
+        "load_shard" => match run_load_shard(&task.payload) {
+            Ok(out) => (TaskStatus::Success, out),
+            Err(e) => (TaskStatus::Failed, format!("shard error: {}", e)),
+        },
+        "acts_echo" => match run_acts_echo(&task.payload) {
+            Ok(out) => (TaskStatus::Success, out),
+            Err(e) => (TaskStatus::Failed, format!("acts error: {}", e)),
+        },
         #[cfg(feature = "bitnet")]
         "bitnet_generate" => match run_bitnet_generate(&task.payload) {
             Ok(out) => (TaskStatus::Success, out),
@@ -63,6 +71,39 @@ fn run_bench_sum(payload: &str) -> String {
     let n: u64 = payload.trim().parse().unwrap_or(1_000_000);
     let sum: u64 = (0..n).sum();
     sum.to_string()
+}
+
+/// Validate + summarize a BMTS shard at the given path.
+fn run_load_shard(path: &str) -> Result<String> {
+    use ouro_cluster::bmts::BmtsShard;
+    let shard = BmtsShard::open(path)?;
+    let first = shard.tensors.first().map(|t| t.name.as_str()).unwrap_or("-");
+    let last = shard.tensors.last().map(|t| t.name.as_str()).unwrap_or("-");
+    Ok(format!(
+        "shard node={} tensors={} data={}MB first={} last={}",
+        shard.node,
+        shard.tensors.len(),
+        shard.data_len() / 1_000_000,
+        first,
+        last
+    ))
+}
+
+/// Decode an ACTS activation frame (hex), echo its stats, re-encode, return hex.
+/// Proves activation transport end-to-end between pipeline stages.
+fn run_acts_echo(hex_payload: &str) -> Result<String> {
+    use ouro_cluster::pipeline::{from_hex, to_hex, Activation};
+    let bytes = from_hex(hex_payload.trim())?;
+    let act = Activation::decode(&bytes)?;
+    let stats = format!(
+        "seq={} pos={} layers={}-{} elems={}",
+        act.sequence, act.token_pos, act.layer_start, act.layer_end, act.data.len()
+    );
+    let roundtrip = act.encode();
+    if roundtrip != bytes {
+        anyhow::bail!("ACTS roundtrip mismatch");
+    }
+    Ok(format!("{} hex_back={}", stats, to_hex(&roundtrip).len()))
 }
 
 /// One-token-per-line generation guard: llama_decode is not thread-safe.
@@ -158,6 +199,71 @@ mod tests {
         let result = execute(&task).unwrap();
         assert_eq!(result.status, TaskStatus::Failed);
         assert!(result.output.contains("unknown task"));
+    }
+
+    #[test]
+    fn test_load_shard_task() {
+        use ouro_cluster::bmts::{write_shard, BmtsTensor};
+        let dir = std::env::temp_dir().join("ouro_agent_shard_test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("shard_1.bmts");
+        let tensors = vec![BmtsTensor {
+            name: "blk.0.attn_q.weight".into(),
+            shape: vec![4, 4],
+            dtype: 34,
+            offset: 0,
+            length: 16,
+        }];
+        write_shard(path.to_str().unwrap(), 1, &tensors, &[7u8; 16]).unwrap();
+
+        let task = Task {
+            id: "s1".into(),
+            name: "load_shard".into(),
+            payload: path.to_str().unwrap().into(),
+            estimated_watts: 5,
+            estimated_seconds: 1,
+        };
+        let result = execute(&task).unwrap();
+        assert_eq!(result.status, TaskStatus::Success);
+        assert!(result.output.contains("shard node=1"));
+        assert!(result.output.contains("blk.0.attn_q.weight"));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn test_load_shard_missing_fails() {
+        let task = Task {
+            id: "s2".into(),
+            name: "load_shard".into(),
+            payload: "/nonexistent/shard.bmts".into(),
+            estimated_watts: 5,
+            estimated_seconds: 1,
+        };
+        let result = execute(&task).unwrap();
+        assert_eq!(result.status, TaskStatus::Failed);
+    }
+
+    #[test]
+    fn test_acts_echo_task() {
+        use ouro_cluster::pipeline::{to_hex, Activation};
+        let act = Activation {
+            sequence: 1,
+            token_pos: 2,
+            layer_start: 0,
+            layer_end: 9,
+            data: vec![0.25, -0.5, 1.0, 2.0],
+        };
+        let task = Task {
+            id: "a1".into(),
+            name: "acts_echo".into(),
+            payload: to_hex(&act.encode()),
+            estimated_watts: 5,
+            estimated_seconds: 1,
+        };
+        let result = execute(&task).unwrap();
+        assert_eq!(result.status, TaskStatus::Success);
+        assert!(result.output.contains("elems=4"));
+        assert!(result.output.contains("layers=0-9"));
     }
 
     #[test]

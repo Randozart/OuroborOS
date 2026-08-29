@@ -234,9 +234,9 @@ This is the official Microsoft BitNet-b1.58-2B-4T model. Ready for single-node t
 | 0.3 | ✅ | `scheduler/workload_class.rs` | Workload classification |
 | 0.4 | ✅ | `transport/mod.rs` | Transport abstraction |
 | 0.5 | ✅ | `probe/mod.rs` | Probe modules (CPU, memory, energy) |
-| 0.6 | 🔲 | `shell/main.rs` | Shell REPL with dot notation |
-| 0.7 | 🔲 | `agent/main.rs` | Node agent daemon |
-| 0.8 | 🔲 | `probe/network.rs` | Network latency measurement |
+| 0.6 | ✅ | `shell/src/` | Shell REPL with dot notation (parser, formatter, propositions, agent_client) |
+| 0.7 | ✅ | `agent/src/` | Node agent daemon (TCP 9500, telemetry, heartbeat, tasks) |
+| 0.8 | ✅ | `probe/network.rs` | ICMP + TCP ping/pong RTT measurement |
 | 0.9 | 🔲 | `probe/gpu.rs` | GPU probe (adapt from VITRIOL) |
 | 0.10 | 🔲 | `beast/topology.rs` | Add GPU fields to NodeEntry |
 
@@ -249,20 +249,20 @@ pub pcie_gen: u32,
 pub pcie_width: u32,
 ```
 
-### Phase 1: BitNet Inference Engine (Weeks 5-8)
+### Phase 1: BitNet Inference Engine (Weeks 5-8) — Mostly Done (2026-08-29)
 
 **Goal:** Single-node BitNet inference working, then pipeline across nodes.
 
 | Step | File | Description |
 |------|------|-------------|
-| 1.1 | `inference/Cargo.toml` | Add BitNet.cpp as git submodule |
-| 1.2 | `inference/bitnet_ffi.rs` | Rust FFI wrapper around BitNet C API |
-| 1.3 | `scheduler/workload_class.rs` | Add `LlmInference` workload class |
-| 1.4 | `probe/gpu.rs` | GPU detection: `has_cuda`, `vram_mib` |
-| 1.5 | `tools/bench_bitnet.sh` | Single-node benchmark script |
-| 1.6 | `cluster/pipeline.rs` | Pipeline parallelism proof-of-concept |
-| 1.7 | `transport/raw_l2.rs` | Custom L2 protocol with EtherType 0x88B5 |
-| 1.8 | `transport/jumbo_frame.rs` | MTU 9000 frame implementation |
+| 1.1 | ✅ `bitnet-cpp/` | BitNet.cpp submodule (isHuangXin/llama.cpp fork) |
+| 1.2 | ✅ `bitnet-rs/` | bindgen FFI + safe wrapper; static-first linking |
+| 1.3 | ✅ `workload_class.rs` | `LlmInference` class added (needs AVX/AVX2) |
+| 1.4 | 🔲 `probe/gpu.rs` | GPU detection: `has_cuda`, `vram_mib` |
+| 1.5 | ✅ `tools/bench_bitnet.sh` | Benchmark: ~4 tok/s @4 threads (i7-3770, no AVX2) |
+| 1.6 | 🟡 `cluster/pipeline.rs` | ACTS frames + PipelinePlan + agent load_shard/acts_echo done; stage forward pending |
+| 1.7 | 🔲 `transport/raw_l2.rs` | Custom L2 protocol with EtherType 0x88B5 |
+| 1.8 | 🔲 `transport/jumbo_frame.rs` | MTU 9000 frame implementation |
 
 **BitNet.cpp integration:**
 ```rust
@@ -290,19 +290,43 @@ extern "C" {
   - tensor: [f16; 4096]  // 8KB for 8B model
 ```
 
-### Phase 2: Pipeline Parallelism (Weeks 9-12)
+### Phase 2: Pipeline Parallelism (Weeks 9-12) — started early
 
 **Goal:** Multi-node LLM inference with pipeline parallelism.
 
 | Step | File | Description |
 |------|------|-------------|
-| 2.1 | `tools/shard_model.py` | Model sharding tool |
+| 2.1 | ✅ `tools/shard_model.py` | Writes byte-exact .bmts shards (30L/2B -> 3 nodes) |
 | 2.2 | `cluster/weight_dist.rs` | Weight distribution protocol |
 | 2.3 | `cluster/pipeline.rs` | Pipeline orchestrator |
 | 2.4 | `cluster/kv_cache.rs` | Local KV-cache management |
 | 2.5 | `cluster/error_recovery.rs` | Node crash detection + restart |
 | 2.6 | `cluster/checkpoint.rs` | Pipeline state checkpointing |
 | 2.7 | `cluster/hot_swap.rs` | Weight update without restart |
+
+**Stage execution design (BMTS runtime, step 2.3)**
+
+llama.cpp's C API executes the full graph only — no partial-model entry point.
+Rejected: patching graph-splitting into the fork (upstream churn, two forks to
+maintain). Chosen: **pure-Rust forward over BMTS shards** (`cluster/src/infer/`):
+
+1. `Tq1Block` — TQ1_0 dequant (superblock 256: packed trit qs + scales), scalar first, AVX2 later.
+2. `run_stage(shard, x[2560]) -> x'[2560]` per owned layer: RMSNorm -> GQA attention
+   (20 q / 5 kv heads) with `attn_sub_norm` sub-quadrant scaling -> FFN (gate/up/down,
+   SiLU) with `ffn_sub_norm` — the b1.58 sub-quadrant norms are non-standard; match them exactly.
+3. Orchestrator keeps `token_embd` (n1) + tied `lm_head` (same tensor, transposed)
+   and loads vocab via `vocab_only=true` in llama.cpp — tokenizer stays borrowed, weights do not.
+4. Each stage owns KV cache for its layers (local, never on the wire).
+   Wire carries only hidden state: ACTS frame = 10.2 KB/token/hop -> ~20 KB/token over 1GbE: trivial.
+5. Verification ladder (contract-first):
+   a. in-process 3-stage pipeline vs full llama.cpp model: same greedy tokens, cosine > 0.999 per stage output;
+   b. same over localhost TCP + ACTS;
+   c. real hardware (Alpha R2 + ThinkPad + Kria A53, TL1 kernel path there).
+6. Speedup model: single-stream latency scales with layers/stage (~3x on 3 nodes);
+   micro-batched tokens-in-flight add throughput later.
+
+Effort: dequant + scalar forward + tied head ≈ 600-900 LoC + per-layer test vectors
+(dump reference activations from the controlled fork build with an env-gated writer).
 
 **Model sharding strategy:**
 ```
@@ -510,63 +534,47 @@ Broadcast:       FF:FF:FF:FF:FF:FF
 
 ## 8. Weight Format (BMTS)
 
-### 8.1 File Layout
+**Status: v1 IMPLEMENTED** — `cluster/src/bmts.rs` (Rust read/write) + `tools/shard_model.py` (GGUF -> per-node shards).
+
+### 8.1 v1 File Layout (implemented)
 
 ```
-[Sector 0: Metadata Header]
-  - Magic: 4 bytes ("BMTS")
-  - Version: 2 bytes
-  - Tensor Count: 2 bytes
-  - Reserved: 4 bytes
-  - Directory: [TensorEntry; N]
-    - Name: 32 bytes (null-terminated)
-    - LBA Offset: 8 bytes
-    - Byte Size: 8 bytes
-    - DType: 2 bytes (0=F16, 1=F32, 2=I8, 3=T158)
-    - Alignment: 2 bytes (always 4096)
-
-[Sector 1+: Contiguous Weights]
-  - Tensor 0: [f16; N] aligned to 4KB
-  - Tensor 1: [f16; N] aligned to 4KB
-  - ...
+[magic]      u32  0x4F55524F ("OURO")
+[version]    u16  1
+[node]       u16  node index, 1-based
+[n_tensors]  u32
+[meta_len]   u32
+[meta]       JSON tensor table: [{name, shape, dtype, offset, length}]
+             (offset = bytes into data section)
+[data]       concatenated raw tensor bytes
 ```
 
-### 8.2 Creation Tool
+Verified on `bitnet-2b-tq1_0.gguf` (332 tensors, 30 layers) split 3 ways:
+node 1 layers 0..9 = 803.8 MB (carries 656 MB f16 `token_embd`),
+nodes 2-3 = 147.1 MB each; 1098.1/1105.9 MB accounted; residual = GGUF header + padding.
 
-```python
-# tools/create_bmts.py
-import struct
-import numpy as np
+### 8.2 Activation Wire Format (ACTS v1, implemented)
 
-def create_bmts tensors, output_path:
-    """Pack tensors into BMTS format with 4KB alignment."""
-    with open(output_path, 'wb') as f:
-        # Write header
-        f.write(b'BMTS')
-        f.write(struct.pack('<H', 1))  # version
-        f.write(struct.pack('<H', len(tensors)))
-        f.write(b'\x00' * 4)  # reserved
-        
-        # Calculate offsets
-        offset = 4096  # start after header sector
-        for name, tensor in tensors:
-            size = tensor.nbytes
-            # Write directory entry
-            f.write(name.encode().ljust(32, b'\x00'))
-            f.write(struct.pack('<Q', offset))
-            f.write(struct.pack('<Q', size))
-            f.write(struct.pack('<H', tensor.dtype))
-            f.write(struct.pack('<H', 4096))
-            offset += align_to_4kb(size)
-        
-        # Write tensors
-        for name, tensor in tensors:
-            # Pad to 4KB alignment
-            current = f.tell()
-            padding = (4096 - (current % 4096)) % 4096
-            f.write(b'\x00' * padding)
-            f.write(tensor.tobytes())
-```
+`cluster/src/pipeline.rs`: 26-byte header (magic, ver, type, seq, token_pos,
+layer_start, layer_end, n_elems) + f32 payload. `PipelinePlan` parses
+`shard_map.json` into stage specs.
+
+MVP transport is hex-in-JSON over the existing agent task channel (newline
+delimited). Measured on localhost: 2560-dim frame (10 KB, 20.5 KB hex)
+round-trips in ~5 ms. **v2 direction:** raw binary framing (or L2, section 7)
+drops the 2x hex tax; 4 KB sector alignment for O_DIRECT deferred to v2.
+
+### 8.3 Tuning findings (2026-08-29, i7-3770 dev box)
+
+- TQ1_0 model runs on the native ggml path; TL2 LUT kernels NOT required
+  (and their codegen is broken against the fork's current API).
+- OpenMP oversubscription: threads=8 (all hw-threads) measured 5.8x SLOWER
+  than threads=4 (physical cores). Default all inference threads to physical
+  core count. `tools/bench_bitnet.sh` auto-detects.
+- Greedy sampling on the 2.4B base model loops ("a small city, and...");
+  temp=0.8 + top-k 40 + top-p 0.95 removes loops.
+- Generation ~4 tok/s/node with two agents co-resident; E2E shell ->
+  agent -> model -> shell proven over TCP.
 
 ---
 
@@ -647,20 +655,18 @@ NODE_2 HEALTH
 4. **Skip FPGA for now:** 1GbE is sufficient for pipeline parallelism.
 5. **Start with bitnet-2b:** 1.1GB model in workspace. Prove pipeline before scaling.
 
-### Immediate Actions
+### Immediate Actions (2026-08-29 status)
 
-| Priority | Action | Estimated Time |
-|----------|--------|---------------|
-| 1 | Build shell REPL (`shell/main.rs`) | 1 week |
-| 2 | Build node agent daemon (`agent/main.rs`) | 1 week |
-| 3 | Add GPU probe (adapt from VITRIOL) | 2 days |
-| 4 | Add GPU fields to NodeEntry | 1 day |
-| 5 | Integrate BitNet.cpp submodule | 1 day |
-| 6 | Write Rust FFI wrapper | 3 days |
-| 7 | Single-node benchmark | 2 days |
-| 8 | Pipeline POC (2 nodes, TCP) | 1 week |
-
----
+| # | Action | Status |
+|---|--------|--------|
+| 1 | Shell REPL | ✅ + live telemetry cache, `generate`/`shards`/`save`/`load`/`deploy` |
+| 2 | Node agent daemon | ✅ + bitnet_generate / load_shard / acts_echo tasks |
+| 3 | GPU probe (VITRIOL adapt) | 🔲 next |
+| 4 | GPU fields in NodeEntry | 🔲 blocked on 3 |
+| 5 | BitNet.cpp submodule | ✅ (TL2 kernels unneeded — TQ1_0 native path) |
+| 6 | Rust FFI wrapper | ✅ bindgen + safe BitNetModel (static-first) |
+| 7 | Single-node benchmark | ✅ ~4 tok/s i7-3770; `tools/bench_bitnet.sh`; 5.8x oversubscription finding |
+| 8 | Pipeline POC (TCP) | 🟡 framing/plan/transport-probe ✅; Rust stage forward = next big item (section 8.3) |
 
 ## 12. Open Decisions
 

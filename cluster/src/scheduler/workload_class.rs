@@ -16,6 +16,8 @@ pub enum WorkloadClass {
     Irregular,
     /// Many small independent tasks — GPU launch overhead dominates.
     SmallBatch,
+    /// Ternary LLM matvec — AVX2 LUT kernels beat legacy GPUs.
+    LlmInference,
     /// Not yet classified.
     Unknown,
 }
@@ -34,6 +36,12 @@ impl WorkloadClass {
             WorkloadClass::Irregular
         } else if lower.contains("batch") || lower.contains("small") {
             WorkloadClass::SmallBatch
+        } else if lower.contains("llm")
+            || lower.contains("bitnet")
+            || lower.contains("inference")
+            || lower.contains("generate")
+        {
+            WorkloadClass::LlmInference
         } else {
             WorkloadClass::Unknown
         }
@@ -47,6 +55,7 @@ impl WorkloadClass {
             WorkloadClass::SimdFriendly => "SIMD_FRIENDLY",
             WorkloadClass::Irregular => "IRREGULAR",
             WorkloadClass::SmallBatch => "SMALL_BATCH",
+            WorkloadClass::LlmInference => "LLM_INFERENCE",
             WorkloadClass::Unknown => "UNKNOWN",
         }
     }
@@ -96,5 +105,18 @@ mod tests {
         assert!(WorkloadClass::BranchHeavy.cpu_advantage());
         assert!(WorkloadClass::Recursive.cpu_advantage());
         assert!(!WorkloadClass::SimdFriendly.cpu_advantage());
+    }
+}
+
+#[cfg(test)]
+mod llm_tests {
+    use super::*;
+
+    #[test]
+    fn test_classify_llm_inference() {
+        assert_eq!(WorkloadClass::from_name("bitnet_generate"), WorkloadClass::LlmInference);
+        assert_eq!(WorkloadClass::from_name("llm_prompt"), WorkloadClass::LlmInference);
+        assert_eq!(WorkloadClass::LlmInference.label(), "LLM_INFERENCE");
+        assert!(WorkloadClass::LlmInference.cpu_advantage());
     }
 }

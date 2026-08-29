@@ -88,6 +88,7 @@ impl Scheduler {
             }
             WorkloadClass::SimdFriendly => node.has_avx2 || node.has_avx,
             WorkloadClass::SmallBatch => node.has_sse42,
+            WorkloadClass::LlmInference => node.has_avx2 || node.has_avx,
             WorkloadClass::Unknown => true,
         }
     }

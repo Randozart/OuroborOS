@@ -189,3 +189,55 @@ fn test_shell_client_agent_probe() {
     child.kill().ok();
     child.wait().ok();
 }
+
+#[test]
+fn test_acts_and_shard_tasks_over_tcp() {
+    use ouro_cluster::bmts::{write_shard, BmtsTensor};
+    use ouro_cluster::pipeline::{to_hex, Activation};
+
+    let (mut child, port) = start_agent();
+    let addr = format!("127.0.0.1:{}", port);
+
+    let act = Activation {
+        sequence: 1,
+        token_pos: 0,
+        layer_start: 0,
+        layer_end: 29,
+        data: vec![0.5; 2560],
+    };
+    let task = ouro_shell::agent_client::AgentTask {
+        id: "acts".into(),
+        name: "acts_echo".into(),
+        payload: to_hex(&act.encode()),
+        estimated_watts: 5,
+        estimated_seconds: 5,
+    };
+    let result = ouro_shell::agent_client::execute(&addr, &task).unwrap();
+    assert_eq!(result.status, "Success");
+    assert!(result.output.contains("elems=2560"));
+
+    let dir = std::env::temp_dir().join("ouro_it_shard");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("shard_1.bmts");
+    write_shard(
+        path.to_str().unwrap(),
+        1,
+        &[BmtsTensor { name: "blk.0.t".into(), shape: vec![2, 2], dtype: 34, offset: 0, length: 4 }],
+        &[1, 2, 3, 4],
+    )
+    .unwrap();
+    let task = ouro_shell::agent_client::AgentTask {
+        id: "shard".into(),
+        name: "load_shard".into(),
+        payload: path.to_str().unwrap().into(),
+        estimated_watts: 5,
+        estimated_seconds: 5,
+    };
+    let result = ouro_shell::agent_client::execute(&addr, &task).unwrap();
+    assert_eq!(result.status, "Success");
+    assert!(result.output.contains("shard node=1"));
+
+    std::fs::remove_dir_all(&dir).ok();
+    child.kill().ok();
+    child.wait().ok();
+}
