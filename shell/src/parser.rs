@@ -111,6 +111,8 @@ pub enum Command {
     Probe,
     /// `deploy.` — deploy node-agent
     Deploy,
+    /// `deploy shards.` — push model shards (checksum-aware) to nodes
+    DeployShards,
     /// `save.` — save cluster state
     Save,
     /// `load.` — load cluster state
@@ -119,6 +121,8 @@ pub enum Command {
     Generate { prompt: String },
     /// `shards.` — show pipeline plan + activation transport probe
     ShardStatus,
+    /// `discover. [cidr] [port]` — sweep subnet for agents, absorb them
+    Discover { cidr: Option<String>, port: Option<u16> },
     /// `poetry on.` / `poetry off.`
     Poetry { enabled: bool },
     /// `cluster?` with assignment check
@@ -265,6 +269,20 @@ pub fn interpret(input: &str) -> Command {
     if trimmed == "shards." || trimmed.starts_with("shards ") {
         return Command::ShardStatus;
     }
+    if trimmed.starts_with("deploy shards") {
+        return Command::DeployShards;
+    }
+    if trimmed.starts_with("discover.") || trimmed.starts_with("discover ") {
+        let rest = trimmed
+            .trim_start_matches("discover")
+            .trim_start_matches('.')
+            .trim()
+            .trim_end_matches('.');
+        let mut it = rest.split_whitespace();
+        let cidr = it.next().map(|s| s.to_string());
+        let port = it.next().and_then(|s| s.parse().ok());
+        return Command::Discover { cidr, port };
+    }
     let tokens = lex(input);
     let stripped = strip_whitespace(tokens);
     parse(&stripped)
@@ -379,5 +397,16 @@ mod tests {
     fn test_interpret_bare_property() {
         let cmd = interpret("power?");
         assert!(matches!(cmd, Command::ContextPropertyQuery { property } if property == "power"));
+    }
+}
+
+#[cfg(test)]
+mod discover_tests {
+    use super::*;
+    #[test]
+    fn test_discover_forms() {
+        assert!(matches!(interpret("discover."), Command::Discover { cidr: None, port: None }));
+        assert!(matches!(interpret("discover. 127.0.0.1 9501"), Command::Discover { cidr: Some(c), port: Some(9501) } if c == "127.0.0.1"));
+        assert!(matches!(interpret("discover 10.0.0"), Command::Discover { cidr: Some(c), port: None } if c == "10.0.0"));
     }
 }

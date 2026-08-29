@@ -179,8 +179,19 @@ def tensor_data_ranges(path, tensors):
     return ranges
 
 
-def classify(tensors, num_nodes):
-    """Split tensors into layer groups, distributed round-robin contiguous blocks."""
+def allocate_layers(total_layers, weights):
+    """Largest-remainder proportional split of layer counts to weights."""
+    tw = sum(weights)
+    raw = [total_layers * w / tw for w in weights]
+    base = [int(r) for r in raw]
+    rem = sorted(range(len(weights)), key=lambda i: raw[i] - base[i], reverse=True)
+    for i in range(total_layers - sum(base)):
+        base[rem[i % len(rem)]] += 1
+    return base
+
+
+def classify(tensors, num_nodes, weights=None):
+    """Split tensors into contiguous layer groups; weights bias the counts."""
     layer_map = {}
     non_layer = []
     for t in tensors:
@@ -197,12 +208,13 @@ def classify(tensors, num_nodes):
     if not layers:
         raise SystemExit("no blk.N tensors found — cannot shard")
 
-    per = max(1, len(layers) // num_nodes)
+    counts = allocate_layers(len(layers), weights or [1] * num_nodes)
     groups = []
+    lo = 0
     for i in range(num_nodes):
-        lo = i * per
-        hi = (i + 1) * per if i < num_nodes - 1 else len(layers)
-        take = [lay for j, lay in enumerate(layers) if lo <= j < hi]
+        hi = lo + counts[i]
+        take = layers[lo:hi]
+        lo = hi
         ts = []
         for lay in take:
             ts.extend(layer_map[lay])
@@ -247,6 +259,8 @@ def main():
     ap.add_argument("model")
     ap.add_argument("nodes", type=int)
     ap.add_argument("--output-dir", default="shards")
+    ap.add_argument("--weights", default=None,
+                    help="compute weights per node, e.g. 1,4,4,6 (bandwidth-proportional)")
     args = ap.parse_args()
 
     if not os.path.exists(args.model):
@@ -275,7 +289,10 @@ def main():
     card["keep_layers"] = keep_layers
 
     ranges = tensor_data_ranges(args.model, tensors)
-    groups = classify(tensors, args.nodes)
+    weights = [float(x) for x in args.weights.split(",")] if args.weights else None
+    if weights and len(weights) != args.nodes:
+        sys.exit("--weights needs one value per node")
+    groups = classify(tensors, args.nodes, weights)
 
     shard_map = {"model": os.path.basename(args.model), "model_card": card, "nodes": []}
     total = 0

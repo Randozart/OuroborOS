@@ -194,6 +194,39 @@ pub fn handle(
             Ok(fmt.probe_result(&nodes))
         }
 
+        Command::DeployShards => {
+            if config.node_addrs.is_empty() {
+                return Ok("No agent endpoints; start with --nodes. [SKIP]".to_string());
+            }
+            if !std::path::Path::new(&config.shard_map).exists() {
+                return Ok(format!("No shard map at {} — run tools/shard_model.py first. [SKIP]", config.shard_map));
+            }
+            let plan = ouro_cluster::pipeline::PipelinePlan::load(&config.shard_map)?;
+            let mut out = String::new();
+            out.push_str(&format!("Shard sync ({} stages):\n", plan.nodes.len()));
+            for (i, (_name, addr)) in config.node_addrs.iter().enumerate() {
+                let ip = addr.split(':').next().unwrap_or(addr).to_string();
+                if let Some(stage) = plan.nodes.iter().find(|s| s.node as usize == i + 1) {
+                    out.push_str(&sync_file(&ip, &stage.file));
+                }
+            }
+            // metadata last
+            for meta in ["model.json", "shard_map.json"] {
+                let dir = std::path::Path::new(&config.shard_map)
+                    .parent()
+                    .map(|d| d.join(meta))
+                    .filter(|p| p.exists());
+                if let Some(p) = dir {
+                    if let Some((_, a)) = config.node_addrs.first() {
+                        let ip = a.split(':').next().unwrap_or("").to_string();
+                        out.push_str(&sync_file(&ip, p.to_str().unwrap()));
+                    }
+                }
+            }
+            out.push_str("[DONE]");
+            Ok(out)
+        }
+
         Command::Deploy => {
             let mut out = String::new();
             out.push_str("Deploying node-agent to all nodes...\n");
@@ -220,6 +253,94 @@ pub fn handle(
             let loaded = ClusterTopology::load_json(&path)?;
             *topology = loaded;
             Ok(format!("Cluster state loaded from {}. [DONE]", path))
+        }
+
+        Command::Discover { cidr, port } => {
+            use crate::agent_client;
+            let port = port.unwrap_or(9500);
+            let prefix = match cidr.as_deref() {
+                Some(c) => c
+                    .split('/')
+                    .next()
+                    .and_then(|ip| {
+                        let p: Vec<&str> = ip.split('.').collect();
+                        if p.len() == 4 { Some(format!("{}.{}.{}", p[0], p[1], p[2])) } else { None }
+                    })
+                    .ok_or_else(|| anyhow::anyhow!("bad cidr: {}", cidr.unwrap_or_default()))?,
+                None => local_subnet()?,
+            };
+            let mut found: Vec<(String, agent_client::AgentTelemetry)> = Vec::new();
+            // 127/8 is entirely local: sweeping 254 loopbacks finds one host, not 254.
+            let hosts: Vec<String> = if prefix == "127.0.0" {
+                vec!["127.0.0.1".to_string()]
+            } else {
+                (1..=254).map(|h| format!("{}.{}", prefix, h)).collect()
+            };
+            let chunks = hosts.chunks(32);
+            for chunk in chunks {
+                std::thread::scope(|sc| {
+                    let handles: Vec<_> = chunk
+                        .iter()
+                        .map(|host| {
+                            sc.spawn(move || {
+                                let addr = format!("{}:{}", host, port);
+                                if !alive_fast(&addr, 200) {
+                                    return None;
+                                }
+                                agent_client::telemetry(&addr).ok().map(|t| (addr.clone(), t))
+                            })
+                        })
+                        .collect();
+                    for h in handles {
+                        if let Some(x) = h.join().unwrap() {
+                            found.push(x);
+                        }
+                    }
+                });
+            }
+            found.sort_by(|a, b| a.1.hostname.cmp(&b.1.hostname));
+            let mut seen: Vec<String> = Vec::new();
+            found.retain(|(_, t)| {
+                if seen.contains(&t.hostname) {
+                    false
+                } else {
+                    seen.push(t.hostname.clone());
+                    true
+                }
+            });
+            if found.is_empty() {
+                return Ok(format!("Swept {}{}.1-254:{} — no agents. [EMPTY]", prefix, "", port));
+            }
+            let mut out = format!("Sweeping {}.1-254:{}...\n", prefix, port);
+            let mut next_idx = topology.node_count() + 1;
+            for (addr, tel) in &found {
+                let known = topology.nodes.iter().position(|n| n.ip == addr.split(':').next().unwrap_or(""));
+                let entry = telemetry_to_node(addr, tel, String::new());
+                let slot = match known {
+                    Some(k) => {
+                        topology.nodes[k] = entry;
+                        k
+                    }
+                    None => {
+                        topology.nodes.push(entry);
+                        topology.nodes.last_mut().unwrap().id = format!("n{}", next_idx);
+                        next_idx += 1;
+                        topology.nodes.len() - 1
+                    }
+                };
+                let node = &topology.nodes[slot];
+                out.push_str(&format!(
+                    "  {} @ {} | {} | {}MiB | {}W{}\n",
+                    node.id,
+                    addr,
+                    tel.cpu_model,
+                    tel.ram_total_mib,
+                    tel.power_watts,
+                    if tel.gpus.is_empty() { String::new() } else { format!(" | GPU {}MiB", tel.gpus[0].vram_mib) }
+                ));
+            }
+            out.push_str(&format!("{} node(s) absorbed. `save.` to persist. [DONE]", found.len()));
+            Ok(out)
         }
 
         Command::ShardStatus => {
@@ -334,6 +455,47 @@ pub fn handle(
     }
 }
 
+/// rsync-or-scp one shard file to a node if checksums differ. Returns log line.
+fn sync_file(ip: &str, local: &str) -> String {
+    let name = std::path::Path::new(local)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("shard.bmts");
+    let Some(local_sha) = sha256_file(local) else {
+        return format!("  {}: local read failed\n", local);
+    };
+    let remote = run_ssh(ip, &format!("sha256sum ~/ouro/shards/{} 2>/dev/null || true", name));
+    if remote.starts_with(&local_sha) {
+        return format!("  {} -> {}:{} [ok]\n", local, ip, name);
+    }
+    run_ssh(ip, "mkdir -p ~/ouro/shards");
+    let ok = std::process::Command::new("scp")
+        .args(["-o", "BatchMode=yes", "-o", "ConnectTimeout=8", "-q"])
+        .arg(local)
+        .arg(format!("{}:~/ouro/shards/{}", ip, name))
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    format!("  {} -> {}:{} [{}]", local, ip, name, if ok { "pushed" } else { "FAILED" })
+}
+
+fn sha256_file(path: &str) -> Option<String> {
+    let out = std::process::Command::new("sha256sum").arg(path).output().ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    Some(String::from_utf8_lossy(&out.stdout).split_whitespace().next()?.to_string())
+}
+
+fn run_ssh(ip: &str, cmd: &str) -> String {
+    let out = std::process::Command::new("ssh")
+        .args(["-o", "BatchMode=yes", "-o", "ConnectTimeout=8", ip, cmd])
+        .output()
+        .ok();
+    out.map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_default()
+}
+
 /// Deploy agent binary to a remote node via SSH.
 fn deploy_agent(ip: &str) -> String {
     let binary_path = std::env::current_exe()
@@ -385,6 +547,60 @@ fn deploy_agent(ip: &str) -> String {
         }
         Err(e) => format!("ERROR: {}", e),
     }
+}
+
+/// TCP connect probe with a hard deadline.
+fn alive_fast(addr: &str, ms: u64) -> bool {
+    let ip_port: Vec<&str> = addr.rsplitn(2, ':').collect();
+    if ip_port.len() != 2 {
+        return false;
+    }
+    let port: u16 = match ip_port[0].parse() {
+        Ok(p) => p,
+        Err(_) => return false,
+    };
+    let ip: std::net::IpAddr = match ip_port[1].parse() {
+        Ok(i) => i,
+        Err(_) => return false,
+    };
+    std::net::TcpStream::connect_timeout(&std::net::SocketAddr::new(ip, port), std::time::Duration::from_millis(ms)).is_ok()
+}
+
+/// First non-loopback IPv4 of this machine -> "/24" prefix.
+fn local_subnet() -> anyhow::Result<String> {
+    let out = std::process::Command::new("sh")
+        .arg("-c")
+        .arg("hostname -I 2>/dev/null | cut -d' ' -f1")
+        .output()?;
+    let ip = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    let p: Vec<&str> = ip.split('.').collect();
+    if p.len() != 4 {
+        anyhow::bail!("cannot determine local subnet (got {:?}); pass discover. <a.b.c>", ip);
+    }
+    Ok(format!("{}.{}.{}", p[0], p[1], p[2]))
+}
+
+/// Telemetry snapshot -> topology entry (id assigned by caller context).
+fn telemetry_to_node(addr: &str, tel: &crate::agent_client::AgentTelemetry, id: String) -> ouro_cluster::beast::topology::NodeEntry {
+    let mut e = ouro_cluster::beast::topology::NodeEntry {
+        id,
+        hostname: tel.hostname.clone(),
+        ip: addr.split(':').next().unwrap_or(addr).to_string(),
+        cpu_model: tel.cpu_model.clone(),
+        cores: tel.cores,
+        threads: tel.threads,
+        has_avx: tel.has_avx2,
+        has_avx2: tel.has_avx2,
+        has_sse42: true,
+        ram_mib: tel.ram_total_mib,
+        tdp_watts: tel.power_watts.max(15),
+        has_gpu: !tel.gpus.is_empty(),
+        gpu_model: tel.gpus.first().map(|g| g.model.clone()).unwrap_or_default(),
+        gpu_vram_mib: tel.gpus.first().map(|g| g.vram_mib).unwrap_or(0),
+        gpu_driver: String::new(),
+    };
+    let _ = &mut e;
+    e
 }
 
 /// Append GPU census line to a cluster summary when any node has a GPU.
