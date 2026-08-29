@@ -3,6 +3,9 @@ extern "C" {
     fn dequantize_row_tq1_0(x: *const u8, y: *mut f32, k: i64);
     fn dequantize_row_q8_0(x: *const u8, y: *mut f32, k: i64);
     fn dequantize_row_q4_K(x: *const u8, y: *mut f32, k: i64);
+    fn dequantize_row_q3_K(x: *const u8, y: *mut f32, k: i64);
+    fn dequantize_row_q5_K(x: *const u8, y: *mut f32, k: i64);
+    fn dequantize_row_q6_K(x: *const u8, y: *mut f32, k: i64);
 }
 
 fn lcg(seed: u64) -> Vec<u8> {
@@ -70,6 +73,55 @@ fn test_tq1_dequant_parity_with_c() {
     for i in 0..elems {
         assert_eq!(rust[i].to_bits(), c[i].to_bits(), "mismatch at {}", i);
     }
+}
+
+/// Q3_K/Q5_K/Q6_K Rust dequant bit-identical to ggml C.
+#[test]
+fn test_q356_k_parity_with_c() {
+    use ouro_cluster::infer::{dequant_q3_k, dequant_q5_k, dequant_q6_k};
+    let raw = lcg(7777);
+    let nblk = 512;
+
+    // sanitize scale bytes so we never touch inf/nan f16 patterns:
+    // f16 bytes: high byte < 0x7c -> finite/normal
+    let mut buf = raw.clone();
+    fn sanitize(b: &mut [u8], blk: usize, scale_offsets: &[usize]) {
+        for chunk in b.chunks_mut(blk) {
+            for &o in scale_offsets {
+                chunk[o + 1] = chunk[o + 1] % 0x78; // high byte of half keeps exp < inf
+            }
+        }
+    }
+    // Q3_K 110B: d at 108 (LE: 108,109 -> high byte 109)
+    let mut q3 = raw[..nblk * 110].to_vec();
+    sanitize(&mut q3, 110, &[108]);
+    let r3 = dequant_q3_k(&q3);
+    let mut c3 = vec![0f32; nblk * 256];
+    unsafe { dequantize_row_q3_K(q3.as_ptr(), c3.as_mut_ptr(), (nblk * 256) as i64) };
+    for i in 0..c3.len() {
+        assert_eq!(r3[i].to_bits(), c3[i].to_bits(), "q3k mismatch at {} (rust {} c {} blk0 {:02x?})", i, r3[i], c3[i], &q3[0..110]);
+    }
+
+    // Q5_K 180B: d at 0, dmin at 2 (high bytes 1,3)
+    let mut q5 = raw[..nblk * 176].to_vec();
+    sanitize(&mut q5, 180, &[0, 2]);
+    let r5 = dequant_q5_k(&q5);
+    let mut c5 = vec![0f32; nblk * 256];
+    unsafe { dequantize_row_q5_K(q5.as_ptr(), c5.as_mut_ptr(), (nblk * 256) as i64) };
+    for i in 0..c5.len() {
+        assert_eq!(r5[i].to_bits(), c5[i].to_bits(), "q5k mismatch at {} (rust {} c {} dm {:02x}{:02x}{:02x}{:02x} sc {:02x?} qh{:02x} ql{:02x})", i, r5[i], c5[i], q5[0],q5[1],q5[2],q5[3], &q5[4..16], q5[20], q5[52]);
+    }
+
+    // Q6_K 210B: d at 208 (high byte 209)
+    let mut q6 = raw[..nblk * 210].to_vec();
+    sanitize(&mut q6, 210, &[208]);
+    let r6 = dequant_q6_k(&q6);
+    let mut c6 = vec![0f32; nblk * 256];
+    unsafe { dequantize_row_q6_K(q6.as_ptr(), c6.as_mut_ptr(), (nblk * 256) as i64) };
+    for i in 0..c6.len() {
+        assert_eq!(r6[i].to_bits(), c6[i].to_bits(), "q6k mismatch at {}", i);
+    }
+    eprintln!("q3/q5/q6 K: bit-exact");
 }
 
 /// Rust Q8_0/Q4_K dequant bit-identical to ggml C on pseudo-random blocks.

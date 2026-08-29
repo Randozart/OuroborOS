@@ -212,7 +212,10 @@ pub enum QuantKind {
     F16,
     Tq1_0,
     Q8_0,
+    Q3K,
     Q4K,
+    Q5K,
+    Q6K,
 }
 
 impl QuantKind {
@@ -222,7 +225,10 @@ impl QuantKind {
             0 => Some(Self::F32),
             1 => Some(Self::F16),
             8 => Some(Self::Q8_0),
+            11 => Some(Self::Q3K),
             12 => Some(Self::Q4K),
+            13 => Some(Self::Q5K),
+            14 => Some(Self::Q6K),
             34 => Some(Self::Tq1_0),
             _ => None,
         }
@@ -235,7 +241,10 @@ impl QuantKind {
             Self::F16 => 2,
             Self::Tq1_0 => TQ1_0_BLOCK_BYTES,
             Self::Q8_0 => Q8_0_BLOCK_BYTES,
+            Self::Q3K => Q3KBLOCK_BYTES,
             Self::Q4K => Q4_K_BLOCK_BYTES,
+            Self::Q5K => Q5_K_BLOCK_BYTES,
+            Self::Q6K => Q6_K_BLOCK_BYTES,
         }
     }
 
@@ -244,7 +253,7 @@ impl QuantKind {
         match self {
             Self::F32 | Self::F16 => 1,
             Self::Q8_0 => 32,
-            Self::Tq1_0 | Self::Q4K => QK_K,
+            Self::Tq1_0 | Self::Q4K | Self::Q3K | Self::Q5K | Self::Q6K => QK_K,
         }
     }
 
@@ -252,6 +261,174 @@ impl QuantKind {
     pub fn row_bytes(self, k: usize) -> usize {
         let be = self.block_elems();
         k / be * self.block_bytes()
+    }
+}
+
+
+/// Bytes per Q3_K block (256 elements): hmask32 + qs64 + scales12 + d2.
+pub const Q3KBLOCK_BYTES: usize = 110;
+/// Bytes per Q5_K block (256 elements): dm4 + scales12 + qh32 + qs128.
+pub const Q5_K_BLOCK_BYTES: usize = 176;
+/// Bytes per Q6_K block (256 elements): ql128 + qh64 + scales16 + d2.
+pub const Q6_K_BLOCK_BYTES: usize = 210;
+
+/// Decode one 110-byte Q3_K block into 256 f32 (faithful to ggml C).
+fn q3k_block(bytes: &[u8], out: &mut [f32]) {
+    let hmask = &bytes[0..32];
+    let qs = &bytes[32..96];
+    let sc = &bytes[96..108];
+    let d_all = f16_to_f32(u16::from_le_bytes([bytes[108], bytes[109]]));
+
+    // 6-bit scale unpack: aux[0..4] LE from 12 bytes, then the shuffle.
+    let mut aux = [0u32; 4];
+    for (i, chunk) in sc.chunks_exact(4).enumerate() {
+        aux[i] = u32::from_le_bytes(chunk.try_into().unwrap());
+    }
+    const K1: u32 = 0x03030303;
+    const K2: u32 = 0x0f0f0f0f;
+    let tmp = aux[2];
+    let na0 = (aux[0] & K2) | (((tmp >> 0) & K1) << 4);
+    let na1 = (aux[1] & K2) | (((tmp >> 2) & K1) << 4);
+    let na2 = ((aux[0] >> 4) & K2) | (((tmp >> 4) & K1) << 4);
+    let na3 = ((aux[1] >> 4) & K2) | (((tmp >> 6) & K1) << 4);
+    let scales: [i8; 16] = [
+        (na0 & 0xFF) as u8 as i8, (na0 >> 8) as u8 as i8, (na0 >> 16) as u8 as i8, (na0 >> 24) as u8 as i8,
+        (na1 & 0xFF) as u8 as i8, (na1 >> 8) as u8 as i8, (na1 >> 16) as u8 as i8, (na1 >> 24) as u8 as i8,
+        (na2 & 0xFF) as u8 as i8, (na2 >> 8) as u8 as i8, (na2 >> 16) as u8 as i8, (na2 >> 24) as u8 as i8,
+        (na3 & 0xFF) as u8 as i8, (na3 >> 8) as u8 as i8, (na3 >> 16) as u8 as i8, (na3 >> 24) as u8 as i8,
+    ];
+
+    let mut q = qs;
+    let hm = hmask;
+    let mut o = 0usize;
+    let mut is = 0usize;
+    let mut m: u8 = 1;
+    for _n in 0..2 {
+        let mut shift = 0u32;
+        for _j in 0..4 {
+            let dl = d_all * (scales[is] as f32 - 32.0);
+            is += 1;
+            for l in 0..16 {
+                let bit = if hm[l] & m != 0 { 0i8 } else { 4i8 };
+                let qi = ((q[l] >> shift) & 3) as i8;
+                out[o + l] = dl * (qi - bit) as f32;
+            }
+            let dl2 = d_all * (scales[is] as f32 - 32.0);
+            is += 1;
+            for l in 0..16 {
+                let bit = if hm[l + 16] & m != 0 { 0i8 } else { 4i8 };
+                let qi = ((q[l + 16] >> shift) & 3) as i8;
+                out[o + 16 + l] = dl2 * (qi - bit) as f32;
+            }
+            o += 32;
+            shift += 2;
+            m <<= 1;
+        }
+        q = &q[32..];
+    }
+}
+
+/// Decode one 180-byte Q5_K block into 256 f32.
+fn q5k_block(bytes: &[u8], out: &mut [f32]) {
+    let d = f16_to_f32(u16::from_le_bytes([bytes[0], bytes[1]]));
+    let min = f16_to_f32(u16::from_le_bytes([bytes[2], bytes[3]]));
+    let sc = &bytes[4..16];
+    let qh = &bytes[16..48];
+    let mut ql = &bytes[48..176];
+
+    let mut o = 0;
+    let mut is = 0usize;
+    let (mut u1, mut u2): (u8, u8) = (1, 2);
+    for _j in 0..4 {
+        let (s1, m1) = scale_min_k4(is, sc);
+        let (s2, m2) = scale_min_k4(is + 1, sc);
+        let d1 = d * s1 as f32;
+        let m1f = min * m1 as f32;
+        let d2 = d * s2 as f32;
+        let m2f = min * m2 as f32;
+        for l in 0..32 {
+            out[o + l] = d1 * ((ql[l] & 0xF) as f32 + if qh[l] & u1 != 0 { 16.0 } else { 0.0 }) - m1f;
+        }
+        for l in 0..32 {
+            out[o + 32 + l] = d2 * ((ql[l] >> 4) as f32 + if qh[l] & u2 != 0 { 16.0 } else { 0.0 }) - m2f;
+        }
+        o += 64;
+        ql = &ql[32..];
+        is += 2;
+        u1 <<= 2;
+        u2 <<= 2;
+    }
+}
+
+/// Decode one 210-byte Q6_K block into 256 f32.
+fn q6k_block(bytes: &[u8], out: &mut [f32]) {
+    let ql = &bytes[0..128];
+    let qh = &bytes[128..192];
+    let d = f16_to_f32(u16::from_le_bytes([bytes[208], bytes[209]]));
+    let sc = |idx: usize| bytes[192 + idx] as i8;
+
+    let mut o = 0;
+    let mut qlo = 0usize;
+    let mut qho = 0usize;
+    let mut sco = 0usize;
+    for _n in 0..2 {
+        for l in 0..32 {
+            let is = l / 16;
+            let hi = |b: u8, sh: u32| (((b >> sh) & 3) as i32) << 4;
+            let q1 = ((ql[qlo + l] & 0xF) as i32 | hi(qh[qho + l], 0)) as i8 - 32;
+            let q2 = ((ql[qlo + l + 32] & 0xF) as i32 | hi(qh[qho + l], 2)) as i8 - 32;
+            let q3 = ((ql[qlo + l] >> 4) as i32 | hi(qh[qho + l], 4)) as i8 - 32;
+            let q4 = ((ql[qlo + l + 32] >> 4) as i32 | hi(qh[qho + l], 6)) as i8 - 32;
+            out[o + l] = d * sc(sco + is) as f32 * q1 as f32;
+            out[o + l + 32] = d * sc(sco + is + 2) as f32 * q2 as f32;
+            out[o + l + 64] = d * sc(sco + is + 4) as f32 * q3 as f32;
+            out[o + l + 96] = d * sc(sco + is + 6) as f32 * q4 as f32;
+        }
+        o += 128;
+        qlo += 64;
+        qho += 32;
+        sco += 8;
+    }
+}
+
+/// Dequantize a full Q3_K payload.
+pub fn dequant_q3_k(bytes: &[u8]) -> Vec<f32> {
+    qk_full(bytes, Q3KBLOCK_BYTES, q3k_block)
+}
+/// Dequantize a full Q5_K payload.
+pub fn dequant_q5_k(bytes: &[u8]) -> Vec<f32> {
+    qk_full(bytes, Q5_K_BLOCK_BYTES, q5k_block)
+}
+/// Dequantize a full Q6_K payload.
+pub fn dequant_q6_k(bytes: &[u8]) -> Vec<f32> {
+    qk_full(bytes, Q6_K_BLOCK_BYTES, q6k_block)
+}
+
+fn qk_full(bytes: &[u8], blk: usize, f: fn(&[u8], &mut [f32])) -> Vec<f32> {
+    assert!(bytes.len() % blk == 0, "misaligned payload");
+    let mut out = vec![0.0f32; bytes.len() / blk * QK_K];
+    for (i, chunk) in bytes.chunks_exact(blk).enumerate() {
+        f(chunk, &mut out[i * QK_K..(i + 1) * QK_K]);
+    }
+    out
+}
+
+/// Row dequant helpers (row-major payloads).
+pub fn dequant_q3k_row(payload: &[u8], row: usize, row_bytes: usize, out: &mut [f32]) {
+    qk_row(payload, row, row_bytes, Q3KBLOCK_BYTES, q3k_block, out)
+}
+pub fn dequant_q5k_row(payload: &[u8], row: usize, row_bytes: usize, out: &mut [f32]) {
+    qk_row(payload, row, row_bytes, Q5_K_BLOCK_BYTES, q5k_block, out)
+}
+pub fn dequant_q6k_row(payload: &[u8], row: usize, row_bytes: usize, out: &mut [f32]) {
+    qk_row(payload, row, row_bytes, Q6_K_BLOCK_BYTES, q6k_block, out)
+}
+
+fn qk_row(payload: &[u8], row: usize, row_bytes: usize, blk: usize, f: fn(&[u8], &mut [f32]), out: &mut [f32]) {
+    let start = row * row_bytes;
+    let blocks = row_bytes / blk;
+    for b in 0..blocks {
+        f(&payload[start + b * blk..start + (b + 1) * blk], &mut out[b * QK_K..(b + 1) * QK_K]);
     }
 }
 
@@ -370,6 +547,10 @@ mod kquant_tests {
         assert_eq!(QuantKind::Tq1_0.row_bytes(2560), 10 * 54);
         assert_eq!(QuantKind::Q8_0.row_bytes(512), 16 * 34);
         assert_eq!(QuantKind::from_dtype(12), Some(QuantKind::Q4K));
-        assert_eq!(QuantKind::from_dtype(13), None);
+        assert_eq!(QuantKind::from_dtype(13), Some(QuantKind::Q5K));
+        assert_eq!(QuantKind::from_dtype(11), Some(QuantKind::Q3K));
+        assert_eq!(QuantKind::from_dtype(14), Some(QuantKind::Q6K));
+        assert_eq!(QuantKind::Q5K.row_bytes(5120), 20 * 176);
+        assert_eq!(QuantKind::Q3K.row_bytes(2560), 10 * 110);
     }
 }

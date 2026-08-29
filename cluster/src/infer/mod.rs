@@ -13,7 +13,8 @@ mod dequant;
 mod ops;
 
 pub use dequant::{
-    dequant_f16, dequant_q4_k, dequant_q8_0, dequant_tq1_0, f16_to_f32, QuantKind,
+    dequant_f16, dequant_q3_k, dequant_q4_k, dequant_q5_k, dequant_q6_k, dequant_q8_0,
+    dequant_tq1_0, f16_to_f32, QuantKind,
 };
 
 use anyhow::{bail, Result};

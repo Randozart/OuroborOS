@@ -3,7 +3,10 @@
 //! All matrices are row-major: W[out][in], y = W * x.
 //! GGML stores tensors with the input dim contiguous, which matches this.
 
-use super::dequant::{dequant_q4k_row, dequant_q8_row, dequant_tq1_row, f16_to_f32, QuantKind};
+use super::dequant::{
+    dequant_q3k_row, dequant_q4k_row, dequant_q5k_row, dequant_q6k_row, dequant_q8_row,
+    dequant_tq1_row, f16_to_f32, QuantKind,
+};
 
 /// RMSNorm: y = x / sqrt(mean(x^2) + eps) * w
 pub fn rmsnorm(x: &[f32], w: &[f32], eps: f32) -> Vec<f32> {
@@ -109,6 +112,9 @@ pub fn matvec_qblock(payload: &[u8], kind: QuantKind, out_len: usize, in_len: us
                         QuantKind::Tq1_0 => dequant_tq1_row(payload, r, rb, &mut row),
                         QuantKind::Q4K => dequant_q4k_row(payload, r, rb, &mut row),
                         QuantKind::Q8_0 => dequant_q8_row(payload, r, rb, &mut row),
+                        QuantKind::Q3K => dequant_q3k_row(payload, r, rb, &mut row),
+                        QuantKind::Q5K => dequant_q5k_row(payload, r, rb, &mut row),
+                        QuantKind::Q6K => dequant_q6k_row(payload, r, rb, &mut row),
                         _ => unreachable!("handled by matvec_q"),
                     }
                     *oy = dot(&row, x);
