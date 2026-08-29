@@ -57,8 +57,50 @@ def skip_kv_value(f, t):
         raise ValueError(f"unknown KV type {t}")
 
 
+def read_kv(f, t):
+    import json as _json
+    sz = {0:1,1:1,2:2,3:2,4:4,5:4,6:4,7:1,10:8,11:8,12:8,13:2,14:2}
+    if t == 8:
+        return read_str(f)
+    if t == 9:
+        at = struct.unpack("<I", f.read(4))[0]
+        al = struct.unpack("<Q", f.read(8))[0]
+        return [read_kv(f, at) for _ in range(al)]
+    fmt = {2:"<H",3:"<h",4:"<i",5:"<I",6:"<f",7:"<B",10:"<Q",11:"<q",12:"<d"}
+    return struct.unpack(fmt[t], f.read(sz[t]))[0]
+
+
+def build_model_card(kv):
+    """Extract a family-parameterized card. Understands qwen35 + bitnet/llama."""
+    arch = kv.get("general.architecture", "unknown")
+    p = {k[len(arch)+1:]: v for k, v in kv.items() if k.startswith(arch + ".")}
+    n_layer = p.get("block_count", 0)
+    card = {
+        "architecture": arch,
+        "n_layer": n_layer,
+        "n_embd": p.get("embedding_length", 0),
+        "n_head": p.get("attention.head_count", 0),
+        "n_head_kv": p.get("attention.head_count_kv", 0),
+        "n_ff": p.get("feed_forward_length", 0),
+        "n_vocab": kv.get("__vocab__") or p.get("vocab_size", 0),
+        "eps": p.get("attention.layer_norm_rms_epsilon", 1e-5),
+        "rope_base": p.get("rope.freq_base", 10000.0),
+        "n_rot": p.get("rope.dimension_count", 0),
+        "full_attention_interval": p.get("full_attention_interval", 1),
+        "nextn": p.get("nextn_predict_layers", 0),
+        "ssm": {
+            "conv_kernel": p.get("ssm.conv_kernel", 0),
+            "d_state": p.get("ssm.state_size", 0),
+            "n_k_heads": p.get("ssm.group_count", 0),
+            "n_v_heads": p.get("ssm.time_step_rank", 0),
+            "d_inner": p.get("ssm.inner_size", 0),
+        },
+    }
+    return card
+
+
 def parse_gguf(path):
-    """Return (tensors, alignment). tensors = list of dicts with name/shape/dtype/offset."""
+    """Return (tensors, alignment, card). card = model-card dict from GGUF KV."""
     with open(path, "rb") as f:
         magic = struct.unpack("<I", f.read(4))[0]
         if magic != GGUF_MAGIC:
@@ -68,13 +110,22 @@ def parse_gguf(path):
         n_kv = struct.unpack("<Q", f.read(8))[0]
 
         alignment = 32
+        kv = {}
         for _ in range(n_kv):
             key = read_str(f)
             vt = struct.unpack("<I", f.read(4))[0]
             if key == "general.alignment":
                 alignment = struct.unpack("<I", f.read(4))[0]
             else:
-                skip_kv_value(f, vt)
+                try:
+                    v = read_kv(f, vt)
+                    if key == "tokenizer.ggml.tokens":
+                        kv["__vocab__"] = len(v)
+                    else:
+                        kv[key] = v
+                except Exception:
+                    skip_kv_value(f, vt)
+        card = build_model_card(kv)
 
         tensors = []
         for _ in range(n_tensors):
@@ -85,7 +136,7 @@ def parse_gguf(path):
             offset = struct.unpack("<Q", f.read(8))[0]
             tensors.append({"name": name, "shape": shape, "dtype": dtype, "offset": offset})
 
-        return tensors, alignment
+        return tensors, alignment, card
 
 
 def tensor_data_ranges(path, tensors):
@@ -200,11 +251,31 @@ def main():
         sys.exit(f"model not found: {args.model}")
 
     os.makedirs(args.output_dir, exist_ok=True)
-    tensors, _ = parse_gguf(args.model)
+    tensors, _, card = parse_gguf(args.model)
+
+    keep_layers = card["n_layer"] - card.get("nextn", 0)
+    def keep(t):
+        n = t["name"]
+        if n.startswith("v.") or ".v_" in n or n.startswith("model.visual"):
+            return False
+        if n.startswith("blk."):
+            try:
+                return int(n.split(".")[1]) < keep_layers
+            except ValueError:
+                return True
+        if "nextn" in n:
+            return False
+        return True
+    dropped = [t["name"] for t in tensors if not keep(t)]
+    tensors = [t for t in tensors if keep(t)]
+    if dropped:
+        print(f"filtered {len(dropped)} non-text tensors (vision/nextn)")
+    card["keep_layers"] = keep_layers
+
     ranges = tensor_data_ranges(args.model, tensors)
     groups = classify(tensors, args.nodes)
 
-    shard_map = {"model": os.path.basename(args.model), "nodes": []}
+    shard_map = {"model": os.path.basename(args.model), "model_card": card, "nodes": []}
     total = 0
     for i, (layer_ids, ts) in enumerate(groups):
         path = os.path.join(args.output_dir, f"shard_{i+1}.bmts")
@@ -224,6 +295,8 @@ def main():
 
     with open(os.path.join(args.output_dir, "shard_map.json"), "w") as f:
         json.dump(shard_map, f, indent=2)
+    with open(os.path.join(args.output_dir, "model.json"), "w") as f:
+        json.dump(card, f, indent=2)
     print(f"total shard bytes: {total/1e6:.1f} MB (source {os.path.getsize(args.model)/1e6:.1f} MB)")
 
 

@@ -1,0 +1,72 @@
+//! Qwen3.8 differential: Rust qwen35 stage vs llama.cpp oracle capture.
+//! Gate: attn_output-0 / new_state-0 / linear_attn_out-0 / l_out-0 cos > 0.999.
+
+use ouro_cluster::bmts::BmtsShard;
+use ouro_cluster::infer::qwen35::{Card, Qwen35Stage};
+
+fn root() -> std::path::PathBuf {
+    std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().to_path_buf()
+}
+
+fn cos(a: &[f32], b: &[f32]) -> f32 {
+    let (mut d, mut na, mut nb) = (0.0f64, 0.0f64, 0.0f64);
+    for i in 0..a.len().min(b.len()) {
+        let (x, y) = (a[i] as f64, b[i] as f64);
+        d += x * y;
+        na += x * x;
+        nb += y * y;
+    }
+    (d / (na.sqrt() * nb.sqrt()).max(1e-30)) as f32
+}
+
+#[test]
+#[ignore] // heavy: 9B oracle + shard
+fn test_qwen_layer0_delta_diff() {
+    let r = root();
+    let model = std::env::var("CAP_MODEL")
+        .unwrap_or("/home/randozart/Downloads/Qwen3.8-9B-Q6_K.gguf".into());
+    let card = Card::load(r.join("shards9b/model.json").to_str().unwrap()).unwrap();
+    let shard_path = r.join("shards9b/shard_1.bmts");
+    if !std::path::Path::new(&model).exists() || !shard_path.exists() {
+        eprintln!("missing model or shards");
+        return;
+    }
+
+    // Oracle: single-token prefill (BOS) — fused chunk == AR.
+    let m = bitnet_rs::BitNetModel::load(&model, 64, 4).unwrap();
+    let ids = m.tokenize("Hello", true);
+    let bos = vec![ids[0]];
+    let cap = m.decode_capture(&bos).unwrap();
+    let get = |name: &str| -> Option<Vec<f32>> {
+        cap.iter().find(|n| n.name == name).map(|n| n.data.clone())
+    };
+
+    // Rust: same token through stage 1 delta layer 0.
+    let shard = BmtsShard::open(shard_path.to_str().unwrap()).unwrap();
+    let mut stage = Qwen35Stage::from_shard(&shard, card.clone()).unwrap();
+    stage.tap = true;
+    let emb = stage.inner.row("token_embd.weight", ids[0] as usize).unwrap();
+    let l0 = stage.run_layer(0, &emb, 0).unwrap();
+
+    let checks: [(&str, Option<Vec<f32>>); 9] = [
+        ("linear_attn_qkv_mixed-0", stage.last_qkv.clone()),
+        ("conv_output_silu-0", stage.last_conv_out.clone()),
+        ("q_conv_predelta-0", stage.last_q.clone()),
+        ("beta_sigmoid-0", stage.last_beta.clone()),
+        ("gate-0", stage.last_gate.clone()),
+        ("attn_output-0", stage.last_delta_o.clone()),
+        ("new_state-0", stage.last_state.clone()),
+        ("linear_attn_out-0", stage.last_delta_out.clone()),
+        ("l_out-0", Some(l0.clone())),
+    ];
+    for (name, mine) in checks {
+        let Some(mine) = mine else { continue };
+        let Some(refd) = get(name) else {
+            eprintln!("{}: not in capture", name);
+            continue;
+        };
+        let c = cos(&refd, &mine);
+        eprintln!("{} cos={:.6} (ref n={} mine n={})", name, c, refd.len(), mine.len());
+        assert!(c > 0.999, "{} diverged: cos {}", name, c);
+    }
+}

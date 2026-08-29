@@ -193,6 +193,56 @@ impl Stage {
         Ok(rmsnorm(x, &w, self.cfg.eps))
     }
 
+    /// Dequantize one row of a matrix tensor (embedding lookup, lm_head
+    /// transpose access). Row `idx` covers out_len dimension.
+    pub fn row(&self, name: &str, idx: usize) -> Result<Vec<f32>> {
+        let w = self.tensors.get(name).ok_or_else(|| anyhow::anyhow!("missing {}", name))?;
+        if idx >= w.out_len {
+            bail!("row {} out of bounds for {}", idx, name);
+        }
+        let k = w.in_len;
+        let mut out = vec![0.0f32; k];
+        let rb = w.kind.row_bytes(k);
+        match w.kind {
+            QuantKind::F32 => {
+                for i in 0..k {
+                    out[i] = f32::from_le_bytes(w.payload[(idx * k + i) * 4..(idx * k + i) * 4 + 4].try_into().unwrap());
+                }
+            }
+            QuantKind::F16 => {
+                for i in 0..k {
+                    let b = (idx * k + i) * 2;
+                    out[i] = f16_to_f32(u16::from_le_bytes([w.payload[b], w.payload[b + 1]]));
+                }
+            }
+            QuantKind::Tq1_0 => dequant::dequant_tq1_row(&w.payload, idx, rb, &mut out),
+            QuantKind::Q8_0 => dequant::dequant_q8_row(&w.payload, idx, rb, &mut out),
+            QuantKind::Q4K => dequant::dequant_q4k_row(&w.payload, idx, rb, &mut out),
+            QuantKind::Q3K => dequant::dequant_q3k_row(&w.payload, idx, rb, &mut out),
+            QuantKind::Q5K => dequant::dequant_q5k_row(&w.payload, idx, rb, &mut out),
+            QuantKind::Q6K => dequant::dequant_q6k_row(&w.payload, idx, rb, &mut out),
+        }
+        Ok(out)
+    }
+
+    /// Logits via untied `output.weight` when this stage owns it.
+    pub fn has_output_head(&self) -> bool {
+        self.tensors.contains_key("output.weight")
+    }
+
+    pub fn logits_untied(&self, h: &[f32]) -> Result<Vec<f32>> {
+        self.wm("output.weight", h)
+    }
+
+    /// Expose matrix apply for sub-family runners.
+    pub fn wmat(&self, name: &str, x: &[f32]) -> Result<Vec<f32>> {
+        self.wm(name, x)
+    }
+
+    pub fn vec_gain(&self, name: &str) -> Result<Vec<f32>> {
+        self.vec(name)
+    }
+
     /// 1-D vector tensor (norm gains) as f32.
     fn vec(&self, name: &str) -> Result<Vec<f32>> {
         let w = self
