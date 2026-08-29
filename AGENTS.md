@@ -22,17 +22,34 @@ OurobourOS/
 
 ## Architecture Philosophy
 
+**The founding document is `CONSTITUTION.md`. Read it first. Every design
+decision must be able to cite one of its articles (Art. 11 governance).**
+
+### No Purpose But Use (Constitution Art. 1 — the parent of all below)
+Hardware has no semantics, only capabilities. "GPU", "display port", "a
+computer" are inherited defaults, not facts. A CPU is an IO device in this
+distributed system. When you catch yourself writing "normally an OS would…",
+that is a default to price, attack, or invert (Art. 6, Art. 9).
+
 ### The Cluster Is One Machine
 Users interact with the cluster as a single entity. The shell hides
-multi-node complexity behind dot notation and propositions.
+multi-node complexity behind dot notation and propositions. The OS's unit
+is the cluster resource graph, not the host (Art. 3).
 
 ### Waste Is Fuel
-Old hardware is not trash. The scheduler routes work to the best available
-node based on architecture, SIMD capability, and energy budget.
+Old hardware is not trash — it is hardware whose purpose was misfiled by
+its vendor. The scheduler routes work to the best available node based on
+architecture, SIMD capability, and energy budget.
 
 ### Energy Is a First-Class Constraint
 Every scheduling decision considers power draw. The cluster has a budget.
-No assignment exceeds it.
+No assignment exceeds it. `budget 120w.` may re-place any op, any tensor,
+any transport — and even relocate the control plane itself (Art. 4).
+
+### Contracts Are the Fixed Point
+Because purpose is software, contracts are what make flexibility safe:
+parity ladders, cos > 0.999 gates, greedy-top1 equality, budgets. A
+recompiled placement that fails a contract is rejected, not excused (Art. 10).
 
 ### Self-Describing
 The cluster topology is embedded in itself as Beast S-expressions.

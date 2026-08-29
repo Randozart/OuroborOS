@@ -1,7 +1,15 @@
 # OurobourOS Enhanced Plan
 
 **Date:** 2026-08-29
-**Status:** Research complete, implementation pending
+**Status:** Phase 0 ✅, Phase 1 ✅, Phase 2 in progress — see §5 tables
+**Founding document:** `CONSTITUTION.md` — all architecture here instantiates
+its articles. When this plan and the constitution seem to conflict, the
+constitution wins; when a design decision here cannot cite an article, it is
+cargo cult and must be rejected at review (Constitution Art. 11).
+
+**Reading guide:** §1-4 = why (the thesis), §5-9 = how (phases, protocol,
+weights), §13 = the Qwen Program (the summit), §14 = heterogeneous weight
+placement + HDMI modem (the constitution's first full applications).
 
 ---
 
