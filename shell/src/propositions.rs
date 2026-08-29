@@ -74,7 +74,7 @@ pub fn handle(
             let entry = topology
                 .get_node(&node)
                 .ok_or_else(|| anyhow::anyhow!("Node {} not found", node))?;
-            let value = resolve_node_property(entry, &property);
+            let value = resolve_node_property(entry, &property, ctx);
             Ok(fmt.property_query(&node, &property, &value))
         }
 
@@ -83,7 +83,7 @@ pub fn handle(
                 let entry = topology
                     .get_node(&node_id)
                     .ok_or_else(|| anyhow::anyhow!("Node {} not found", node_id))?;
-                let value = resolve_node_property(entry, &property);
+                let value = resolve_node_property(entry, &property, ctx);
                 Ok(fmt.property_query(&node_id, &property, &value))
             } else {
                 Ok(fmt.unknown(&format!("{}?", property)))
@@ -217,6 +217,49 @@ pub fn handle(
             Ok(format!("Cluster state loaded from {}. [DONE]", path))
         }
 
+        Command::Generate { prompt } => {
+            if config.node_addrs.is_empty() {
+                return Ok("No agent endpoints. Start with --nodes n1@host:port,.. [SKIP]".to_string());
+            }
+            let targets: Vec<(String, String)> = match ctx.current_node() {
+                Some(node) => config
+                    .node_addrs
+                    .iter()
+                    .filter(|(id, _)| id == node)
+                    .cloned()
+                    .collect(),
+                None => config.node_addrs.clone(),
+            };
+            if targets.is_empty() {
+                let node = ctx.current_node().unwrap_or("?");
+                return Ok(format!("Node {} has no agent endpoint. [SKIP]", node));
+            }
+
+            let mut out = format!("Generating: \"{}\"\n", prompt);
+            let task = crate::agent_client::AgentTask {
+                id: format!("gen-{}", prompt.len()),
+                name: "bitnet_generate".to_string(),
+                payload: format!("{}|64|0.8", prompt),
+                estimated_watts: 35,
+                estimated_seconds: 60,
+            };
+            for (id, addr) in &targets {
+                match crate::agent_client::execute(addr, &task) {
+                    Ok(r) if r.status == "Success" => {
+                        out.push_str(&format!("  {} [{}ms]: {}\n", id, r.elapsed_ms, r.output));
+                    }
+                    Ok(r) => {
+                        out.push_str(&format!("  {}: {} [{}]\n", id, r.output, r.status));
+                    }
+                    Err(e) => {
+                        out.push_str(&format!("  {}: unreachable ({})\n", id, e));
+                    }
+                }
+            }
+            out.push_str("[DONE]");
+            Ok(out)
+        }
+
         Command::Poetry { enabled } => {
             fmt.set_poetry(enabled);
             ctx.set_poetry(enabled);
@@ -280,8 +323,11 @@ fn deploy_agent(ip: &str) -> String {
     }
 }
 
-/// Resolve a property name to a value from a NodeEntry.
-fn resolve_node_property(node: &ouro_cluster::beast::topology::NodeEntry, property: &str) -> String {
+/// Resolve a property: live agent cache first, static topology as fallback.
+fn resolve_node_property(node: &ouro_cluster::beast::topology::NodeEntry, property: &str, ctx: &Context) -> String {
+    if let Some(live) = ctx.get_property(&node.id, property) {
+        return format!("{} (live)", live);
+    }
     match property {
         "power" | "p" => format!("{}W", node.tdp_watts),
         "ram" | "r" => format!("{}MiB", node.ram_mib),
@@ -314,7 +360,6 @@ fn resolve_node_property(node: &ouro_cluster::beast::topology::NodeEntry, proper
 mod tests {
     use super::*;
     use ouro_cluster::beast::topology::NodeEntry;
-    use crate::context::Context;
     use crate::formatter::Formatter;
 
     fn test_topology() -> ClusterTopology {
@@ -363,6 +408,28 @@ mod tests {
     }
 
     #[test]
+    fn test_live_cache_overrides_static() {
+        let mut ctx = Context::new();
+        let mut props = std::collections::HashMap::new();
+        props.insert("power".to_string(), "12W".to_string());
+        ctx.cache_properties("n1", props);
+        let node = NodeEntry {
+            id: "n1".into(),
+            hostname: "test".into(),
+            ip: "127.0.0.1".into(),
+            cpu_model: "i5".into(),
+            cores: 2,
+            threads: 4,
+            has_avx: false,
+            has_avx2: false,
+            has_sse42: false,
+            ram_mib: 4096,
+            tdp_watts: 35,
+        };
+        assert_eq!(resolve_node_property(&node, "power", &ctx), "12W (live)");
+    }
+
+    #[test]
     fn test_save_load_roundtrip() {
         let topo = test_topology();
         let mut sched = Scheduler::new(topo.clone());
@@ -397,8 +464,9 @@ mod tests {
             ram_mib: 8192,
             tdp_watts: 35,
         };
-        assert_eq!(resolve_node_property(&node, "power"), "35W");
-        assert_eq!(resolve_node_property(&node, "ram"), "8192MiB");
-        assert_eq!(resolve_node_property(&node, "simd"), "AVX2, AVX, SSE4.2");
+        let ctx = Context::new();
+        assert_eq!(resolve_node_property(&node, "power", &ctx), "35W");
+        assert_eq!(resolve_node_property(&node, "ram", &ctx), "8192MiB");
+        assert_eq!(resolve_node_property(&node, "simd", &ctx), "AVX2, AVX, SSE4.2");
     }
 }

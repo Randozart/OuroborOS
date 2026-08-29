@@ -10,6 +10,37 @@ mod bindings {
 
 use bindings::*;
 
+/// Sampling configuration for generation.
+#[derive(Debug, Clone, Copy)]
+pub struct SamplingParams {
+    /// Temperature; 0.0 means greedy decoding.
+    pub temp: f32,
+    /// Top-k cutoff; 0 disables.
+    pub top_k: i32,
+    /// Top-p nucleus; >=1.0 disables.
+    pub top_p: f32,
+    /// RNG seed for distribution sampler.
+    pub seed: u32,
+}
+
+impl Default for SamplingParams {
+    fn default() -> Self {
+        Self { temp: 0.0, top_k: 0, top_p: 1.0, seed: 42 }
+    }
+}
+
+impl SamplingParams {
+    /// Deterministic greedy decoding.
+    pub fn greedy() -> Self {
+        Self::default()
+    }
+
+    /// Typical creative defaults for small ternary models.
+    pub fn creative() -> Self {
+        Self { temp: 0.8, top_k: 40, top_p: 0.95, seed: 42 }
+    }
+}
+
 /// Safe wrapper around a loaded BitNet model + inference context.
 pub struct BitNetModel {
     model: *mut llama_model,
@@ -124,7 +155,10 @@ impl BitNetModel {
     }
 
     /// Run one decode step on a single token, return sampled token.
-    pub fn step(&self, smpl: *mut llama_sampler, mut last_token: llama_token) -> Result<llama_token> {
+    ///
+    /// # Safety
+    /// `smpl` must be a live sampler chain pointer.
+    pub unsafe fn step(&self, smpl: *mut llama_sampler, mut last_token: llama_token) -> Result<llama_token> {
         unsafe {
             let batch = llama_batch_get_one(&mut last_token, 1);
             let ret = llama_decode(self.ctx, batch);
@@ -136,17 +170,55 @@ impl BitNetModel {
         }
     }
 
-    /// Generate text autoregressively (greedy).
+    /// Build a sampler chain from params: greedy, or top-k/top-p/temp/dist.
+    unsafe fn build_sampler(params: &SamplingParams) -> *mut llama_sampler {
+        let chain_params = llama_sampler_chain_default_params();
+        let smpl = llama_sampler_chain_init(chain_params);
+        if params.temp <= 0.0 {
+            llama_sampler_chain_add(smpl, llama_sampler_init_greedy());
+            return smpl;
+        }
+        if params.top_k > 0 {
+            llama_sampler_chain_add(smpl, llama_sampler_init_top_k(params.top_k));
+        }
+        if params.top_p < 1.0 {
+            llama_sampler_chain_add(smpl, llama_sampler_init_top_p(params.top_p, 1));
+        }
+        llama_sampler_chain_add(smpl, llama_sampler_init_temp(params.temp));
+        llama_sampler_chain_add(smpl, llama_sampler_init_dist(params.seed));
+        smpl
+    }
+
+    /// Clear the KV cache so consecutive generations stay independent.
+    pub fn reset_context(&self) {
+        unsafe {
+            let mem = llama_get_memory(self.ctx);
+            if !mem.is_null() {
+                llama_memory_clear(mem, false);
+            }
+        }
+    }
+
+    /// Generate text autoregressively with greedy sampling.
     pub fn generate(&self, prompt: &str, max_tokens: u32) -> Result<String> {
+        self.generate_with(prompt, max_tokens, &SamplingParams::greedy())
+    }
+
+    /// Generate text autoregressively with explicit sampling.
+    pub fn generate_with(
+        &self,
+        prompt: &str,
+        max_tokens: u32,
+        params: &SamplingParams,
+    ) -> Result<String> {
         unsafe {
             let mut tokens = self.tokenize(prompt, true);
             if tokens.is_empty() {
                 anyhow::bail!("Failed to tokenize prompt");
             }
 
-            let chain_params = llama_sampler_chain_default_params();
-            let smpl = llama_sampler_chain_init(chain_params);
-            llama_sampler_chain_add(smpl, llama_sampler_init_greedy());
+            self.reset_context();
+            let smpl = Self::build_sampler(params);
 
             let vocab = llama_model_get_vocab(self.model);
             let mut out = String::new();

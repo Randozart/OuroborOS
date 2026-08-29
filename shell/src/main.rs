@@ -76,6 +76,18 @@ fn demo_topology() -> ClusterTopology {
 }
 
 /// Parse --nodes ip:port,... CLI argument into (node_id, addr) pairs.
+/// Convert agent telemetry into live property cache entries.
+fn tel_props(tel: &ouro_shell::agent_client::AgentTelemetry) -> std::collections::HashMap<String, String> {
+    let mut props = std::collections::HashMap::new();
+    props.insert("power".to_string(), format!("{}W", tel.power_watts));
+    props.insert("temp".to_string(), format!("{}C", tel.temp_c));
+    props.insert("ram".to_string(), format!("{}MiB used of {}MiB", tel.ram_used_mib, tel.ram_total_mib));
+    props.insert("cpu".to_string(), tel.cpu_model.clone());
+    props.insert("status".to_string(), "AWAKE".to_string());
+    props.insert("load".to_string(), format!("{:.2}", tel.load_avg));
+    props
+}
+
 fn parse_nodes_arg(arg: &str) -> Vec<(String, String)> {
     arg.split(',')
         .filter(|s| !s.is_empty())
@@ -90,7 +102,6 @@ fn parse_nodes_arg(arg: &str) -> Vec<(String, String)> {
 
 fn main() -> Result<()> {
     banner();
-
     let args: Vec<String> = std::env::args().skip(1).collect();
     let nodes_arg = args
         .windows(2)
@@ -115,6 +126,7 @@ fn main() -> Result<()> {
         for (id, addr) in &node_addrs {
             match agent_client::telemetry(addr) {
                 Ok(tel) => {
+                    ctx.cache_properties(id, tel_props(&tel));
                     println!(
                         "  {}: {} [FOUND] ({}, {}MiB, {}W)",
                         id, addr, tel.cpu_model, tel.ram_total_mib, tel.power_watts
@@ -160,6 +172,7 @@ fn main() -> Result<()> {
                 for (id, addr) in &node_addrs {
                     match agent_client::telemetry(addr) {
                         Ok(tel) => {
+                            ctx.cache_properties(id, tel_props(&tel));
                             println!(
                                 "  {}: {}, {}MiB, {}W [FOUND]",
                                 id, tel.cpu_model, tel.ram_total_mib, tel.power_watts

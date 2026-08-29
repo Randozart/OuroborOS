@@ -115,6 +115,8 @@ pub enum Command {
     Save,
     /// `load.` — load cluster state
     Load,
+    /// `generate <text>.` — run BitNet generation on target nodes
+    Generate { prompt: String },
     /// `poetry on.` / `poetry off.`
     Poetry { enabled: bool },
     /// `cluster?` with assignment check
@@ -252,6 +254,12 @@ pub fn parse(tokens: &[Token]) -> Command {
 
 /// Convenience: lex + strip whitespace + parse.
 pub fn interpret(input: &str) -> Command {
+    let trimmed = input.trim();
+    // Raw-string shortcut: prompts may contain any characters except a trailing '.'
+    if let Some(rest) = trimmed.strip_prefix("generate ") {
+        let prompt = rest.strip_suffix('.').unwrap_or(rest).trim().to_string();
+        return Command::Generate { prompt };
+    }
     let tokens = lex(input);
     let stripped = strip_whitespace(tokens);
     parse(&stripped)
@@ -260,6 +268,15 @@ pub fn interpret(input: &str) -> Command {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_interpret_generate_command() {
+        let cmd = interpret("generate hello brave world.");
+        match cmd {
+            Command::Generate { prompt } => assert_eq!(prompt, "hello brave world"),
+            other => panic!("expected Generate, got {:?}", other),
+        }
+    }
 
     #[test]
     fn test_lex_bare_question() {

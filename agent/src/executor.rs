@@ -73,16 +73,24 @@ fn model_slot() -> &'static std::sync::Mutex<Option<bitnet_rs::BitNetModel>> {
     SLOT.get_or_init(|| std::sync::Mutex::new(None))
 }
 
-/// Run BitNet text generation. Payload: "prompt|max_tokens".
+/// Run BitNet text generation. Payload: "prompt|max_tokens|temp".
 /// Requires OURO_MODEL_PATH env var pointing to a BitNet GGUF file.
 #[cfg(feature = "bitnet")]
 fn run_bitnet_generate(payload: &str) -> Result<String> {
+    use bitnet_rs::SamplingParams;
+
     let model_path = std::env::var("OURO_MODEL_PATH")
         .map_err(|_| anyhow::anyhow!("OURO_MODEL_PATH not set"))?;
 
-    let (prompt, max_tokens) = match payload.split_once('|') {
-        Some((p, n)) => (p, n.parse::<u32>().unwrap_or(64)),
-        None => (payload, 64),
+    let mut parts = payload.splitn(3, '|');
+    let prompt = parts.next().unwrap_or("");
+    let max_tokens: u32 = parts.next().and_then(|s| s.parse().ok()).unwrap_or(64);
+    let temp: f32 = parts.next().and_then(|s| s.parse().ok()).unwrap_or(0.0);
+
+    let params = if temp > 0.0 {
+        SamplingParams { temp, top_k: 40, top_p: 0.95, seed: 42 }
+    } else {
+        SamplingParams::greedy()
     };
 
     let n_ctx: u32 = std::env::var("OURO_N_CTX")
@@ -104,7 +112,7 @@ fn run_bitnet_generate(payload: &str) -> Result<String> {
     }
 
     let model = guard.as_ref().expect("model just loaded");
-    model.generate(prompt, max_tokens)
+    model.generate_with(prompt, max_tokens, &params)
 }
 
 #[cfg(test)]
