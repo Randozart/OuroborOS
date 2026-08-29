@@ -49,6 +49,54 @@ impl SamplingParams {
     }
 }
 
+/// A graph-node output captured from a reference decode (oracle harness).
+#[derive(Debug, Clone)]
+pub struct CapturedNode {
+    pub name: String,
+    pub data: Vec<f32>,
+}
+
+struct Capture {
+    nodes: Vec<CapturedNode>,
+}
+
+unsafe extern "C" fn capture_cb(
+    t: *mut bindings::ggml_tensor,
+    is_add: bool,
+    ud: *mut std::os::raw::c_void,
+) -> bool {
+    if t.is_null() {
+        return true;
+    }
+    if is_add {
+        // claim every node: forces per-node compute + post-eval hook
+        return true;
+    }
+    if (*t).type_ != bindings::ggml_type_GGML_TYPE_F32 || !bindings::ggml_is_contiguous(t) {
+        return true;
+    }
+    let nb = bindings::ggml_nbytes(t);
+    if nb == 0 || nb > 64 * 1024 * 1024 {
+        return true;
+    }
+    let cap = &mut *(ud as *mut Capture);
+    let mut buf = vec![0u8; nb];
+    bindings::ggml_backend_tensor_get(
+        t,
+        buf.as_mut_ptr() as *mut std::os::raw::c_void,
+        0,
+        nb,
+    );
+    let name = std::ffi::CStr::from_ptr(bindings::ggml_get_name(t))
+        .to_string_lossy()
+        .into_owned();
+    cap.nodes.push(CapturedNode {
+        name,
+        data: buf.chunks_exact(4).map(|c| f32::from_le_bytes(c.try_into().unwrap())).collect(),
+    });
+    true
+}
+
 /// Safe wrapper around a loaded BitNet model + inference context.
 pub struct BitNetModel {
     model: *mut llama_model,
@@ -112,6 +160,41 @@ impl BitNetModel {
                 anyhow::bail!("Failed to load vocab-only model: {}", model_path);
             }
             Ok(Self { model, ctx: std::ptr::null_mut(), n_ctx: 0 })
+        }
+    }
+
+    /// Decode prompt tokens with the scheduler's per-node eval callback
+    /// enabled; returns every f32 node output (name, data) in compute order.
+    /// This is the ORACLE HARNESS: differential reference for the Rust forward.
+    pub fn decode_capture(&self, tokens: &[llama_token]) -> Result<Vec<CapturedNode>> {
+        unsafe {
+            if tokens.is_empty() {
+                anyhow::bail!("empty tokens");
+            }
+            let mut cap = Capture { nodes: Vec::new() };
+
+            let mut cparams = llama_context_default_params();
+            cparams.n_ctx = (tokens.len() + 8) as u32;
+            cparams.n_batch = tokens.len() as u32;
+            cparams.n_ubatch = tokens.len() as u32;
+            cparams.n_threads = 4;
+            cparams.n_threads_batch = 4;
+            cparams.cb_eval = Some(capture_cb);
+            cparams.cb_eval_user_data = &mut cap as *mut Capture as *mut std::os::raw::c_void;
+
+            let cctx = llama_init_from_model(self.model, cparams);
+            if cctx.is_null() {
+                anyhow::bail!("capture ctx init failed");
+            }
+
+            let mut toks = tokens.to_vec();
+            let batch = llama_batch_get_one(toks.as_mut_ptr(), toks.len() as c_int);
+            let ret = llama_decode(cctx, batch);
+            llama_free(cctx);
+            if ret != 0 {
+                anyhow::bail!("capture decode failed: {}", ret);
+            }
+            Ok(cap.nodes)
         }
     }
 

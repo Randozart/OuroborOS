@@ -210,3 +210,41 @@ fn test_pipeline_logits_match_reference() {
     assert!(cos > 0.99, "logit cosine too low: {}", cos);
     assert_eq!(ref_top, my_top, "greedy next-token must match");
 }
+
+/// Oracle harness validation on the ALREADY-PROVEN TQ1 model:
+/// capture must work, cover named nodes, and be bit-deterministic.
+#[test]
+#[ignore] // needs model file
+fn test_capture_oracle_on_tq1() {
+    let path = model_path();
+    if !std::path::Path::new(&path).exists() {
+        return;
+    }
+    let m = bitnet_rs::BitNetModel::load(&path, 256, 4).unwrap();
+    let ids = m.tokenize("The capital of France", true);
+    let c1 = m.decode_capture(&ids).unwrap();
+    let names: Vec<&str> = c1.iter().map(|n| n.name.as_str()).collect::<Vec<_>>();
+    eprintln!("captured {} nodes; first: {:?}; has blk0: {}",
+        c1.len(), &names[..names.len().min(5)],
+        names.iter().any(|n: &&str| n.contains("blk.0")));
+    assert!(c1.len() > 100, "too few nodes");
+    assert!(names.iter().any(|n: &&str| n.contains("attn_norm-0")));
+    assert!(names.iter().any(|n: &&str| n.contains("output")));
+    std::fs::write("/tmp/capture_names.txt", names.iter().map(|n| format!("{}\n", n)).collect::<String>()).ok();
+    if let Ok(f) = std::env::var("DUMP_CAP") {
+        let mut out = String::new();
+        for n in &c1 { out.push_str(&format!("{} {:?}\n", n.name, &n.data[..n.data.len().min(4)])); }
+        std::fs::write(f, out).ok();
+    }
+
+    let c2 = m.decode_capture(&ids).unwrap();
+    assert_eq!(c1.len(), c2.len());
+    for (a, b) in c1.iter().zip(&c2) {
+        assert_eq!(a.name, b.name);
+        assert_eq!(a.data.len(), b.data.len());
+        for i in 0..a.data.len() {
+            assert_eq!(a.data[i].to_bits(), b.data[i].to_bits(), "nondeterministic at {}", i);
+        }
+    }
+    eprintln!("capture deterministic ✓");
+}
