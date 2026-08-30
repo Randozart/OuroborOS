@@ -10,7 +10,9 @@ cargo cult and must be rejected at review (Constitution Art. 11).
 **Reading guide:** §1-4 = why (the thesis), §5-9 = how (phases, protocol,
 weights), §13 = the Qwen Program (the summit), §14 = heterogeneous weight
 placement + HDMI modem (the constitution's first full applications), §15 = prior art
-& lineage (provenance; read before claiming novelty).
+& lineage (provenance; read before claiming novelty), §16 = build schedule,
+§17 = GPU substrate findings & corpus synthesis. Canonical architecture lives
+in ARCHITECTURE.md; contracts in docs/CONTRACTS.md.
 
 ---
 
@@ -1117,3 +1119,75 @@ Order: **A → B → E → C → D → F** (prove-it-then-speed-it).
 
 **Not now (by decision):** wgpu kernels (wait for E's numbers), HDMI modem,
 chunked-delta prefill, 27B *throughput*.
+
+## 17. GPU Substrate Findings & Corpus Synthesis (2026-08-30 research session)
+
+### 17.1 The GPU floor under orphaned silicon — better than feared
+
+| Finding | Provenance | Consequence |
+|---|---|---|
+| **NVK (Mesa FOSS Vulkan) conformant Vulkan 1.3 on Maxwell, Pascal, Volta** — default since Mesa 25.1 (Apr 2025, Faith Ekstrand/Collabora) | collabora.com/news-and-blog: "NVK enabled for Maxwell, Pascal, and Volta" | every card we own speaks modern Vulkan with zero proprietary help |
+| NVK caveat: pre-Turing lacks GSP -> **stuck at boot clocks** (no reclocking) | same post | prefer NVIDIA proprietary ICD for perf; NVK = purity fallback + Plan B |
+| NVIDIA proprietary provides **full Vulkan 1.2 on Maxwell-2/Pascal/Volta** | nvidia developer Vulkan support page (archived matrix) | r580 ICD meets wgpu's floor on all four cards |
+| **`nvidia-580xx-dkms` exists, actively maintained** — AUR 580.178.04 (updated 2026-08-13, maintainer ptr1337/CachyOS) and **in CachyOS own repo** (580.173.02, built Jun 2026) | aur.archlinux.org/packages/nvidia-580xx-dkms; packages.cachyos.org | the driver question that gated GPU-first is a one-line pacman on every machine. Trap: avoid linux-lts (AUR note re 6.12.x) |
+| Arch advisory: driver 590 dropped Pascal/Maxwell -> "switch to nvidia-580xx-dkms" | bbs.archlinux.org id=311143 | the whole cluster converges on ONE branch (r580 covers Maxwell->Ampere incl. the 3060) — **master must swap r610 -> 580xx to see the 1070 Ti** |
+| **llama.cpp Vulkan scoreboard**: GTX 1080 Ti tg 67.8–71.6 t/s (L2-7B-Q4_0); 1070 Ti tg 42.9–43.4 (eGPU); 1070 tg 41–43 | github ggml-org/llama.cpp discussion #10879 (2026-era commits) | decode on Pascal desktop cards is 40–70 t/s on 7B — the M4 contract (30 tok/s on 27B across four) is bracketed by evidence |
+| **GTX 1060: Vulkan tg BEATS CUDA tg** (90.6 vs 61.7 small; 28.1 vs 25.4 on 7B) | issue #19817 (2026-02) | on pre-tensor-core chips Vulkan is not consolation — it wins on decode. ggml reports Pascal `coopmat:none, int dot:1` -> general path is the hot path |
+| 27B pipeline bound: spec aggregate ~1.04 TB/s (360+320+256+112); at ~45% eff. ÷ 13.8 GB/token | §14.2 math + scoreboard calibration | **~30–35 tok/s projected M4; plausible, not heroic** |
+
+### 17.2 Deployment architecture (decisions taken)
+
+- **Tiers**: T0 static musl agent + unit script (any Linux boots a node;
+  qwen35 engine included — CPU stages proven) -> T1 dual-boot CachyOS-minimal
+  recipe (R2: **single SATA bay — shrink existing disk, owner-approved**;
+  IdeaPad: shrink NVMe; shared ESP; nvidia-580xx-dkms; headless boot =
+  join-the-graph) -> T2 OurobourOS.iso (mkosi/archiso) post-M3.
+- **Master btrfs** (CachyOS default `@,@home,@srv` on sda, 432 G free):
+  `/srv/ouro/{repo,gen,shards}` subvolume tree; releases =
+  `gen/<UTC>` + `current` symlink flip (atomic rollback);
+  **qgroup fence proposed ~100 G** (subvolumes share the pool — capacity
+  independence is a lie until qgroups exist); btrfs send deltas = LAN
+  replication to slaves AND backup stream to sdb if owner elects.
+- **sdb (931 G NTFS): owner's backup drive — hands-off, no reformat.**
+- Honest limits recorded: subvolume independence = namespace/snapshot/
+  replication depth only; fate (device, pool, power) is shared — mitigated
+  by qgroup + send, not by naming.
+
+### 17.3 What the corpus points at (integration, for future readers)
+
+1. **Capability is solved; economics remain.** Every gate the industry put
+   in front of this build — correctness, formats, drivers, Vulkan-on-old-
+   NVIDIA, hybrid-attention ports — walked through this month. Remaining
+   unknowns are speed-shaped, not possibility-shaped.
+2. **The white space is the intersection.** Components all exist somewhere
+   (§15): Exokernel's doctrine, multikernel's machine-as-network, Beowulf's
+   economics, Condor's harvest, ggml-vulkan's kernels, video-modem hacks.
+   Nobody binds them with a measured graph + contract-gated re-placement +
+   watts as a recompile axis. That joint *is* the OS claim.
+3. **The ecosystem is converging on our constraints.** Linear attention
+   deleted KV from the wire (constant-state 48/64 layers); quantization
+   shrinks frontier models into orphaned-VRAM envelopes; CUDA-13 keeps
+   evicting old silicon, lowering our supply price and leaving Vulkan as
+   the open door — which our architecture was built to walk through.
+   Junk-tier models and junk-tier hardware are moving toward each other.
+4. **The method is the artifact.** Differential-test-everything caught every
+   real bug this project had (K_SCALE_SIZE, cursor, over-projection);
+   provenance-check (§15) is the same instinct at project scale. Neither is
+   decoration — both are the product's immune system.
+5. **One measurement stands between blueprint and numbers**: Vulkan decode
+   ceiling on our exact cards (llama-bench `-d vulkan -ngl 99`, §16.3
+   Phase 0) -> wgpu Q6_K kernel (L1 rung) -> GPU-pipeline demo -> physical
+   nodes. Everything else is machinery already built.
+
+### 17.4 Standing decisions & pendings
+
+| Item | State |
+|---|---|
+| GPU-first ordering | **DECIDED** (owner) |
+| qwen35 in static agent | **DECIDED yes** |
+| R2 disk shrink | **DECIDED OK** (single-bay chassis, recipe = gparted live) |
+| VITRIOL llama-server kill for Phase 0 | **approved** (first act when executed) |
+| Master driver swap r610 -> 580xx-dkms | PENDING owner call: bench-first (safe, 3060-only) vs swap-first (wakes 1070 Ti same day, reboots desktop) |
+| qgroup size /srv/ouro | PENDING (proposed 100 G) |
+| sdb usage for btrfs-send backup | PENDING (owner's drive) |
+| ARCHITECTURE.md + docs/CONTRACTS.md | **written this session** — canonical |
