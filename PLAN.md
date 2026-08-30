@@ -1191,3 +1191,19 @@ chunked-delta prefill, 27B *throughput*.
 | qgroup size /srv/ouro | PENDING (proposed 100 G) |
 | sdb usage for btrfs-send backup | PENDING (owner's drive) |
 | ARCHITECTURE.md + docs/CONTRACTS.md | **written this session** — canonical |
+
+### 16.3 M2 Bridge Results — CUDA on the 3060 (2026-08-30, llama-bench VITRIOL build)
+
+| model | device | pp t/s | tg t/s | notes |
+|-------|--------|--------|--------|-------|
+| bitnet-2.4B TQ1_0 | CUDA -ngl 99 | 2.4 | **1.6** | **WORSE than our CPU (3.8).** llama CUDA has no efficient TQ1_0 gemv path; "bitnet GPU kernels" target I2_S/TL2, not TQ1. GPU story for ternary needs their kernels or ours |
+| qwen35 9B Q6_K | CUDA -ngl 99 | 1249 | **22.9** | fits 11.9G; the bridge bar for our wgpu Q6_K kernel (L1 rung target >= ~15) |
+| qwen35 9B Q8_0 | CUDA -ngl 99 | 1301 | 20.7 | +bytes -> -tg: bandwidth-bound law confirmed empirically |
+| qwen35 27B Q3_K_M | CUDA -ngl 99 | — | — | **loader REFUSED: model > VRAM.** the single-card wall, literally enforced |
+| qwen35 27B Q3_K_M | CUDA -ngl 25 | 40.7 | 1.10 | partial offload: CPU-dominated tail; our 4-card pipeline target 30-35 t/s now bracketed below (CPU 0.03-0.16) and above (1080Ti-class x4) |
+
+Baselines for context: our Rust engine same box — 9B ~0.16 t/s, 27B ~0.03 t/s (CPU scalar+MT).
+**Gap to close with wgpu: ~140x at 9B — that is Phase 3's entire purpose; the
+22.9 t/s CUDA row on a 3060 (2021 card, $130) is the proof the GPU pool is
+where efficiency lives.** Vulkan column: pending `vulkan-headers` install
+(user action) + build-vk reconfigure already staged.
