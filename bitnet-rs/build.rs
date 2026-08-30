@@ -1,11 +1,17 @@
 use std::path::PathBuf;
 
+fn build_root_for(bitnet: &std::path::Path, sel: &str) -> std::path::PathBuf {
+    bitnet.join(sel)
+}
+
 fn main() {
     let manifest_dir = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap());
     let workspace = manifest_dir.parent().unwrap().to_path_buf();
     let bitnet = workspace.join("bitnet-cpp");
+    // Allow pointing at an alternate build tree (e.g. build-cuda)
+    let build_sel = std::env::var("BITNET_BUILD_DIR").unwrap_or_else(|_| "build".to_string());
     let llama_root = bitnet.join("3rdparty/llama.cpp");
-    let lib_dir = bitnet.join("build").join("bin");
+    let lib_dir = build_root_for(&bitnet, &build_sel).join("bin");
 
     let clang_include = format!(
         "-I{}",
@@ -44,7 +50,7 @@ fn main() {
         .write_to_file(out_path.join("bindings.rs"))
         .expect("failed to write bindings.rs");
 
-    let build_root = bitnet.join("build");
+    let build_root = build_root_for(&bitnet, &build_sel);
     let libllama_a = build_root.join("3rdparty/llama.cpp/src/libllama.a");
 
     if libllama_a.exists() {
@@ -70,4 +76,6 @@ fn main() {
     println!("cargo:rustc-link-arg=-Wl,-rpath,{}", lib_dir.display());
 
     println!("cargo:rerun-if-changed={}", llama_root.join("include/llama.h").display());
+    println!("cargo:rerun-if-env-changed=BITNET_BUILD_DIR");
+    println!("cargo:rerun-if-env-changed=OURO_GPU");
 }
