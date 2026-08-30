@@ -19,11 +19,16 @@ if [ -z "${MODELS}" ]; then
     )
 fi
 
-command -v nvcc >/dev/null || {
-    echo "nvcc not found. Install the CUDA toolkit first:"
-    echo "  sudo pacman -S cuda"
-    exit 1
-}
+# Arch/CachyOS keeps the toolkit under /opt/cuda
+if ! command -v nvcc >/dev/null; then
+    if [ -x /opt/cuda/bin/nvcc ]; then
+        export PATH="/opt/cuda/bin:$PATH"
+    else
+        echo "nvcc not found. Install the CUDA toolkit first:"
+        echo "  sudo pacman -S cuda"
+        exit 1
+    fi
+fi
 
 BUILD=bitnet-cpp/build-cuda
 ARCH="${CUDA_ARCH:-86}"   # 3060 = sm_86. Add 61 once r580 lands (never 52: CUDA 12.8 warns but compiles)
@@ -31,6 +36,7 @@ ARCH="${CUDA_ARCH:-86}"   # 3060 = sm_86. Add 61 once r580 lands (never 52: CUDA
 echo "== configuring GGML_CUDA=$ARCH =="
 cmake -S bitnet-cpp -B "$BUILD" \
     -DGGML_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES="$ARCH" \
+    -DCMAKE_CUDA_COMPILER=/opt/cuda/bin/nvcc \
     -DCMAKE_BUILD_TYPE=Release \
     -DBITNET_ARM_TL1=OFF -DBITNET_X86_TL2=OFF >/dev/null
 cmake --build "$BUILD" -j"$(nproc)" --config Release >/dev/null 2>&1 || {

@@ -2,6 +2,7 @@
 //!
 //! Usage:
 //!   ouro-pipeline --nodes n1@127.0.0.1:9501,n2@...:9502,..
+//!   ouro-pipeline --nodes-from cluster.json [--port 9500]   (post-`discover.`)
 //!                 [--plan shards/shard_map.json]
 //!                 [--prompt "text" | --ids 1,2,3]
 //!                 [--tokens 16]
@@ -26,9 +27,22 @@ fn main() -> Result<()> {
             .map(|w| w[1].clone())
     };
 
-    let addrs = get("--nodes").map(|a| parse_nodes(&a)).unwrap_or_default();
+    let addrs = match get("--nodes") {
+        Some(a) => parse_nodes(&a),
+        None => match get("--nodes-from") {
+            Some(topo_path) => {
+                let topo = ouro_cluster::beast::topology::ClusterTopology::load_json(&topo_path)?;
+                let port: u16 = get("--port").unwrap_or("9500".into()).parse()?;
+                topo.nodes
+                    .iter()
+                    .map(|n| (n.id.clone(), format!("{}:{}", n.ip, port)))
+                    .collect()
+            }
+            None => Vec::new(),
+        },
+    };
     if addrs.is_empty() {
-        bail!("--nodes n1@host:port,n2@... required");
+        bail!("--nodes n1@host:port,.. or --nodes-from cluster.json required");
     }
     let plan_path = get("--plan").unwrap_or_else(|| "shards/shard_map.json".into());
     let n_gen: u32 = get("--tokens").unwrap_or("16".into()).parse()?;
