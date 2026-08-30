@@ -1,0 +1,14 @@
+[package]
+name = "ouro-wgpu"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+ouro-cluster = { path = "../cluster" }
+anyhow.workspace = true
+wgpu = "25"
+pollster = "0.4"
+bytemuck = { version = "1", features = ["derive"] }
+
+[dev-dependencies]
+pollster = "0.4"
