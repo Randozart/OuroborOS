@@ -1207,3 +1207,30 @@ Baselines for context: our Rust engine same box — 9B ~0.16 t/s, 27B ~0.03 t/s 
 22.9 t/s CUDA row on a 3060 (2021 card, $130) is the proof the GPU pool is
 where efficiency lives.** Vulkan column: pending `vulkan-headers` install
 (user action) + build-vk reconfigure already staged.
+
+### 16.3b Vulkan bridge (same box, same binary: fork build-m2, CUDA+Vulkan, 2026-08-30)
+
+| model | device | pp t/s | tg t/s |
+|---|---|---|---|
+| 9B Q6_K | **Vulkan0** | 1375.8 | **43.87** |
+| 9B Q6_K | CUDA0 (same binary) | 1535.1 | 42.36 |
+| 9B Q8_0 | Vulkan0 | 987.8 | 35.91 |
+| bitnet-2.4B TQ1_0 | Vulkan0 | 4.2 | 2.0 |
+| 27B Q3_K_M (-ngl 25) | Vulkan0 | 27.5 | 0.88 |
+
+**Findings:**
+1. **Vulkan tg BEATS CUDA on the 3060 (43.9 vs 42.4, same binary, same card)** —
+   the GTX-1060 pattern generalizes to Ampere. Vulkan-first is not the
+   fallback; it is the fast path. Wgpu session is fully justified.
+2. **TQ1_0 is kernel-orphaned on every GPU backend** (CUDA 1.6, Vulkan 2.0
+   vs our CPU 3.8). Ternary GPU path = I2_S repack or our own kernel.
+3. 27B single-card partial (25/64 layers) is 0.9-1.1 t/s on either backend:
+   the pipeline (>=30 tok/s contract) is the ONLY way 27B flies. Confirmed
+   twice, by refusal (-ngl 99) and by crippled partial.
+4. M4 arithmetic update: single 3060 does 43.9 t/s on 9B -> 4-card
+   heterogeneous pipeline for 27B projected ~35-40 t/s (bytes-scaled +
+   packing efficiency) -> contract comfortably plausible.
+5. Anomaly parked: VITRIOL-tree CUDA measured 22.9 t/s on identical model;
+   fork-tree CUDA measures 42.4. Build/toolchain delta (CUDA 13.3 vs older,
+   flags, FA defaults) — 2x. Lesson: backend benchmarks MUST pin build
+   provenance (§15 discipline applies to toolchains too).
