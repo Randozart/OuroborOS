@@ -151,3 +151,39 @@ fn test_l1_row_addressing_probe() {
     eprintln!("bad count={} first: {:?}", bad.len(), &bad[..bad.len().min(6)]);
     assert!(bad.is_empty());
 }
+
+/// G2 gate (PLAN §18.1): vectorized kernel keeps L1 parity AND delivers
+/// matvec throughput >= 8x the scalar CPU reference on this box.
+#[test]
+fn test_g2_speedup_vs_cpu_scalar() {
+    let mut pool = GpuPool::new().unwrap();
+    eprintln!("adapter: {}", pool.adapter_name);
+    let (out_len, in_len) = (8192usize, 4096usize);
+    let payload = sane_q6k(out_len * in_len / 256, 5);
+    pool.upload_q6k("g2", &payload, out_len, in_len).unwrap();
+    let x: Vec<f32> = vec![0.01; in_len];
+
+    let _ = pool.matvec("g2", &x).unwrap(); // warmup
+    let n = 50;
+    let t0 = std::time::Instant::now();
+    for _ in 0..n {
+        let y = pool.matvec("g2", &x).unwrap();
+        assert!(y.iter().all(|v| v.is_finite()));
+    }
+    let gpu_per = t0.elapsed().as_secs_f64() / n as f64;
+
+    let t0 = std::time::Instant::now();
+    let cpu = matvec_q(&payload, QuantKind::Q6K, out_len, in_len, &x);
+    let cpu_per = t0.elapsed().as_secs_f64();
+
+    let gpu = pool.matvec("g2", &x).unwrap();
+    let c = cos(&gpu, &cpu);
+    let speedup = cpu_per / gpu_per;
+    let bytes = payload.len() as f64;
+    eprintln!(
+        "cpu {:.1} ms | gpu {:.3} ms | speedup {:.1}x | cos {:.8} | {:.0} GB/s",
+        cpu_per * 1e3, gpu_per * 1e3, speedup, c, bytes / gpu_per / 1e9
+    );
+    assert!(c > 0.9999, "G2 parity cos {}", c);
+    assert!(speedup >= 8.0, "G2 speedup {:.1}x < 8x", speedup);
+}

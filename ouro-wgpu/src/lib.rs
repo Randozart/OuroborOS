@@ -22,6 +22,8 @@ struct Params {
 @group(0) @binding(3) var<uniform> p: Params;
 
 var<workgroup> partial: array<f32, 64>;
+var<workgroup> sc_sh: array<i32, 16>;
+var<workgroup> d_sh: f32;
 
 fn f16_at(byte_off: u32) -> f32 {
     let u = w[byte_off / 4u];
@@ -35,46 +37,19 @@ fn f16_at(byte_off: u32) -> f32 {
     return sign * (1.0 + f32(frac) / 1024.0) * exp2(f32(exp) - 15.0);
 }
 
-// dequant element j of block; weights bytes start at base (byte offset)
-fn q6k_elem(base: u32, j: u32) -> f32 {
-    let n = j / 128u;
-    let r = j % 128u;
-    let l = r % 32u;
-    let bucket = r / 32u;
-
-    // byte offsets inside the 210-byte block
-    let ql_off = base + 0u;
-    let qh_off = base + 128u;
-    let sc_off = base + 192u;
-    let d_off  = base + 208u;
-
-    let qlo_l = ql_off + n * 64u + l;
-    let qlo_l32 = qlo_l + 32u;
-
-    // nibble+2bit assembly per bucket (mirror of ggml dequantize_row_q6_K)
-    let qlA = byte_at(qlo_l);
-    let qlB = byte_at(qlo_l32);
-    let qh = byte_at(qh_off + n * 32u + l);
-    let shift = bucket * 2u;
-    var q: i32 = 0;
-    if (bucket == 0u) { q = i32((qlA & 0xFu) | (((qh >> 0u) & 3u) << 4u)); }
-    else if (bucket == 1u) { q = i32((qlB & 0xFu) | (((qh >> 2u) & 3u) << 4u)); }
-    else if (bucket == 2u) { q = i32(((qlA >> 4u) & 0xFu) | (((qh >> 4u) & 3u) << 4u)); }
-    else { q = i32(((qlB >> 4u) & 0xFu) | (((qh >> 6u) & 3u) << 4u)); }
-    let qi = q - 32;
-
-    let sc_idx = sc_off + n * 8u + (l / 16u) + bucket * 2u;
-    // int8 sign-extension: WGSL i32(u32) is a value cast, not bit reinterpret
-    let sc_u = byte_at(sc_idx);
-    let sc = i32(sc_u) - select(0, 256, sc_u > 127u);
-    let d = f16_at(d_off);
-    return d * f32(sc) * f32(qi);
-}
-
-fn byte_at(byte_off: u32) -> u32 {
-    let u = w[byte_off / 4u];
-    let sh = (byte_off % 4u) * 8u;
-    return (u >> sh) & 0xFFu;
+// G2: one lane's 6-bit weight from three u32 loads shared by 4 lanes.
+// bucket 0: qlA low nibble | 1: qlB low | 2: qlA high | 3: qlB high;
+// qh contributes 2 bits at byte-shift (8k + 2*bucket) inside its u32.
+fn lane_q(ql_a: u32, ql_b: u32, qh_u: u32, bucket: u32, k: u32) -> i32 {
+    let by = 8u * k;
+    let hb = (qh_u >> (by + 2u * bucket)) & 3u;
+    var nib: u32;
+    if (bucket == 0u || bucket == 2u) {
+        nib = (ql_a >> (by + (bucket / 2u) * 4u)) & 0xFu;
+    } else {
+        nib = (ql_b >> (by + ((bucket - 1u) / 2u) * 4u)) & 0xFu;
+    }
+    return i32(nib | (hb << 4u)) - 32;
 }
 
 @compute @workgroup_size(64)
@@ -83,22 +58,43 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>,
     let row = wid.x;
     if (row >= p.out_len) { return; }
 
-    // CPU padded each block to 212 bytes; row_base in padded bytes:
-    let row_base_bytes = row * p.blocks_per_row * 212u;
+    // 64 threads x 4 lanes = 256 elements = exactly one Q6_K block
+    let row_base = row * p.blocks_per_row * 212u;
+    let j0 = lid.x * 4u;
+    let n = j0 / 128u;
+    let l0 = j0 % 32u;
+    let bucket = (j0 % 128u) / 32u;
+    let sc_i = n * 8u + (l0 / 16u) + bucket * 2u; // shared by the 4 lanes
 
-    var acc = 0.0;
-    // each thread strides over blocks
-    var b = lid.x;
-    loop {
-        if (b >= p.blocks_per_row) { break; }
-        let blk_base_bytes = row_base_bytes + b * 212u;
-        for (var j = 0u; j < 256u; j = j + 1u) {
-            let wv = q6k_elem(blk_base_bytes, j);
-            acc = acc + wv * x[b * 256u + j];
+    var acc = vec4<f32>(0.0, 0.0, 0.0, 0.0);
+    for (var b = 0u; b < p.blocks_per_row; b = b + 1u) {
+        let base = row_base + b * 212u;
+
+        // stage the 16 int8 scales + the f16 d once per block
+        if (lid.x < 16u) {
+            let sc_off = base + 192u + lid.x;
+            let sc_u = (w[sc_off / 4u] >> ((sc_off % 4u) * 8u)) & 0xFFu;
+            sc_sh[lid.x] = i32(sc_u) - select(0, 256, sc_u > 127u);
         }
-        b = b + 64u;
+        if (lid.x == 16u) { d_sh = f16_at(base + 208u); }
+        workgroupBarrier();
+
+        let ql_a = w[(base + n * 64u + l0) / 4u];
+        let ql_b = w[(base + n * 64u + 32u + l0) / 4u];
+        let qh_u = w[(base + 128u + n * 32u + l0) / 4u];
+
+        let ds = d_sh * f32(sc_sh[sc_i]);
+        let xb = b * 256u + j0;
+        acc = acc + vec4<f32>(
+            ds * f32(lane_q(ql_a, ql_b, qh_u, bucket, 0u)),
+            ds * f32(lane_q(ql_a, ql_b, qh_u, bucket, 1u)),
+            ds * f32(lane_q(ql_a, ql_b, qh_u, bucket, 2u)),
+            ds * f32(lane_q(ql_a, ql_b, qh_u, bucket, 3u)))
+            * vec4<f32>(x[xb], x[xb + 1u], x[xb + 2u], x[xb + 3u]);
+        workgroupBarrier();
     }
-    partial[lid.x] = acc;
+
+    partial[lid.x] = acc.x + acc.y + acc.z + acc.w;
     workgroupBarrier();
 
     // tree reduce 64 partials
