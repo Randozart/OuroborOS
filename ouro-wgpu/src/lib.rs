@@ -127,11 +127,18 @@ struct Params {
 }
 
 /// One resident weight matrix on the GPU (Q6_K payload, padded blocks).
+/// G1: every per-call resource is persistent — staging x, y, params, a
+/// ring of two MAP_READ buffers, and one bind group created at upload.
 pub struct ResidentMat {
-    _buf: wgpu::Buffer,
+    _w_buf: wgpu::Buffer,
+    x_buf: wgpu::Buffer,
+    y_buf: wgpu::Buffer,
+    readback: [wgpu::Buffer; 2],
+    _p_buf: wgpu::Buffer,
+    bind_group: wgpu::BindGroup,
     out_len: u32,
     in_len: u32,
-    blocks_per_row: u32,
+    rb_idx: std::cell::Cell<usize>,
 }
 
 /// Vulkan compute pool for Q6_K matvecs.
@@ -199,7 +206,7 @@ impl GpuPool {
 
     /// Repack 210-byte Q6_K blocks into 212-byte (53 u32) rows and upload.
     pub fn upload_q6k(&mut self, name: &str, payload: &[u8], out_len: usize, in_len: usize) -> Result<()> {
-        if in_len % 256 != 0 || payload.len() != out_len * (in_len / 256) * Q6K_BLOCK {
+        if !in_len.is_multiple_of(256) || payload.len() != out_len * (in_len / 256) * Q6K_BLOCK {
             bail!("upload_q6k {}: shape mismatch (payload {} out {} in {})", name, payload.len(), out_len, in_len);
         }
         let blocks_per_row = in_len / 256;
@@ -211,19 +218,65 @@ impl GpuPool {
                 padded[dst..dst + Q6K_BLOCK].copy_from_slice(&payload[src..src + Q6K_BLOCK]);
             }
         }
-        let buf = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        let w_buf = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some(name),
                 contents: &padded,
                 usage: wgpu::BufferUsages::STORAGE,
         });
+        let mk_buf = |label: &str, size: u64, usage: wgpu::BufferUsages| {
+            self.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some(label),
+                size,
+                usage,
+                mapped_at_creation: false,
+            })
+        };
+        let x4 = (in_len * 4) as u64;
+        let y4 = (out_len * 4) as u64;
+        let x_buf = mk_buf("x", x4, wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST);
+        let y_buf = mk_buf("y", y4, wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC);
+        let rb_usage = wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ;
+        let readback = [mk_buf("y_rb0", y4, rb_usage), mk_buf("y_rb1", y4, rb_usage)];
+        let params = Params {
+            out_len: out_len as u32,
+            in_len: in_len as u32,
+            blocks_per_row: blocks_per_row as u32,
+            row_stride_u32: 0,
+        };
+        let p_buf = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("params"),
+                contents: bytemuck::bytes_of(&params),
+                usage: wgpu::BufferUsages::UNIFORM,
+        });
+        let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            layout: &self.pipeline.get_bind_group_layout(0),
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: w_buf.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 1, resource: x_buf.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 2, resource: y_buf.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 3, resource: p_buf.as_entire_binding() },
+            ],
+            label: Some("q6k_bg"),
+        });
         self.mats.insert(
             name.to_string(),
-            ResidentMat { _buf: buf, out_len: out_len as u32, in_len: in_len as u32, blocks_per_row: blocks_per_row as u32 },
+            ResidentMat {
+                _w_buf: w_buf,
+                x_buf,
+                y_buf,
+                readback,
+                _p_buf: p_buf,
+                bind_group,
+                out_len: out_len as u32,
+                in_len: in_len as u32,
+                rb_idx: std::cell::Cell::new(0),
+            },
         );
         Ok(())
     }
 
-    /// y = W * x for a resident Q6_K matrix.
+    /// y = W * x for a resident Q6_K matrix. G1: write_buffer staging, one
+    /// persistent bind group per mat, ring-of-2 readback, map after submit.
     pub fn matvec(&self, name: &str, x: &[f32]) -> Result<Vec<f32>> {
         let m = self
             .mats
@@ -232,51 +285,18 @@ impl GpuPool {
         if x.len() != m.in_len as usize {
             bail!("matvec {}: x len {} != in_len {}", name, x.len(), m.in_len);
         }
-        let x_buf = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("x"),
-                contents: bytemuck::cast_slice(x),
-                usage: wgpu::BufferUsages::STORAGE,
-        });
-        let y_buf = self.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("y"),
-            size: (m.out_len as u64) * 4,
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
-            mapped_at_creation: false,
-        });
-        let readback = self.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("y_readback"),
-            size: (m.out_len as u64) * 4,
-            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-            mapped_at_creation: false,
-        });
-        let params = Params {
-            out_len: m.out_len,
-            in_len: m.in_len,
-            blocks_per_row: m.blocks_per_row,
-            row_stride_u32: 0,
-        };
-        let p_buf = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("params"),
-                contents: bytemuck::bytes_of(&params),
-                usage: wgpu::BufferUsages::UNIFORM,
-        });
-        let bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            layout: &self.pipeline.get_bind_group_layout(0),
-            entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: m._buf.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 1, resource: x_buf.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 2, resource: y_buf.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 3, resource: p_buf.as_entire_binding() },
-            ],
-            label: Some("q6k_bg"),
-        });
+        let idx = m.rb_idx.get();
+        let readback = &m.readback[idx];
+        self.queue.write_buffer(&m.x_buf, 0, bytemuck::cast_slice(x));
+
         let mut enc = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("q6k_enc") });
-        let mut cpass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor { label: None, timestamp_writes: None });
-        cpass.set_pipeline(&self.pipeline);
-        cpass.set_bind_group(0, &bg, &[]);
-        cpass.dispatch_workgroups(m.out_len, 1, 1);
-        drop(cpass);
-        enc.copy_buffer_to_buffer(&y_buf, 0, &readback, 0, (m.out_len as u64) * 4);
+        {
+            let mut cpass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor { label: None, timestamp_writes: None });
+            cpass.set_pipeline(&self.pipeline);
+            cpass.set_bind_group(0, &m.bind_group, &[]);
+            cpass.dispatch_workgroups(m.out_len, 1, 1);
+        }
+        enc.copy_buffer_to_buffer(&m.y_buf, 0, readback, 0, (m.out_len as u64) * 4);
         self.queue.submit(Some(enc.finish()));
 
         let slice = readback.slice(..);
@@ -288,6 +308,7 @@ impl GpuPool {
         let out: Vec<f32> = bytemuck::cast_slice(&data).to_vec();
         drop(data);
         readback.unmap();
+        m.rb_idx.set(idx ^ 1);
         Ok(out)
     }
 }

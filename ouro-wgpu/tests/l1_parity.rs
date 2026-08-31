@@ -19,7 +19,7 @@ fn sane_q6k(blocks: usize, seed: u64) -> Vec<u8> {
     let mut b = lcg(seed, blocks * 210);
     for blk in b.chunks_mut(210) {
         // d at 208..210: keep exponent < inf (high byte < 0x78)
-        blk[209] = blk[209] % 0x70;
+        blk[209] %= 0x70;
     }
     b
 }
