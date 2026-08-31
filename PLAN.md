@@ -1471,13 +1471,19 @@ Executing §18.4 with gates; numbers land in this table as measured.
 
 | # | Step | Gate | State |
 |---|------|------|-------|
-| S0 | Commit §16.3c/d + §18 (anomaly forensics, transplant, tracks) | provenance in history, not just on disk | ✅ |
-| S1 | G1: persistent x/y/params buffers, bind-group-per-mat, ring-of-2 readback | L1 parity tests unchanged-green; matvec latency before/after recorded | |
-| S2 | G2: vectorized dequant — u32 nibble loads (3 loads / 4 weights), workgroup-staged `d*sc`, vec4 accumulate | cos > 0.9999 vs `matvec_q`; ≥ 8× CPU scalar throughput on i7-3770 | |
-| S3 | W1: `enumerate_adapters` + `OURO_GPU_NAME`/index pick; Vulkan adapter fields in probe | 1070 Ti selectable by name on the dual-GPU box | |
-| S4 | T1: `ouro-ttyd` FIFO face, loopback demo (HMAC decision before any cross-chassis) | TTY == TCP == in-process token ids | queued |
-| S5 | W2: two-GPU 9B Q6_K demo + watts table (stop `vitriol-server.service` unit first) | greedy ids equal; t/s + W/token row appended to §16.3c lineage | |
-| S6 | W3: Q3_K gemv ladder → 27B across two cards, only after W2 measures | evidence decides 2-card now vs wait for slaves | |
+| S0 | Commit §16.3c/d + §18 (anomaly forensics, transplant, tracks) | provenance in history, not just on disk | ✅ 525c4af |
+| S1 | G1: persistent x/y/params buffers, bind-group-per-mat, ring-of-2 readback | L1 parity tests unchanged-green; matvec latency before/after recorded | ✅ e2976ab: 9.76 → 3.3 ms (2.8 → 8.3 GB/s) on [8192,4096] |
+| S2 | G2: vectorized dequant — u32 nibble loads (3 loads / 4 weights), workgroup-staged `d*sc`, vec4 accumulate | cos > 0.9999 vs `matvec_q`; ≥ 8× CPU scalar throughput on i7-3770 | ✅ ca5c043: cos 1.0 all tests; 31.5× (82.4 ms CPU → 2.61 ms GPU, 11 GB/s). Residual ≈ 2 ms = per-call submit+map overhead → G3 batching amortizes |
+| S3 | W1: `enumerate_adapters` + `OURO_GPU_NAME`/index pick; Vulkan adapter fields in probe | 1070 Ti selectable by name on the dual-GPU box | ✅ b4079a7: both cards enumerate (3060=idx0, 1070 Ti=idx1, DiscreteGpu); `OURO_GPU_NAME=1070` picks it; probe merges `vulkaninfo --summary` → vulkan_api 1.4.312 both cards |
+| S4 | T1: `ouro-ttyd` FIFO face, loopback demo (HMAC decision before any cross-chassis) | TTY == TCP == in-process token ids | queued next session |
+| S5 | W2: two-GPU 9B Q6_K demo + watts table (stop `vitriol-server.service` unit first) | greedy ids equal; t/s + W/token row appended to §16.3c lineage | blocked-ish: agent shell cannot run systemctl — owner stops the unit before bench (server idle at 0% util during S1-S3, numbers believed clean) |
+| S6 | W3: Q3_K gemv ladder → 27B across two cards, only after W2 measures | evidence decides 2-card now vs wait for slaves | gated on S5 |
+
+G-rung ladder so far (same matvec, 3060, release): L1 kernel 9.8 ms →
+G1 3.3 ms → G2 2.6 ms (31.5× scalar). Kernel time is now minor; the
+floor is the synchronous submit+map round-trip. G3 (ubatch 2-8) and G4
+(stage binds pool, one submit per token) are where the remaining 2 ms
+goes away.
 
 Hygiene: `bitnet-cpp` working tree carries auto-tuned LUT kernel configs
 (generated artifacts, some degenerate) + untracked build dirs — left

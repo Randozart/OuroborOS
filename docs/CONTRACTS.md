@@ -32,7 +32,7 @@ argument for the ladder.
 | Contract | Threshold | Status |
 |---|---|---|
 | fused/AVX dot kernels == scalar reference | cos > 0.9999 per output vector | GAP (AVX1/wgpu sessions) |
-| wgpu Q6_K/Q4_K/Q3_K gemv == CPU engine | cos > 0.999, greedy-equal stage outputs | GAP — enters at wgpu kernel 1 |
+| wgpu Q6_K/Q4_K/Q3_K gemv == CPU engine | cos > 0.999, greedy-equal stage outputs | PARTIAL — Q6_K gemv cos 1.0 (G1/G2, 2026-08-31, 31.5x scalar); Q4_K/Q3_K + stage gate = G4/W3 |
 
 ## L2 — Stage parity (the same brain in different bodies)
 
