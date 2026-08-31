@@ -1187,7 +1187,7 @@ chunked-delta prefill, 27B *throughput*.
 | qwen35 in static agent | **DECIDED yes** |
 | R2 disk shrink | **DECIDED OK** (single-bay chassis, recipe = gparted live) |
 | VITRIOL llama-server kill for Phase 0 | **approved** (first act when executed) |
-| Master driver swap r610 -> 580xx-dkms | PENDING owner call: bench-first (safe, 3060-only) vs swap-first (wakes 1070 Ti same day, reboots desktop) |
+| Master driver swap r610 -> 580xx-dkms | **RESOLVED (2026-08-30)**: both GPUs live on 580.178.04 (1070 Ti enumerated). Caveat: CUDA 13.3 dropped sm_61 — 1070 Ti CUDA needs 12.x sidecar or Vulkan |
 | qgroup size /srv/ouro | PENDING (proposed 100 G) |
 | sdb usage for btrfs-send backup | PENDING (owner's drive) |
 | ARCHITECTURE.md + docs/CONTRACTS.md | **written this session** — canonical |
@@ -1230,7 +1230,257 @@ where efficiency lives.** Vulkan column: pending `vulkan-headers` install
 4. M4 arithmetic update: single 3060 does 43.9 t/s on 9B -> 4-card
    heterogeneous pipeline for 27B projected ~35-40 t/s (bytes-scaled +
    packing efficiency) -> contract comfortably plausible.
-5. Anomaly parked: VITRIOL-tree CUDA measured 22.9 t/s on identical model;
-   fork-tree CUDA measures 42.4. Build/toolchain delta (CUDA 13.3 vs older,
-   flags, FA defaults) — 2x. Lesson: backend benchmarks MUST pin build
-   provenance (§15 discipline applies to toolchains too).
+5. Anomaly RESOLVED (§16.3c): VITRIOL-tree CUDA measured 22.9 t/s on
+   identical model; fork-tree CUDA measures 42.4. Decomposition: +17%
+   toolchain (CUDA 13.3 rebuild), rest = VITRIOL's older ggml base kernels.
+   Lesson: backend benchmarks MUST pin build provenance (§15 discipline
+   applies to toolchains too).
+
+### 16.3c Toolchain bisection — VITRIOL 2x anomaly (2026-08-30)
+
+**Forensics (before any rebuild):**
+- VITRIOL CUDA binary configured **Aug 18** with `/usr/bin/nvcc` — a path that
+  **no longer exists**. Toolkit now `cuda 13.3.1-1` at `/opt/cuda` (nvcc 13.3).
+- Fork `build-m2` configured Aug 30 with `/opt/cuda/bin/nvcc` (13.3).
+- CMake flags otherwise **identical** (Release, FA=ON, GRAPHS=ON,
+  FORCE_MMQ/CUBLAS=OFF). Only structural differences: VITRIOL arch list
+  `61;86` vs fork `86`; VITRIOL ggml-cuda is an older base + its own CUDA
+  patches (vitriol_copy_engine, vitriol-cuda-integration).
+- So §16.3b's hypothesis ("CUDA 13.3 vs older") is now the **prime suspect**.
+
+**Bisection protocol (cheapest first, one variable per step):**
+1. `build-cu13/`: VITRIOL tree rebuilt with `-DCMAKE_CUDA_COMPILER=/opt/cuda/bin/nvcc`,
+   own arch list `61;86` unchanged → isolates **toolchain**.
+   Expect ~42 if toolchain was the whole story.
+2. If still ~23: VITRIOL's ggml CUDA patches compiled out → isolates
+   **patch cost** (copy-engine/DMA path on Ampere decode).
+3. If still slow: ggml base age → rebase VITRIOL ggml onto newer upstream
+   (server patches are separate files; contained risk).
+4. `build-vk/` (Vulkan ON, already reconfigured Aug 30) built + benched —
+   Vulkan is the proven-fast path (43.9) regardless of CUDA forensics.
+5. Provenance recorded per row: nvcc path + version, commit, arch, flags.
+
+**Results:**
+
+| tree | commit base | nvcc/toolchain | backend | 9B Q6_K pp/tg | 9B Q8_0 pp/tg |
+|------|-------------|----------------|---------|----------------|----------------|
+| VITRIOL `build/` (ref, §16.3) | VITRIOL fork a3ee3be00 | `/usr/bin/nvcc` (gone, pre-13.3) | CUDA | 1249 / 22.9 | 1301 / 20.7 |
+| fork `build-m2/` (ref, §16.3b) | bitnet fork 390c30775 | `/opt/cuda` 13.3 | CUDA | 1535 / 42.4 | — / 42.4 |
+| fork `build-m2/` (ref, §16.3b) | bitnet fork 390c30775 | Vulkan | Vulkan | 1375.8 / 43.87 | 987.8 / 35.91 |
+| VITRIOL `build-cu13/` | VITRIOL fork a3ee3be00 | `/opt/cuda` 13.3 | CUDA | 1149 / **26.89** | 1350 / **22.41** |
+| VITRIOL `build-vk/` | VITRIOL fork a3ee3be00 | Vulkan (glslc) | Vulkan | 1178 / **27.81** | 1217 / **23.49** |
+
+Bench invocation (VITRIOL rows): `llama-bench -m <gguf> -ngl 99 -p 512 -n 128
+-fa 0 -r 2` (VITRIOL's `-m` takes no count arg; pp512/tg128 defaults).
+Build quirks encountered: CUDA 13.3 **removed compute_61** (Pascal evicted —
+§17.1 confirmed); VITRIOL's old ggml needed the upstream CUDA-13 compat shim
+(`#include <cuda/iterator>` in argsort.cu + top-k.cu — applied); GCC 16
+broke shared-lib link of cpp-httplib → `BUILD_SHARED_LIBS=OFF` for bench;
+dual-GPU box: bench pinned via `CUDA_VISIBLE_DEVICES=0` / empty for VK runs.
+**`vitriol-server.service` is a user systemd unit that auto-respawns — stop
+the unit, never just kill the PID.**
+
+**Findings (bisection verdict):**
+1. **Toolchain alone: +17% tg** (22.9 → 26.9 on Q6_K CUDA 13.3 rebuild).
+   Real, but not the story.
+2. **VITRIOL's CUDA patches exonerated.** build-vk never executes
+   ggml-cuda.cu hooks (vitriol pin/prefetch live only there), yet shows the
+   same gap: VITRIOL Vulkan 27.8 vs fork Vulkan 43.9.
+3. **The 1.6x tg gap is ggml base age.** It appears identically on both
+   backends → shared kernel source. pp (compute-bound) gap is only 12-20%,
+   tg (bandwidth/mmvq path) gap 60% — VITRIOL's decode vector kernels are
+   stale, matching upstream's mmvq improvements landing after its base.
+4. **Fold-back path**: rebase VITRIOL fork onto a newer upstream llama.cpp
+   (patches are confined to server/* + ggml-cuda hook files — contained
+   merge), then re-bench. Expected: VITRIOL ≈ fork ≈ 42-44 t/s.
+5. **1070 Ti is LIVE on driver 580.178.04** (both GPUs enumerated) — §17.1
+   driver question resolved by the 580xx branch. But CUDA 13.3 cannot emit
+   sm_61 → **CUDA builds are now 3060-only; the 1070 Ti path is Vulkan**
+   (NVK/proprietary ICD) or a CUDA 12.x sidecar toolkit.
+6. Provenance recorded per row (nvcc path/version, commit, arch, flags) —
+   §15 discipline extended to toolchains, now routine.
+
+### 16.3d VITRIOL transplant — fold-back executed (2026-08-30)
+
+Following §16.3c's verdict, VITRIOL got a fresh-transplant branch
+`vitriol-ku` (upstream/master 9723942ad, no common ancestor — squash
+history — so hand-port, not merge): VITRIOL's ggml-layer hooks (perf
+diagnostics, LULL graph instrumentation + pool reset, buffer type, init)
+re-applied onto 1572 commits of new upstream kernels. Expert-LRU hooks,
+TQ3 stack, and server features = Phase 2 (VITRIOL SESSION_LOG_2026-08-30.md
+holds the full record).
+
+**Results (9B, pp512/tg128, -fa 0, 3060):**
+
+| build | backend | Q6_K pp/tg | Q8_0 pp/tg |
+|---|---|---|---|
+| VITRIOL `build/` (old) | CUDA | 1249 / 22.9 | 1301 / 20.7 |
+| VITRIOL `build-ku/` (transplant) | CUDA | 1509 / **42.08** | 1734 / **36.36** |
+| VITRIOL `build-ku/` (transplant) | Vulkan | 1376 / **42.85** | — |
+| fork `build-m2/` (reference) | CUDA/Vulkan | 1535 / 42.4 | 43.87 |
+
+**Anomaly closed: 22.9 → 42.1 t/s (+84%), parity with the fork.**
+Differential gate: greedy 48-token generation byte-identical to the fork
+build. Production `vitriol-server.service` still on the old build until
+Phase 2 ports the server flags it depends on.
+
+## 18. Implementation Plan — GPU Rungs, Two-GPU Graph, Node-as-Device (2026-08-30)
+
+Three interlocking tracks: **G** (wgpu perf ladder), **W** (two-GPU local
+graph — first real heterogeneous pipeline), **T** (node-as-device TTY
+front-end). G feeds W; T is the bring-up face for everything physical.
+
+### 18.1 Track G — wgpu L2/L3 rungs
+
+State: L1 done (`ouro-wgpu/src/lib.rs` — Q6_K gemv, parity PASSED on 3060,
+cos > 0.9999). Current kernel is a correctness artifact: per-element
+`byte_at` dequant, per-call buffer creation, one workgroup per row.
+
+**G1 — persistent buffers + dispatch reuse** (biggest single win)
+- Kill per-call `create_buffer_init` for x/y/params: persistent staging
+  buffers, one reusable bind group per resident mat, write_buffer for x.
+- Double-buffer readback (ring of 2 MAP_READ buffers), map-after-submit.
+- Gate: unchanged parity test; matvec latency vs G1-before recorded.
+
+**G2 — vectorized dequant kernel**
+- Replace per-element byte reads with u32-aligned loads: one u32 = 8
+  nibbles for ql/h assembly; `vec4<f32>` accumulate.
+- Precompute `d*sc` per block into workgroup shared memory once per row
+  (128-elem groups), not per element.
+- Workgroup shape: reevaluate 64-thread/row tiling; consider 2D dispatch
+  (row × block-chunk) + partial-sum reduce if rows are long.
+- Gate: cos > 0.9999 vs CPU `matvec_q(Q6K)` (existing L1 test), and
+  matvec throughput ≥ 8× CPU scalar on i7-3770.
+
+**G3 — batched decode (ubatch 2-8)**
+- Decode is bandwidth-bound; batching amortizes launch + readback.
+- x becomes (tokens × n_embd) 2D storage; y likewise; dispatch z-dim.
+- Gate: parity on batch of 8 vs 8 sequential CPU matvecs (greedy ids
+  equal at sample).
+
+**G4 — L3 integration: agent stage binds the pool**
+- `OURO_GPU=1` on ouro-agent: `stage_setup` uploads the shard's Q6_K
+  tensors (transformer attn.out + mlp.down first — the two hot matvecs);
+  `stage_step` routes those matvecs through GpuPool, rest stays CPU.
+- Parity contract per layer (cos > 0.9999), end-to-end greedy-id equality
+  vs the same stage on CPU — the discipline that caught everything.
+- Miss path (non-Q6_K tensor) = CPU fallback, never a failure.
+
+### 18.2 Track W — two-GPU local graph (3060 + 1070 Ti)
+
+Driver 580.178.04 live on both cards (§16.3c.5). No network involved —
+this is M4 arithmetic measured locally before slaves exist.
+
+**W1 — multi-adapter selection**
+- `GpuPool::new()` currently takes `request_adapter(HighPerformance)` —
+  ambiguous on dual-GPU. Add `enumerate_adapters` + explicit pick by
+  index/name; env `OURO_GPU_NAME` (substring match) wins over index.
+- Probe (`probe/gpu.rs`): add Vulkan adapter enumeration so NodeEntry
+  reports per-GPU Vulkan capability (not just nvidia-smi CUDA-isms).
+- 1070 Ti constraints recorded: 8.1 GB, sm_61, **Vulkan-only** (CUDA 13
+  cannot emit it — §16.3c), int-dot present, coopmat2 absent (fine —
+  our kernel uses neither).
+
+**W2 — two-stage 9B Q6_K across two cards**
+- Re-shard 9B Q6_K into 2 stages: 3060 = embed + layers 0..N + mid norm,
+  1070 Ti = layers N..31 + output norm + head (`--packing` from bring-up
+  kit D does this; VRAM split ~7.5 GB across 11.9/8.1 with headroom).
+- Two ouro-agent processes on localhost (distinct ports, each pinned via
+  `OURO_GPU_NAME=3060` / `=1070`), `ouro-pipeline` runs stage_step ACTS
+  over TCP loopback — same topology as the M3-sim, now GPU-bound stages.
+- Gates: greedy token ids == in-process CPU reference (the M3-sim gate,
+  reused); measured t/s + watts table appended to §16.3c lineage.
+  Power: sample nvidia-smi power draw per stage into the energy ledger
+  (scheduler budget check runs for localhost nodes too — Art. 4 has no
+  loopback exemption).
+
+**W3 — 27B across two cards (gated)**
+- 27B Q3_K_M ≈ 13.8 GB fits 20 GB aggregate, **blocked on Q3_K GPU
+  gemv** — new kernel enters the same ladder (L1 parity vs CPU `matvec_q`
+  → G2-style perf → G4 binding). No partial-offload hacks (§16.3b: they
+  measured 0.9-1.1 t/s, the pipeline is the only honest path).
+- Fallback meanwhile: 27B CPU-side with GPU mid-stages skipped (measured,
+  documented, unglamorous).
+
+**Deliverable**: measured two-GPU t/s + W/token row for 9B, extending the
+M4 projection arithmetic (single 3060 43.9 t/s → 2-card split reality
+check) — and the first GPU-literate graph entry for the 1070 Ti.
+
+### 18.3 Track T — node-as-device (TTY front-end)
+
+Doctrine (Art. 1): a node is an IO device, not a daemon we happen to have.
+TTY = the device **face**; raw L2 (EtherType 0x88B5, Phase 2) = the wire
+behind it. TTY is efficient for control/probes/bring-up/modem links; the
+token/ACTS hot path stays on frames (seq ids, mux, ACKs — a tty has none).
+
+**T1 — `ouro-ttyd` + FIFO device files**
+- New bin in agent crate: bridges `/srv/ouro/tty/<node>.in` and `.out`
+  FIFOs to the transport client for one node. Line in = one task
+  (`stage_step <hex>`, `probe`, `budget 120w`, dot-form); line out = one
+  response (status + optional hex continuation).
+- Lockstep: one request in flight. This matches stage semantics exactly
+  (positions strictly sequential — `stage.rs` already enforces), so the
+  restriction costs nothing on the paths TTY is for.
+- Contract: TTY path and TCP path and in-process produce token-id-equal
+  results; every op still routes through scheduler + budget check (no
+  device-file bypass of Art. 4).
+
+**T2 — bootstrap: getty-shim agent (T0 tier)**
+- `ouro-agent --stdio-tty`: speaks the same line protocol over
+  stdin/stdout. A slave's getty line spawns it; master's ttyd connects
+  via SSH pty (or raw serial). **Zero install**: any booted Linux with a
+  login joins the graph — the bring-up recipe (§17.2 T0) becomes "boot,
+  log in, done".
+- Upgrade path: identical frames later ride raw L2; ttyd swaps transport
+  behind the same FIFO face. Nothing above ttyd changes.
+- Security: §9.3 HMAC header extension is MANDATORY before any
+  cross-chassis ttyd — a TTY face must not become an unauthenticated
+  execution orifice. Loopback demo first, HMAC before R2.
+
+**T3 — modem bridge (deferred, integration point)**
+- §14.7 HDMI video-modem stream lands as just another tty node — same
+  FIFO face, exotic transport. The abstraction is the payoff: the OS
+  cannot tell a slave from a display cable, and does not need to.
+
+**Milestones**: T1 loopback demo → T2 = R2/IdeaPad bring-up (this IS the
+M3 physical-wiring step) → T3 with modem hardware.
+
+### 18.4 Sequencing and interlocks
+
+```
+G1 → G2 → G3 → G4 ─┐
+                    ├→ W1 → W2 (two-GPU 9B demo, watts table)
+T1 → (HMAC) → T2 ──┘         └→ W3 (Q3_K ladder first)
+```
+
+- G1-G2 first (days, self-contained, one file + one test file).
+- T1 parallel-safe (different crate); T2 waits on HMAC decision.
+- W2 is the convergence demo: G4 output + W1 selection + D-kit packing.
+- W3 introduces the Q3_K GPU ladder — enter it only after W2 measures,
+  so the 27B decision (2-card vs 4-card across slaves) is evidence-led.
+
+Risks logged: 1070 Ti 8.1 GB stage budget (9B halves fit; 27B needs
+Q3_K + tight packing); wgpu adapter ambiguity on dual-GPU (W1 pins by
+name); VITRIOL llama-server holds ~5 GB on the 3060 — the budget ledger
+must account it or benches lie; FIFO lockstep means TTY never carries
+bulk prefill (route that through transport directly, as designed).
+
+### 18.5 Session order (2026-08-31)
+
+Executing §18.4 with gates; numbers land in this table as measured.
+
+| # | Step | Gate | State |
+|---|------|------|-------|
+| S0 | Commit §16.3c/d + §18 (anomaly forensics, transplant, tracks) | provenance in history, not just on disk | ✅ |
+| S1 | G1: persistent x/y/params buffers, bind-group-per-mat, ring-of-2 readback | L1 parity tests unchanged-green; matvec latency before/after recorded | |
+| S2 | G2: vectorized dequant — u32 nibble loads (3 loads / 4 weights), workgroup-staged `d*sc`, vec4 accumulate | cos > 0.9999 vs `matvec_q`; ≥ 8× CPU scalar throughput on i7-3770 | |
+| S3 | W1: `enumerate_adapters` + `OURO_GPU_NAME`/index pick; Vulkan adapter fields in probe | 1070 Ti selectable by name on the dual-GPU box | |
+| S4 | T1: `ouro-ttyd` FIFO face, loopback demo (HMAC decision before any cross-chassis) | TTY == TCP == in-process token ids | queued |
+| S5 | W2: two-GPU 9B Q6_K demo + watts table (stop `vitriol-server.service` unit first) | greedy ids equal; t/s + W/token row appended to §16.3c lineage | |
+| S6 | W3: Q3_K gemv ladder → 27B across two cards, only after W2 measures | evidence decides 2-card now vs wait for slaves | |
+
+Hygiene: `bitnet-cpp` working tree carries auto-tuned LUT kernel configs
+(generated artifacts, some degenerate) + untracked build dirs — left
+uncommitted by design; VITRIOL transplant branch `vitriol-ku` lives in
+the VITRIOL checkout, not this submodule.
+
