@@ -147,22 +147,19 @@ pub struct GpuPool {
 }
 
 impl GpuPool {
-    /// Init on the Vulkan backend (works: NVIDIA r610 here; r580 ICD/NVK on slaves).
+    /// Init on the Vulkan backend. W1: adapter picked deterministically —
+    /// OURO_GPU_NAME (substring, case-insensitive) wins, then OURO_GPU_INDEX,
+    /// then the first discrete GPU. Enumerate via list_vulkan_adapters().
     pub fn new() -> Result<Self> {
         let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
             backends: wgpu::Backends::VULKAN,
             ..Default::default()
         });
-        let adapter = pollster::block_on(async {
-            instance
-                .request_adapter(&wgpu::RequestAdapterOptions {
-                    power_preference: wgpu::PowerPreference::HighPerformance,
-                    compatible_surface: None,
-                    force_fallback_adapter: false,
-                })
-                .await
-        })
-        .map_err(|e| anyhow::anyhow!("no Vulkan adapter: {e}"))?;
+        let adapters = instance.enumerate_adapters(wgpu::Backends::VULKAN);
+        if adapters.is_empty() {
+            bail!("no Vulkan adapter (ICD missing or backend unavailable)");
+        }
+        let adapter = Self::pick_adapter(&adapters)?;
         let info = adapter.get_info();
         let (device, queue) = pollster::block_on(async {
             adapter
@@ -196,11 +193,61 @@ impl GpuPool {
             queue,
             pipeline,
             mats: Default::default(),
-            adapter_name: format!("{} ({:?})", info.name, info.backend),
+            adapter_name: format!("{} ({:?}, {:?})", info.name, info.backend, info.device_type),
         })
     }
 
-    /// Repack 210-byte Q6_K blocks into 212-byte (53 u32) rows and upload.
+    /// Enumerated Vulkan adapters as "idx: name (DeviceType)" — for logs,
+    /// probes, and OURO_GPU_INDEX. Enumeration order is stable per process;
+    /// pin by OURO_GPU_NAME when it matters.
+    pub fn list_vulkan_adapters() -> Vec<String> {
+    let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
+        backends: wgpu::Backends::VULKAN,
+        ..Default::default()
+    });
+    instance
+        .enumerate_adapters(wgpu::Backends::VULKAN)
+        .iter()
+        .enumerate()
+        .map(|(i, a)| {
+            let info = a.get_info();
+            format!("{}: {} ({:?})", i, info.name, info.device_type)
+        })
+        .collect()
+}
+
+    /// Adapter pick order: OURO_GPU_NAME substring -> OURO_GPU_INDEX -> first
+    /// discrete GPU -> first adapter. Errors list every candidate (W1).
+    fn pick_adapter(adapters: &[wgpu::Adapter]) -> Result<&wgpu::Adapter> {
+    let describe = |a: &wgpu::Adapter| {
+        let info = a.get_info();
+        format!("{} ({:?})", info.name, info.device_type)
+    };
+    if let Ok(want) = std::env::var("OURO_GPU_NAME") {
+        let needle = want.to_lowercase();
+        return adapters
+            .iter()
+            .find(|a| a.get_info().name.to_lowercase().contains(&needle))
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "OURO_GPU_NAME={want:?} matches none of [{}]",
+                    adapters.iter().map(describe).collect::<Vec<_>>().join(", ")
+                )
+            });
+    }
+    if let Ok(idx) = std::env::var("OURO_GPU_INDEX") {
+        let i: usize = idx.parse().map_err(|e| anyhow::anyhow!("OURO_GPU_INDEX={idx:?}: {e}"))?;
+        return adapters
+            .get(i)
+            .ok_or_else(|| anyhow::anyhow!("OURO_GPU_INDEX={i} out of range ({} adapters)", adapters.len()));
+    }
+    Ok(adapters
+        .iter()
+        .find(|a| matches!(a.get_info().device_type, wgpu::DeviceType::DiscreteGpu))
+        .unwrap_or(&adapters[0]))
+}
+
+/// Repack 210-byte Q6_K blocks into 212-byte (53 u32) rows and upload.
     pub fn upload_q6k(&mut self, name: &str, payload: &[u8], out_len: usize, in_len: usize) -> Result<()> {
         if !in_len.is_multiple_of(256) || payload.len() != out_len * (in_len / 256) * Q6K_BLOCK {
             bail!("upload_q6k {}: shape mismatch (payload {} out {} in {})", name, payload.len(), out_len, in_len);
