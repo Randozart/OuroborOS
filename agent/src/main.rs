@@ -6,6 +6,7 @@ use std::net::SocketAddr;
 use std::time::Duration;
 
 use anyhow::Result;
+use ouro_cluster::transport::auth::{self, Secret};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpListener;
 use tokio::signal;
@@ -17,10 +18,26 @@ const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(5);
 
 /// Agent daemon entry point.
 ///
-/// Listens for TCP connections from the master node.
-/// Protocol: newline-delimited JSON.
+/// Default mode: TCP daemon for the master node, HMAC-authenticated
+/// newline protocol (`seq tag body`); refuses to start without
+/// OURO_SECRET_FILE.
+///
+/// `ouro-agent --stdio-tty` (getty-shim, WP3): same authed protocol on
+/// stdin/stdout instead of TCP. A slave's getty line spawns it; the
+/// master's ouro-ttyd connects via `ssh -T` (or raw serial). Zero
+/// install: any booted Linux with a login joins the graph.
 #[tokio::main]
 async fn main() -> Result<()> {
+    let secret = auth::secret_from_env()?;
+
+    if std::env::args().any(|a| a == "--stdio-tty") {
+        let stdin = std::io::stdin();
+        let stdout = std::io::stdout();
+        serve_stdio(&secret, stdin.lock(), stdout.lock())?;
+        return Ok(());
+    }
+
+    println!("auth: OURO_SECRET_FILE loaded (32B HMAC-SHA256)");
     let port: u16 = std::env::var("OURO_PORT")
         .ok()
         .and_then(|s| s.parse().ok())
@@ -77,7 +94,7 @@ async fn main() -> Result<()> {
                         println!("[connect] {}", peer);
                         let mut rx = shutdown_tx.subscribe();
                         tokio::spawn(async move {
-                            handle_connection(stream, peer, &mut rx).await;
+                            handle_connection(secret, stream, peer, &mut rx).await;
                         });
                     }
                     Err(e) => {
@@ -100,11 +117,12 @@ async fn main() -> Result<()> {
 
 /// Handle a single TCP connection.
 ///
-/// Protocol: newline-delimited JSON messages.
-/// - Client sends: `"telemetry"` → agent responds with Telemetry JSON
-/// - Client sends: Task JSON → agent responds with TaskResult JSON
-/// - Client sends: `"ping"` → agent responds with `"pong"`
+/// Protocol: HMAC-authenticated newline-delimited messages
+/// (`<seq> <hex-tag> <body>`). Every valid request gets a signed
+/// response under the same seq. Auth failure → terse unsigned `err auth`,
+/// connection closed (no oracle).
 async fn handle_connection(
+    secret: Secret,
     stream: tokio::net::TcpStream,
     peer: SocketAddr,
     _rx: &mut broadcast::Receiver<()>,
@@ -113,20 +131,61 @@ async fn handle_connection(
     let mut lines = BufReader::new(reader).lines();
 
     while let Ok(Some(line)) = lines.next_line().await {
-        let response = process_message(&line).await;
-        if writer.write_all(response.as_bytes()).await.is_err() {
-            break;
-        }
-        if writer.write_all(b"\n").await.is_err() {
-            break;
+        match authed_process(&secret, &line) {
+            Some(response) => {
+                if writer.write_all(response.as_bytes()).await.is_err() {
+                    break;
+                }
+                if writer.write_all(b"\n").await.is_err() {
+                    break;
+                }
+            }
+            None => {
+                let _ = writer.write_all(b"err auth\n").await;
+                break;
+            }
         }
     }
 
     println!("[disconnect] {}", peer);
 }
 
+/// Verify + process one line, produce one signed response line.
+/// `None` = auth failure.
+fn authed_process(secret: &Secret, line: &str) -> Option<String> {
+    let (seq, body) = auth::open_line(secret, line).ok()?;
+    let response = process_message(body);
+    Some(auth::sign_line(secret, seq, &response))
+}
+
+/// Getty-shim loop: signed line in from stdin, signed line out on
+/// stdout, flush per line. Auth failure → `err auth`, stop (the spawning
+/// getty respawns = fresh login). EOF → clean exit.
+fn serve_stdio<R: std::io::BufRead, W: std::io::Write>(
+    secret: &Secret,
+    mut input: R,
+    mut output: W,
+) -> Result<()> {
+    let mut line = String::new();
+    while input.read_line(&mut line)? > 0 {
+        match authed_process(secret, line.trim_end()) {
+            Some(resp) => {
+                writeln!(output, "{}", resp)?;
+                output.flush()?;
+            }
+            None => {
+                writeln!(output, "err auth")?;
+                output.flush()?;
+                return Ok(());
+            }
+        }
+        line.clear();
+    }
+    Ok(())
+}
+
 /// Process a single message from the master.
-async fn process_message(msg: &str) -> String {
+fn process_message(msg: &str) -> String {
     let trimmed = msg.trim();
 
     // Telemetry request
@@ -139,6 +198,15 @@ async fn process_message(msg: &str) -> String {
     // Ping
     else if trimmed == "ping" {
         "pong".into()
+    }
+    // Tagline: this boot's motto, for the master's registration echo
+    else if trimmed == "tagline" {
+        let from_env = std::env::var("OURO_TAGLINE").unwrap_or_default();
+        if !from_env.trim().is_empty() {
+            from_env
+        } else {
+            std::fs::read_to_string("/run/ouro/tagline").unwrap_or_default()
+        }
     }
     // Task execution
     else {
@@ -155,29 +223,105 @@ async fn process_message(msg: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ouro_cluster::transport::auth;
 
-    #[tokio::test]
-    async fn test_process_ping() {
-        assert_eq!(process_message("ping").await, "pong");
+    const KEY: auth::Secret = [7u8; 32];
+
+    #[test]
+    fn test_process_ping() {
+        assert_eq!(process_message("ping"), "pong");
     }
 
-    #[tokio::test]
-    async fn test_process_telemetry() {
-        let resp = process_message("telemetry").await;
+    #[test]
+    fn test_authed_ping_roundtrip() {
+        let line = auth::sign_line(&KEY, 5, "ping");
+        let resp = authed_process(&KEY, &line).expect("valid line accepted");
+        let (seq, body) = auth::open_line(&KEY, &resp).unwrap();
+        assert_eq!(seq, 5);
+        assert_eq!(body, "pong");
+    }
+
+    #[test]
+    fn test_authed_rejects_tamper_wrong_key_garbage() {
+        let tampered = auth::sign_line(&KEY, 1, "ping").replace("ping", "pins");
+        assert!(authed_process(&KEY, &tampered).is_none());
+        let other: auth::Secret = [8u8; 32];
+        assert!(authed_process(&other, &auth::sign_line(&KEY, 1, "ping")).is_none());
+        assert!(authed_process(&KEY, "1 deadbeef ping").is_none());
+        assert!(authed_process(&KEY, "ping").is_none());
+    }
+
+    #[test]
+    fn test_authed_task_roundtrip() {
+        let task = r#"{"id":"t1","name":"echo","payload":"hi","estimated_watts":10,"estimated_seconds":1}"#;
+        let line = auth::sign_line(&KEY, 9, task);
+        let resp = authed_process(&KEY, &line).expect("valid task accepted");
+        let (_, body) = auth::open_line(&KEY, &resp).unwrap();
+        assert!(body.contains("hi"));
+        assert!(body.contains("Success"));
+    }
+
+    #[test]
+    fn test_serve_stdio_lockstep_roundtrip() {
+        let task = r#"{"id":"x","name":"echo","payload":"body via stdio","estimated_watts":1,"estimated_seconds":1}"#;
+        let input = format!(
+            "{}\n{}\n",
+            auth::sign_line(&KEY, 1, "ping"),
+            auth::sign_line(&KEY, 2, task)
+        );
+        let mut out = Vec::new();
+        serve_stdio(&KEY, std::io::Cursor::new(input), &mut out).unwrap();
+        let text = String::from_utf8(out).unwrap();
+        let mut lines = text.lines();
+        let (seq1, body1) = auth::open_line(&KEY, lines.next().unwrap()).unwrap();
+        assert_eq!((seq1, body1), (1, "pong"));
+        let (seq2, body2) = auth::open_line(&KEY, lines.next().unwrap()).unwrap();
+        assert_eq!(seq2, 2);
+        assert!(body2.contains("body via stdio"));
+        assert!(body2.contains("Success"));
+    }
+
+    #[test]
+    fn test_serve_stdio_auth_failure_terminates() {
+        let input = "not a signed line\n".to_string();
+        let mut out = Vec::new();
+        serve_stdio(&KEY, std::io::Cursor::new(input), &mut out).unwrap();
+        assert_eq!(String::from_utf8(out).unwrap(), "err auth\n");
+    }
+
+    #[test]
+    fn test_process_tagline() {
+        std::env::set_var("OURO_TAGLINE", "devour the default.");
+        assert_eq!(process_message("tagline"), "devour the default.");
+        std::env::set_var("OURO_TAGLINE", "");
+        assert_eq!(process_message("tagline"), "");
+        std::env::remove_var("OURO_TAGLINE");
+    }
+
+    #[test]
+    fn test_serve_stdio_eof_exits_cleanly() {
+        let mut out = Vec::new();
+        serve_stdio(&KEY, std::io::Cursor::new(""), &mut out).unwrap();
+        assert_eq!(String::from_utf8(out).unwrap(), "");
+    }
+
+    #[test]
+    fn test_process_telemetry() {
+        let resp = process_message("telemetry");
         assert!(resp.contains("hostname"));
     }
 
-    #[tokio::test]
-    async fn test_process_task() {
+    #[test]
+    fn test_process_task() {
         let task = r#"{"id":"t1","name":"echo","payload":"hi","estimated_watts":10,"estimated_seconds":1}"#;
-        let resp = process_message(task).await;
+        let resp = process_message(task);
         assert!(resp.contains("hi"));
         assert!(resp.contains("Success"));
     }
 
-    #[tokio::test]
-    async fn test_process_invalid() {
-        let resp = process_message("not json").await;
+    #[test]
+    fn test_process_invalid() {
+        let resp = process_message("not json");
         assert!(resp.contains("error"));
     }
 }

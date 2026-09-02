@@ -1521,4 +1521,36 @@ no r580 swap required for this test (that stays paired with S5/W2).
 Independencies: master AM5 swap (FLEET.md §2) and W2 are parallel,
 not prerequisites.
 
+## 18.8 R2 bring-up kickoff (2026-09-02, second session)
+
+Owner locked runbook decisions (R2_BRINGUP.md §8): HMAC secret =
+manual copy for node #1; live USB (route A) confirmed; first models =
+bitnet-2.4B smoke → 9B Q6_K split. Implementation started at WP1
+(`ouro-ttyd` FIFO face, loopback parity gate), then WP2 HMAC §9.3,
+WP3 getty-shim, then physical R2 join. WP4 `discover.` deferred to
+second-node milestone; dual-boot shrink waits for route A to pass.
+
+Status same day, second session: WP1, WP2, WP3 all implemented and
+smoke-tested with real daemons (execution record in R2_BRINGUP.md §9).
+Remaining work is physical: R2 checklist §4 — LAN, CachyOS live USB,
+getty line spawning `ouro-agent --stdio-tty`, then the §6 acceptance
+test (probes → Beast graph, bitnet-2.4B smoke, 9B Q6_K split,
+token-id parity, watts row).
+
+## 18.9 The node image: USB-booted OurobourOS (2026-09-02, third session)
+
+Route B cancelled; route A upgraded. Plan of record now lives in
+R2_BRINGUP.md §10: a NixOS node image (WP5) makes every cluster device
+boot its OS + agent from one stick — flash + boot-order + boot, zero
+disk changes. Pure-Rust static agent (`--no-default-features`; stage
+path needs no bitnet-cpp). Stateless: identity derived from SMBIOS at
+each boot (node_id), roles never persisted — they are prices, not
+identities (Art. 1). Secrets + master pubkey provisioned per stick at
+flash time (WP6, tools/flash.sh; sticks are keys). Whole Nix ramp
+proven in QEMU before hardware (WP7; gate: install Nix on master).
+All six mottos baked in, one picked at random per boot, echoed in
+crimson on the master's terminal at registration — the boot reveal
+happens on the host screen. WoL/suspend measured as graph attributes;
+wake-on-demand pricing deferred as an Art. 4 energy feature.
+
 

@@ -29,7 +29,7 @@ topology in `CLUSTER.md`.
 | r580 driver decision | solved on paper: `nvidia-580xx-dkms` in CachyOS repo; **avoid linux-lts kernel** (AUR note re 6.12.x) |
 | R2 disk shrink | owner-approved; recipe = gparted live (single SATA bay) |
 | HMAC design | §9.3 exists: 32B HMAC-SHA256 over header+payload, shared secret |
-| `ouro-ttyd`, getty-shim, HMAC impl | **not started** — this is the work |
+| `ouro-ttyd`, getty-shim, HMAC impl | **all done (2026-09-02)** — WP1 ttyd FIFO face, WP2 HMAC, WP3 getty-shim + `--pty-cmd` wire |
 
 ## 3. Work packages (in dependency order)
 
@@ -59,7 +59,7 @@ Per PLAN §18.3 T1, restated as build spec:
   unauthenticated execution orifice on the LAN. Loopback demo first,
   **HMAC before R2** — already written into §18.3.
 
-### WP3 — `ouro-agent --stdio-tty` getty-shim *(repo)*
+### WP3 — `ouro-agent --stdio-tty` getty-shim *(repo)* — **DONE 2026-09-02**
 
 Per PLAN §18.3 T2:
 
@@ -69,6 +69,23 @@ Per PLAN §18.3 T2:
 - Upgrade path: identical frames ride raw L2 (EtherType 0x88B5) later;
   ttyd swaps transport behind the same FIFO face. Nothing above ttyd
   changes.
+
+Plan of record (2026-09-02):
+
+- **Same authed wire on stdio** (`seq tag body`, WP2 core). SSH
+  authenticates the channel; our HMAC stays because the transport
+  swap to raw L2 must be a no-op above the wire (Art. 10: same
+  contract everywhere, no special cases) and it costs <1%.
+- Agent: `ouro-agent --stdio-tty` — stdin line → `authed_process` →
+  signed stdout line, flush per line. Auth fail → `err auth`, exit
+  (getty respawns = fresh login). EOF → exit 0.
+- Master: `ouro-ttyd --pty-cmd '<cmd>'` (replaces `--addr`) — spawns
+  the command once per tty connection, persistent child, lockstep
+  signed lines over its pipes. One SSH handshake per tty session, not
+  per request. Respawns the child if it dies.
+- Master uses `ssh -T` (no pty allocation — no echo corruption); raw
+  serial paths must `stty -echo` for the same reason.
+- Secrets: same `OURO_SECRET_FILE` on both ends (manual copy, §8).
 
 ### WP4 — D-kit minimum: `discover.` *(repo, optional for first test)*
 
@@ -81,12 +98,12 @@ Per PLAN §18.3 T2:
 
 | # | Task | Route |
 |---|---|---|
-| [ ] | LAN: R2 on master's subnet (switch or direct cable) | both |
-| [ ] | **A — live USB (recommended first test)**: boot CachyOS live session, log in, getty-shim joins. Zero disk changes, fully reversible | fast |
-| [ ] | **B — durable dual-boot**: gparted live shrink of existing disk (owner-approved), CachyOS-minimal headless, shared ESP | after A passes |
-| [ ] | `nvidia-580xx-dkms` install (route B only; live USB can defer) | B |
-| [ ] | Mask sleep/suspend targets — R2 suspend/resume is broken (PLAN §2.3: "shutdown may sleep instead") | B |
-| [ ] | `OURO_GPU_NAME=960` style pinning check once probe runs on R2 | both |
+| [ ] | LAN: R2 on master's subnet (switch or direct cable) | all |
+| [ ] | **Node image stick** (§10): `tools/flash.sh` a USB, set boot order, boot. Zero disk changes, fully reversible. Plain CachyOS live = fallback | image |
+| [x] | ~~B — durable dual-boot: gparted shrink~~ **cancelled** (§8: node image replaces it) | — |
+| [ ] | `nvidia-580xx` driver in NixOS — deferred to its own WP; image v1 is CPU-only (smoke needs no GPU) | later |
+| [ ] | Suspend masking — handled inside the image config (§10 WP5) | image |
+| [ ] | `OURO_GPU_NAME=960` style pinning check once probe runs on R2 | later |
 
 ## 5. R2 constraints to respect (PLAN §2.3)
 
@@ -124,8 +141,225 @@ W2 two-GPU demo (S5) is independent — both feed the 27B decision.
 
 ## 8. Open decisions for owner
 
-- [ ] HMAC secret provisioning: manual copy (node #1) vs deploy-carried.
-- [ ] Live USB (A) first — assumed yes; confirm.
-- [ ] First model: bitnet-2.4B smoke → 9B Q6_K split (assumed); veto to change.
+- [x] HMAC secret provisioning: **manual copy to node #1** (decided
+      2026-09-02; deploy-carried revisited at fleet scale).
+- [x] Live USB (A) first — **confirmed**; upgraded to the node image
+      (§10). Plain CachyOS live demoted to 30-min fallback.
+- [x] First model: bitnet-2.4B smoke → 9B Q6_K split — **confirmed as
+      assumed**.
+- [x] Boot OS: **USB-booted OurobourOS node image** (2026-09-02,
+      §10). Route B (gparted shrink + CachyOS-minimal dual-boot) is
+      **cancelled** — R2's disk is never touched; the owner's shrink
+      approval goes unspent.
+- [x] Taglines: all six mottos baked into the image; **each boot picks
+      one at random** (kernel entropy, stateless-safe). Master echoes
+      a node's tagline in crimson at registration — the boot reveal
+      happens on the host screen.
+- [x] Node identity: **derived, never stored** — `node_id` =
+      hash(SMBIOS product_uuid, MAC fallback) computed by the boot
+      probe. Roles ("host"/"sleeper") are never persisted; they are
+      priced at schedule time (Art. 1, Art. 4). WoL/suspend support
+      is measured (`ethtool wol`, R2 `sleep_ok=false`) and lands in
+      the Beast graph as attributes.
 - [ ] Where watts truth for R2 comes from (estimate vs USB meter) — only
       matters if the energy contract (L5) is asserted for the R2 stage.
+
+## 9. Execution record
+
+- 2026-09-02: decisions above locked; implementation started at WP1
+  (`ouro-ttyd` FIFO face + loopback demo). Order: WP1 → WP2 (manual
+  provisioning) → WP3 → physical (live USB).
+- 2026-09-02: **WP1 done.** `ouro-ttyd` lives in the shell crate
+  (master-side; `agent_client` is there — deviation from "agent crate"
+  noted), module `shell/src/ttyd.rs`, bin `shell/src/bin/ouro-ttyd.rs`.
+  Line protocol: `ping` / `echo` / `stage_* <payload>` / other agent
+  tasks / dot-form (`budget 120w.`, `probe.`, `n1?`) in; `ok|queued|err`
+  out. Lockstep (one request in flight). Every task routes through
+  `Scheduler::schedule()` + budget check (Art. 4) — `budget 0w.`
+  provably queues. Gate test green: FIFO path == TCP path == in-process
+  (`test_fifo_loopback_end_to_end`, `test_echo_parity_tty_tcp_inprocess`,
+  ACTS hex parity); verified again through real `ouro-agent` +
+  `ouro-ttyd` processes on real FIFOs. Workspace `cargo test --lib` +
+  `cargo clippy -- -D warnings` clean.
+- Next: **WP2 HMAC §9.3** — plan of record (2026-09-02, owner-approved):
+  - **Crypto core is frame-agnostic and frame-ready**: `tag(secret, seq,
+    payload) -> [u8;32]` (HMAC-SHA256) + constant-time verify, pure
+    functions in `cluster/src/transport/auth.rs`. Drops into the OURO
+    frame trailer unchanged when L2/frames land.
+  - **Line encoding (interim), flat, zero-copy**: `<seq> <64hex-tag>
+    <body verbatim>\n`. Tag over `seq || body`. No JSON envelope — an
+    envelope would re-serialize every 20–50KB ACTS payload per hop;
+    flat prefix costs one `splitn(3)`.
+  - **Cost**: HMAC-SHA256 software ~0.5–1 GB/s on R2-class CPU (no
+    SHA-NI) = 25–100µs per 50KB frame vs ≥5–50ms token step → <1% of
+    the token loop. Cheaper than debugging one silently corrupted
+    activation (L3 parity contract).
+  - **Both directions signed.** Client verifies the response tag over
+    the request's seq. Auth failure → terse unsigned `err auth`, no
+    detail (no oracle).
+  - **Mandatory gate**: no `OURO_SECRET_FILE` → process refuses to
+    start. No bypass flag. Secret file = 64 hex chars = 32 bytes;
+    manual provisioning (§8, node #1).
+  - **Honest limitation (Art. 10)**: the wire is connect-per-request,
+    so seq gives correlation, not server-side anti-replay. HMAC buys
+    integrity + authenticity now; replay protection arrives with
+    persistent frame connections (WP3/L2 upgrade path, §3).
+  - Deps: `hmac` + `sha2` crates (audited; hand-rolled MACs rejected).
+- 2026-09-02: **WP2 done.** Core: `cluster/src/transport/auth.rs`
+  (`tag`/`verify`/`sign_line`/`open_line`/`secret_from_env`). Agent:
+  eager secret load, `authed_process` wraps `process_message`, auth
+  failure = unsigned `err auth` + close. `agent_client`: seq counter +
+  secret cache, signs every request, verifies reply tag over the
+  request's seq; `*_with` variants expose explicit secrets (tests).
+  `TtySession` owns a secret — construction is the gate. Note: the
+  FIFO face itself stays master-local plaintext; auth is a wire (TCP)
+  property — `agent_client` signs at the transport boundary. Tests:
+  tag determinism/seq+key sensitivity, tamper/wrong-key/structural
+  reject (opaque errors), unsigned-reply reject, wrong-key exchange
+  reject, full ttyd parity ladder green on the authed wire. Real
+  daemons: agent + ttyd with generated secret, FIFO → signed TCP →
+  echo/ping/budget/stage_step/real-ACTS-frame all round-trip; raw
+  unsigned TCP ping and zero-tag both bounce `err auth`. Workspace
+  `cargo test --lib` (115) + `cargo clippy -- -D warnings` clean.
+- Next: **WP3** — `ouro-agent --stdio-tty` getty-shim: same line
+  protocol on stdin/stdout (authed the same way), getty spawns it on
+  R2, master's ttyd connects via SSH pty.
+- 2026-09-02: **WP3 done — repo work packages complete.** Agent:
+  `ouro-agent --stdio-tty` (`serve_stdio`, agent/src/main.rs) — signed
+  line in, signed line out, flush per line; auth fail → `err auth` +
+  exit (getty respawn = fresh login); EOF → clean exit; refuses to
+  start without `OURO_SECRET_FILE`. Master: `ouro-ttyd --pty-cmd
+  '<cmd>'` (`TtyWire::{Tcp,Child}`, shell/src/ttyd.rs) — spawns the
+  command once per tty connection (one SSH handshake per session, not
+  per request), lockstep signed lines over its pipes, dead child
+  detected + respawned on next use; `--addr` (TCP) and `--pty-cmd`
+  are mutually exclusive; getty/stdio nodes get no `node_addrs`
+  entries (proposition probing skips them honestly). Real-daemon
+  smoke, full chain: FIFO → ttyd → scheduler/budget → `sh -c` child →
+  real `ouro-agent --stdio-tty` → signed stdio → back: ping / echo /
+  `budget 90w.` / bench_sum / real 42-byte ACTS frame (seq=9 pos=5
+  intact) all round-trip. Negative: wrong-secret ttyd vs agent →
+  every request `err auth` (dead wire, opaque). `cat`-bridge +
+  Cursor-level unit tests cover both halves hermetically. Workspace
+  `cargo test --lib` (117 lib + 19 agent) + `cargo clippy -- -D
+  warnings` clean. **Next: physical R2 checklist §4** — LAN +
+  CachyOS live USB (route A), getty spawns the shim, join at §6
+  acceptance test. WP4 `discover.` stays deferred to the second-node
+  milestone.
+
+---
+
+## 10. The node image — USB-booted OurobourOS (plan of record, 2026-09-02)
+
+The zero-install thesis, generalized: the OS **is** the agent. One stick
+per cluster device; adding a node = flash + boot-order + boot. Any x86
+box in the pile joins the graph with zero disk changes. Route B is dead
+(§8); plain CachyOS live is the 30-minute fallback only.
+
+### WP5 — `nixos/` node image (build once, boot anywhere)
+
+```
+nixos/
+├── flake.nix              # nixos-generators, iso/usb image format
+├── node-image.nix         # the node config (everything below)
+└── agent.nix              # package: ouro-agent, no-default-features, musl static
+```
+
+- **Pure-Rust static agent**: `ouro-agent` built `--no-default-features`.
+  The R2 role (`stage_setup/step/token/sample`) runs on
+  `ouro_cluster::infer` — pure Rust (agent/src/stage.rs). The `bitnet`
+  feature (C++ llama.cpp via bindgen — musl-hostile) is only needed for
+  full-model-on-node tasks, which are not in the §6 acceptance test.
+  True single-binary image, no `.so` bundling.
+- **Stateless cattle**: read-only squashfs root + tmpfs. Node identity
+  comes from the boot probe each boot; nothing is stored, so nothing can
+  drift (measured-only admission, Art. 10: nothing trusted carried).
+- **Boot brand service**: reads `/etc/ouro/taglines`, picks one at
+  random (kernel entropy), renders truecolor crimson
+  (`\e[38;2;220;20;60m`, 256-color `\e[38;5;160m` fallback) on black.
+  Pre-login `issue` banner + post-login state line:
+  `node <id> · measured admission · secret: ok|REFUSED`.
+- **Tagline pool** (§8: all six, random per boot):
+  ```
+  it knows what it is.
+  devour the default.
+  no purpose but use.
+  the tail feeds the head.
+  one wire. one budget. one machine.
+  nothing declared. everything measured.
+  ```
+- **Boot probe service**: `node_id` = hash(SMBIOS
+  `/sys/class/dmi/id/product_uuid`, MAC-of-lowest-NIC fallback);
+  graph attributes: `wol` (ethtool), `sleep_ok` (R2 = false, measured),
+  plus the standard memcpy/gemv/RTT/power probes at registration.
+  **No role flags anywhere** — "host"/"sleeper" are prices, not
+  identities (Art. 1); the control plane relocates per Art. 4.
+- **Enrollment artifacts**: boot service mounts the labeled `OURO`
+  partition → `/run/ouro/secret` (32B hex HMAC secret) + master SSH
+  pubkey → `authorized_keys`. Missing partition = no secret = agent
+  refuses the wire (WP2 gate holds, no bypass).
+- sshd: key-only auth. getty autologin tty1 → `ouro-agent --stdio-tty`.
+  sleep/suspend targets masked (absorbs route B's leftover task).
+- **v1 is CPU-only**: `nvidia-580xx` is not packaged for NixOS; GPU
+  driver in Nix = separate later WP. §6 smoke (bitnet-2.4B → 9B split)
+  needs no GPU on R2.
+
+### WP6 — `tools/flash.sh` (one command per stick)
+
+`dd` the image → create the labeled `OURO` partition → write the secret
+file + master pubkey → verify readback. Extends §8's manual-copy
+decision to per-stick provisioning; sticks are keys — custody matters.
+
+### WP7 — QEMU prove-out (before any physical USB)
+
+Boot the image in QEMU on the master: banner + random tagline, `OURO`
+partition consumed, signed wire up, `ouro-ttyd --pty-cmd` (QEMU as the
+child) completes the loopback. The entire Nix ramp is debugged with
+zero physical risk. **Gate: install Nix on master first** (none
+present as of 2026-09-02); WP5 files are written to be
+correct-by-inspection until then.
+
+### Master-side cinematic echo
+
+`ouro-ttyd` prints a node's tagline in crimson on the host terminal at
+registration. Transport: the agent's first response carries
+`tagline <text>` as its body — one line over the existing WP2 signed
+wire, zero new protocol surface. Boot-up reveal happens where the
+operator is looking.
+
+### Deferred, explicit
+
+- GPU driver in Nix (image v1 CPU-only)
+- Persistence partition (until nodes run for weeks)
+- Enrollment service (fleet scale; per-stick flash until then)
+- netboot/iPXE (no USB at all) — pairs with WP4 `discover.`
+- WoL wake-on-demand scheduling ("sleeper" as an energy state priced by
+  the scheduler, watts vs capacity gained — Art. 4)
+
+### Sequencing
+
+1. WP5 scaffolding → WP7 QEMU loop (needs Nix on master) → WP6 flash
+2. Physical (parallel): R2 LAN + boot-order
+3. First light: image stick in R2 → §6 acceptance test
+4. Owner works `docs/brand/` SVG/Braille logo in parallel — TTY banner
+   renders whatever drops in (art is separate from the tagline pool).
+
+- 2026-09-02: **§10 node image kickoff.** WP5 scaffolding written:
+  `nixos/flake.nix` (nixos-generators, dd-able ISO), `nixos/agent.nix`
+  (pure-Rust agent, no-default-features; honest note: workspace
+  Cargo.lock vendoring unproven until Nix exists), `nixos/node-image.nix`
+  (stateless config: getty autologin → agent shim, sshd keys-only,
+  sleep targets masked, crimson console palette remap, brand/probe/
+  enroll services, tagline pool). WP6: `tools/flash.sh` (dd + OURO
+  partition + secret/pubkey + verify; syntax-checked only — destructive
+  tool, needs hardware to truly prove). Master-side cinematic echo:
+  agent answers `tagline` (OURO_TAGLINE env or /run/ouro/tagline);
+  `TtySession::motto()` rides the signed wire (schedules 1W like any
+  op); `serve_connection` writes the crimson banner as the first
+  `.out` line before serving requests — consumers skip ANSI lines.
+  Verified: full workspace `cargo test --lib` (137) + agent (20) +
+  `cargo clippy -- -D warnings` clean; FIFO e2e test now asserts the
+  banner line. **Blocked, explicit: no Nix on master** (checked
+  2026-09-02) — WP7 QEMU prove-out gate. Owner: install Nix, then
+  `nix build .#node-image` (expect one cargoLock hash dance), and
+  work `docs/brand/` logo in parallel.

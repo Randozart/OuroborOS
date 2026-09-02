@@ -9,3 +9,5 @@ memmap2 = "0.9"
 serde.workspace = true
 serde_json.workspace = true
 hostname = "0.4"
+hmac.workspace = true
+sha2.workspace = true

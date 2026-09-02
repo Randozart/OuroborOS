@@ -9,3 +9,8 @@ __pycache__/
 shards/
 shards9b/
 shards27/
+
+# nix build symlinks
+result
+result-bin
+result-man

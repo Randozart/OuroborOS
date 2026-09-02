@@ -8,6 +8,7 @@ ouro-cluster = { path = "../cluster" }
 anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+libc.workspace = true
 
 [lib]
 name = "ouro_shell"
@@ -21,3 +22,7 @@ serde_json.workspace = true
 [[bin]]
 name = "ouro-shell"
 path = "src/main.rs"
+
+[[bin]]
+name = "ouro-ttyd"
+path = "src/bin/ouro-ttyd.rs"
