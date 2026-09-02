@@ -1490,3 +1490,35 @@ Hygiene: `bitnet-cpp` working tree carries auto-tuned LUT kernel configs
 uncommitted by design; VITRIOL transplant branch `vitriol-ku` lives in
 the VITRIOL checkout, not this submodule.
 
+## 18.6 Hardware & procurement resume (2026-09-02 session)
+
+Physical-layer findings, purchase rules, and the fabric-pitfall checklist
+from the 2026-09-02 hardware session live in **`docs/FLEET.md`** — do not
+re-survey; read that file. Headlines:
+
+- **Master AM5 swap (€470–540, parts list in FLEET.md §2)** is the unblock
+  for the `27B mmap full-Rust forward` rung: master measured 16GB RAM with
+  6.3GB swap resident. Hardware blocker, not software.
+- **Node N+1 (OptiPlex): decide SFF vs MT before purchase** — SFF's
+  proprietary ~260W PSU rules out the 1080 Ti stage (FLEET.md §3).
+  Working plan: CPU-stage node first, Pascal stage later if shard packing
+  demands it.
+- **Do not buy RAM/PSU/SBCs at bol.com** (2–5x markup, evidence in
+  FLEET.md §2); CPUs only.
+- KV260 stays deferred; FPGA-for-inference and SBC inference boxes
+  rejected with numbers (FLEET.md §5) — reopen only with new evidence.
+
+## 18.7 R2-first bring-up plan (2026-09-02 session)
+
+Next physical milestone: Alienware R2 as first cross-chassis node.
+Full runbook — work packages, HMAC gate, live-USB route, acceptance
+test, open owner decisions — lives in **`docs/R2_BRINGUP.md`**.
+Nothing implemented yet; owner explicitly deferred implementation.
+
+Sequence: S4/T1 ttyd loopback → HMAC §9.3 → getty-shim → R2 join
+(live USB first, dual-boot after). Needs only the master's 3060 —
+no r580 swap required for this test (that stays paired with S5/W2).
+Independencies: master AM5 swap (FLEET.md §2) and W2 are parallel,
+not prerequisites.
+
+
