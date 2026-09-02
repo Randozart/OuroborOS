@@ -363,3 +363,30 @@ operator is looking.
   2026-09-02) — WP7 QEMU prove-out gate. Owner: install Nix, then
   `nix build .#node-image` (expect one cargoLock hash dance), and
   work `docs/brand/` logo in parallel.
+
+- 2026-09-02: **WP7 done — ALL PASS.** `tools/wp7_prove.py`: boots the
+  node image under QEMU (TCG, 3G), OURO-labeled enrollment drive
+  attached, drives the getty-spawned shim over the raw serial line with
+  signed wire traffic. Accepts: brand banner + random tagline (differs
+  per boot — pool pick proven), enroll breadcrumbs visible on console,
+  secret consumed, `node_id` derived, ping→pong and tagline round-trips
+  verified under HMAC. Two consecutive clean passes, different
+  taglines. Debug findings baked back into the image:
+  - enroll needs `-g ouro` → user now owns group `ouro`; enroll writes
+    breadcrumbs (`enroll-status`, console echoes) — the banner shows
+    the enroll reason, never a silent REFUSED
+  - findfs by-label race at early boot → 15s retry loop
+  - agetty skips banners under autologin → the agent prints the issue
+    banner itself when stdin is a TTY (isatty); pipes (`ssh -T`, FIFO
+    face) stay clean protocol — the banner travels with the agent
+  - serial getty (ttyS0) = raw-serial join path, brand included
+  Flakes fixed along the way: nixos-generators incompatible with
+  unstable's customisation internals → dropped, ISO built directly via
+  `iso-image.nix`; crates.io 403s curl's default UA → fetchurl overlay
+  injects identifying UA; nixpkgs bumped to unstable for rustc ≥1.87
+  (`is_multiple_of`). NOTE: the WP7 debug image bakes the test SSH key
+  (`ouro-wp7-debug-shell`); production flash strips it (one line in
+  `nixos/node-image.nix`). Rust: 137 lib + 20 agent tests, clippy
+  `-D warnings` clean. **Next: physical R2** — flash a stick
+  (`tools/flash.sh`), boot-order, §6 acceptance test. Brand `docs/brand/`
+  has the crimson ouroboros SVG; Braille TTY variant pending from owner.

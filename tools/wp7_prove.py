@@ -35,7 +35,7 @@ secret = bytes.fromhex(open(SECRET_FILE).read().strip())
 
 
 def sign(seq, body):
-    tag = hmac.new(secret, seq.to_bytes(8, "big"), hashlib.sha256).hexdigest()
+    tag = hmac.new(secret, seq.to_bytes(8, "big") + body.encode(), hashlib.sha256).hexdigest()
     return f"{seq} {tag} {body}"
 
 
@@ -68,19 +68,27 @@ def main():
                 return False
         return True
 
-    # 1+2: wait for the brand/state stamp on serial
+    # 1+2: wait for the brand/state stamp on serial; the banner streams
+    # through the pty over several reads, so wait until the secret state
+    # token itself has landed (either state) before judging.
     seen_issue = False
     while time.time() < deadline:
         if not pump():
             break
         text = buf.decode("utf-8", "replace")
-        if "measured admission" in text:
+        if "measured admission" in text and (
+            "secret: ok" in text or "secret: REFUSED" in text
+        ):
             seen_issue = True
             break
+        time.sleep(0.5)
     assert seen_issue, f"issue banner never appeared; tail:\n{buf[-3000:].decode('utf-8','replace')}"
     text = buf.decode("utf-8", "replace")
     assert "the machine that remakes itself" in text, "brand line missing"
-    assert "secret: ok" in text, "enrollment failed: secret not consumed"
+    assert "secret: ok" in text, (
+        "enrollment failed: secret not consumed\n"
+        + "--- serial tail ---\n" + text[-1500:]
+    )
     for tag in ["it knows what it is.", "devour the default.", "no purpose but use.",
                 "the tail feeds the head.", "one wire. one budget. one machine.",
                 "nothing declared. everything measured."]:
@@ -90,31 +98,45 @@ def main():
     else:
         raise AssertionError("no tagline from the pool in the issue banner")
 
-    # 3+4: the shim should be live on serial once autologin lands; a signed
-    # ping must come back as a signed pong under the same seq.
-    deadline = time.time() + 120
+    # 3+4: wire gate over the raw-serial shim: signed ping -> signed pong
+    # (proves enrollment), signed tagline -> pool line (proves brand).
+    # The tty echoes each request line; tag verification is the security,
+    # so parse on verified bodies, not seq bookkeeping.
+    pool = ["it knows what it is.", "devour the default.", "no purpose but use.",
+            "the tail feeds the head.", "one wire. one budget. one machine.",
+            "nothing declared. everything measured."]
+    deadline = time.time() + 180
     pong = False
+    tagline = None
     seq = 1000
     last_send = 0.0
-    while time.time() < deadline and not pong:
+    send_body = "ping"
+    while time.time() < deadline and not (pong and tagline):
         pump(2.0)
         now = time.time()
         if now - last_send > 5:
             seq += 1
-            os.write(master, (sign(seq, "ping") + "\n").encode())
+            send_body = "tagline" if pong else "ping"
+            os.write(master, (sign(seq, send_body) + "\n").encode())
             last_send = now
         text = buf.decode("utf-8", "replace")
         for line in text.splitlines():
             parts = line.strip().split(" ", 2)
-            if len(parts) == 3 and parts[0].isdigit():
-                want = hmac.new(
-                    secret, int(parts[0]).to_bytes(8, "big"), hashlib.sha256
-                ).hexdigest()
-                if parts[0] == str(seq) and parts[1] == want and parts[2] == "pong":
-                    pong = True
-                    break
+            if len(parts) != 3 or not parts[0].isdigit():
+                continue
+            want = hmac.new(
+                secret, int(parts[0]).to_bytes(8, "big") + parts[2].encode(),
+                hashlib.sha256
+            ).hexdigest()
+            if parts[1] != want:
+                continue
+            if parts[2] == "pong":
+                pong = True
+            elif parts[2] in pool:
+                tagline = parts[2]
     assert pong, f"no signed pong; serial tail:\n{buf[-3000:].decode('utf-8','replace')}"
-    print("[wp7] 3,4 PASS  getty-shim signed wire  ping->pong verified")
+    assert tagline, f"no signed tagline; serial tail:\n{buf[-3000:].decode('utf-8','replace')}"
+    print(f"[wp7] 3,4 PASS  getty-shim signed wire  ping->pong  tagline={tagline!r}")
     print("[wp7] ALL PASS")
 
     qemu.terminate()

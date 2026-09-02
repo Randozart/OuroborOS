@@ -159,13 +159,22 @@ fn authed_process(secret: &Secret, line: &str) -> Option<String> {
 }
 
 /// Getty-shim loop: signed line in from stdin, signed line out on
-/// stdout, flush per line. Auth failure → `err auth`, stop (the spawning
-/// getty respawns = fresh login). EOF → clean exit.
+/// stdout, flush per line. On a real TTY (raw serial / console), the
+/// brand banner prints first — interactive eyes get the cinematic boot,
+/// pipes (`ssh -T`, FIFO face) get clean protocol only. Auth failure →
+/// `err auth`, stop (the spawning getty respawns = fresh login).
+/// EOF → clean exit.
 fn serve_stdio<R: std::io::BufRead, W: std::io::Write>(
     secret: &Secret,
     mut input: R,
     mut output: W,
 ) -> Result<()> {
+    if unsafe { libc::isatty(0) } == 1 {
+        if let Ok(issue) = std::fs::read_to_string("/run/ouro/issue") {
+            let _ = write!(output, "{issue}");
+            let _ = output.flush();
+        }
+    }
     let mut line = String::new();
     while input.read_line(&mut line)? > 0 {
         match authed_process(secret, line.trim_end()) {

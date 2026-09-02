@@ -28,6 +28,7 @@ let
     node_id="$(cat /run/ouro/node_id 2>/dev/null || echo unknown)"
     secret_state=REFUSED
     [ -s /run/ouro/secret ] && secret_state=ok
+    enroll_state="$(cat /run/ouro/enroll-status 2>/dev/null || echo no-enroll-run)"
     cat > /run/ouro/issue <<ISSUE
 
 \e[31m        the machine that remakes itself.\e[0m
@@ -35,6 +36,7 @@ let
 \e[31;1m  >> $line\e[0m
 
   node $node_id · measured admission · secret: $secret_state
+  enroll: $enroll_state
 
 ISSUE
   '';
@@ -63,26 +65,46 @@ ISSUE
     # Consume the labeled OURO partition: HMAC secret + master pubkey.
     # Missing partition => no secret => agent refuses the wire (WP2 gate).
     set -euo pipefail
+    status() {
+      printf '%s' "$1" > /run/ouro/enroll-status 2>/dev/null || true
+      echo "ouro-enroll: $1" > /dev/console 2>/dev/null || true
+    }
     mkdir -p /run/ouro
-    dev="$("${pkgs.util-linux}/bin/findfs" 'LABEL=OURO' 2>/dev/null || true)"
+    # udev race: by-label links may lag at early boot — wait for them
+    status searching
+    dev=""
+    for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
+      dev="$("${pkgs.util-linux}/bin/findfs" 'LABEL=OURO' 2>/dev/null || true)"
+      [ -n "$dev" ] && break
+      sleep 1
+    done
     if [ -z "$dev" ]; then
-      echo "ouro-enroll: no OURO partition; agent will refuse the wire"
+      status "no-partition (agent will refuse the wire)"
       exit 0
     fi
+    status "found $dev"
     mnt=/run/ouro/enroll
     mkdir -p "$mnt"
-    "${pkgs.util-linux}/bin/mount" -o ro "$dev" "$mnt"
+    if ! "${pkgs.util-linux}/bin/mount" -o ro "$dev" "$mnt" 2>/run/ouro/mount.err; then
+      status "mount-failed: $(cat /run/ouro/mount.err 2>/dev/null | tail -c 120)"
+      exit 1
+    fi
+    status mounted
     if [ -s "$mnt/secret" ]; then
       "${pkgs.coreutils}/bin/install" -m 600 -o ouro -g ouro \
         "$mnt/secret" /run/ouro/secret
+      status secret-installed
+    else
+      status "no-secret-file-on-partition"
     fi
     if [ -s "$mnt/authorized_keys" ]; then
       "${pkgs.coreutils}/bin/install" -d -m 700 -o ouro -g ouro /home/ouro/.ssh
       "${pkgs.coreutils}/bin/install" -m 600 -o ouro -g ouro \
         "$mnt/authorized_keys" /home/ouro/.ssh/authorized_keys
+      status keys-installed
     fi
-    "${pkgs.util-linux}/bin/umount" "$mnt"
-    echo "ouro-enroll: enrollment complete"
+    "${pkgs.util-linux}/bin/umount" "$mnt" || true
+    status complete
   '';
 
   # The getty "shell" for the autologin user IS the agent: login = join.
@@ -121,15 +143,17 @@ in
   systemd.targets.hibernate.enable = false;
 
   # the node user; its login shell is the agent shim
+  users.groups.ouro = { };
   users.users.ouro = {
     isNormalUser = true;
+    group = "ouro";
     description = "OurobourOS node";
     shell = ouro-shim;
     # WP7 debug image only: the flash-time key (OURO partition) is the
     # production path; this baked key lets `ssh` in for journal debugging.
     openssh.authorizedKeys.keys = [
-      "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAILSQiBkmB9O4KP66DDXjcJtlNPguZZuDSY2vutp0zoJG ouro-wp7-test"
       ''command="/run/current-system/sw/bin/bash" ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAILSQiBkmB9O4KP66DDXjcJtlNPguZZuDSY2vutp0zoJG ouro-wp7-debug-shell''
+      "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAILSQiBkmB9O4KP66DDXjcJtlNPguZZuDSY2vutp0zoJG ouro-wp7-test"
     ];
   };
   services.getty = {
@@ -141,12 +165,12 @@ in
 
   # raw-serial path (runbook §3 WP3: "SSH pty (or raw serial)"):
   # autologin on ttyS0 runs the same shim — a node with no monitor joins
-  # over a serial line.
+  # over a serial line, brand banner included.
   systemd.services."serial-getty@ttyS0" = {
     enable = true;
     wantedBy = [ "getty.target" ];
     serviceConfig.ExecStart = lib.mkForce
-      "${pkgs.util-linux}/bin/agetty -n --autologin ouro --keep-baud 115200,57600,38400,9600 %I $TERM";
+      "${pkgs.util-linux}/bin/agetty -n --autologin ouro -f /run/ouro/issue --keep-baud 115200,57600,38400,9600 %I $TERM";
   };
 
   # serial console for headless boots + the QEMU prove-out
