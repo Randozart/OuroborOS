@@ -123,6 +123,10 @@ pub enum Command {
     ShardStatus,
     /// `discover. [cidr] [port]` — sweep subnet for agents, absorb them
     Discover { cidr: Option<String>, port: Option<u16> },
+    /// `register.` — register a node via probe
+    Register,
+    /// `unregister n3.` — unregister a node
+    Unregister { node: String },
     /// `poetry on.` / `poetry off.`
     Poetry { enabled: bool },
     /// `cluster?` with assignment check
@@ -282,6 +286,18 @@ pub fn interpret(input: &str) -> Command {
         let cidr = it.next().map(|s| s.to_string());
         let port = it.next().and_then(|s| s.parse().ok());
         return Command::Discover { cidr, port };
+    }
+    if trimmed == "register." || trimmed == "register" {
+        return Command::Register;
+    }
+    if trimmed.starts_with("unregister ") || trimmed.starts_with("unregister.") {
+        let rest = trimmed
+            .trim_start_matches("unregister")
+            .trim_start_matches('.')
+            .trim()
+            .trim_end_matches('.');
+        let node = rest.split_whitespace().next().unwrap_or("").to_string();
+        return Command::Unregister { node };
     }
     let tokens = lex(input);
     let stripped = strip_whitespace(tokens);

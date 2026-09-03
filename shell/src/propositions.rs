@@ -451,6 +451,35 @@ pub fn handle(
             Ok(fmt.poetry_toggle(enabled))
         }
 
+        Command::Register => {
+            let info = ouro_cluster::probe::probe_local()
+                .map_err(|e| anyhow::anyhow!("probe failed: {}", e))?;
+            let entry = topology.add_node(info.clone());
+            let net_info = info.network.as_ref().map(|n| format!(" | network: {:.1}ms", n.latency_ms)).unwrap_or_default();
+            Ok(format!(
+                "Registered {} @ {} | {} | {}MiB | {}W{} [DONE]",
+                entry.id,
+                entry.ip,
+                entry.cpu_model,
+                entry.ram_mib,
+                entry.tdp_watts,
+                net_info,
+            ))
+        }
+
+        Command::Unregister { node } => {
+            if node.is_empty() {
+                return Ok("Usage: unregister n3.".to_string());
+            }
+            let before = topology.node_count();
+            topology.remove_node(&node);
+            if topology.node_count() < before {
+                Ok(format!("Unregistered {}. [DONE]", node))
+            } else {
+                Ok(format!("Node {} not found.", node))
+            }
+        }
+
         Command::Unknown(input) => Ok(fmt.unknown(&input)),
     }
 }

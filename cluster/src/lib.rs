@@ -4,5 +4,6 @@ pub mod pipeline;
 pub mod infer;
 pub mod error;
 pub mod probe;
+pub mod registry;
 pub mod scheduler;
 pub mod transport;
