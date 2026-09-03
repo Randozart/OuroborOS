@@ -127,3 +127,74 @@ Two corrections to "just dumb boxes":
 - `[ ]` After head swap: re-run sysinfo (swap should be ~0), then 27B mmap task.
 - Evidence thread this session: sysinfo (free/lspci/lsblk) → bol price survey
   → OuroborOS repo read → this file.
+
+---
+
+## 5. Fleet wiring — same-shelf layout (decided 2026-09-03)
+
+The fleet lives on **one shelf** — that collapses the wiring decision
+tree: DAC cables everywhere (≤3m), no fiber, no across-room runs. The
+RDMA-era topology is decided now so the ConnectX-3s drop into a plan
+instead of starting one.
+
+### Layer 0 — power (present)
+One power strip on the shelf. Future anchor for per-group wall-truth
+wattage (see Open decisions).
+
+### Layer 1 — control/management (today, ~$10)
+- One **gigabit switch** on the shelf; head + all tails wired in
+- **One uplink** switch → home router: internet + install traffic only.
+  Cluster traffic stays on the switch — bulk (storage/memory tiers,
+  activations) never contends with the household
+- Router **static-DHCP leases per MAC** → stable `ssh ouro@ip`
+- Laptop joins this layer; roams otherwise. Tier ceiling 1–3 over 1GbE
+
+### Layer 2 — data/RDMA fabric (when ConnectX-3s land, ~$85 total)
+- **Head: dual-port ConnectX-3** (~$30–35) — two SFP+ ports = two
+  point-to-point DAC links, so **no SFP+ switch** for up to 2 RDMA
+  tails; tail↔tail routes through the head at first
+  - port 1 → Alienware (DAC ~$8)
+  - port 2 → next desktop tail (DAC ~$8)
+- A used SFP+ switch (~$60) joins only if a 3rd RDMA tail ever does
+- **MTU 9000** on fabric interfaces — ACTS activations are the payload
+  that cares
+- Fabric is **offline from the internet**: the HMAC secret's blast
+  radius becomes machines we own (the signed wire stays the gatekeeper)
+- Laptop: Tier 1–3 on Layer 1; optional M.2 ConnectX-4 Lx
+  (MCX4121A-ACAT family, ~$40–60 used) into a spare NVMe slot if Tier 5
+  is ever wanted there — NVMe slots dodge the Lenovo whitelist
+
+### Shopping list
+
+| Item | ~Cost | Phase |
+|------|-------|-------|
+| Gigabit switch | $10 | today |
+| ConnectX-3 dual-port SFP+ (head) | $30–35 | Tier 6 |
+| ConnectX-3 (Alienware — slot already empty) | $25–30 | Tier 6 |
+| 2× SFP+ DAC 1–3m | $16 | Tier 6 |
+| **Total** | **~$85** | |
+
+### USB alternatives (evaluated, rejected for bandwidth)
+- **USB-A↔USB-A direct**: both ends are hosts — electrically wrong,
+  never do it
+- **Bridged USB cables** (PL25A1, `plusb`): ~40MB/s — slower than the
+  1GbE we already have. Dead end for bandwidth
+- **usbip**: not bandwidth at all — exports a tail's USB *devices* to
+  the head (tail as USB periphery over IP). Tier 3.5-class, zero cost,
+  on-theme; keep in reserve
+- **HDMI→USB3 capture** (~$15): head watches a tail's console as a UVC
+  device — ops/monitoring periphery, pairs with usbip HID for input
+  (OS-level only; BIOS still needs the physical keyboard)
+- **Thunderbolt/USB4 networking**: 20–40Gbps but no TB ports in fleet;
+  revisit only if a future node has them
+- **USB3→2.5GbE adapters** (RTL8156, ~$20/each): the cheap 2.5×
+  bandwidth move, no RDMA — fallback if gigabit ever feels tight
+
+### Open decisions
+- [ ] Smart plugs (Tapo/Tasmota, ~$8/plug) for **wall-truth watts** —
+  closes the Art. 4 loop: `budget` fed by physics instead of RAPL
+  estimates. One per shelf-group to start
+- [ ] Staged spend approved: gigabit now, SFP+ switch only if a 3rd
+  RDMA tail appears (default: yes, staged)
+- [ ] MTU 9000 burn-in on the fabric before the parity ladder re-runs
+  over it (Art. 10 gate)

@@ -90,8 +90,12 @@ device* — demonstrated with hardware already owned.
 | SFP+ DAC cables | ~$8 each | Direct-attach, no switch needed for ≤4 nodes |
 | Optional 10G switch | ~$60 used | Only if >4 nodes or copper transceivers preferred |
 
+Physical layout + full wiring spec: **FLEET.md §5** (same-shelf layout,
+dual-port head trick, USB-alternatives evaluation, open decisions).
 The Alienware's single SATA bay and the head's wired link are unchanged;
-NICs are PCIe add-ins — no chassis surgery.
+NICs are PCIe add-ins — no chassis surgery. Laptops: no PCIe slots —
+they ride Layer 1 (1GbE, Tier 1–3) or take an M.2 ConnectX-4 Lx
+(~$40–60 used, spare NVMe slot) for Tier 5.
 
 ---
 
