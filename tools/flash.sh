@@ -58,8 +58,10 @@ else
   echo "flash: WARNING no room for OURO partition — use a second USB labeled OURO (enroll dir: $ENROLL)"
 fi
 
-# 3. verify readback
-head -c 512 "$DEV" | cmp - <(head -c 512 "$IMG") || die "readback mismatch — the image on $DEV is not trustworthy, reflash"
+# 3. verify readback — sectors 1-8 only: sector 0 is the MBR, which
+# sfdisk legitimately rewrites when it appends the OURO partition.
+dd if="$DEV" bs=512 skip=1 count=8 2>/dev/null | cmp - <(dd if="$IMG" bs=512 skip=1 count=8 2>/dev/null) \
+  || die "readback mismatch — the image on $DEV is not trustworthy, reflash"
 if [ "$OURO_WRITTEN" = 1 ]; then
   echo "flash: $DEV ready with OURO enrollment. boot-order is the only step left."
 else
