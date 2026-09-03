@@ -66,7 +66,18 @@ cargo run --release --bin ouro-hiss
 ```
 
 No flags. Starts with a demo topology; `discover.` or the bus fills it
-with truth. Prompt is `hiss> `.
+with truth.
+
+**The prompt is a gauge** (spec: [`docs/PROMPT.md`](PROMPT.md)): the
+shell hisses at you once per command — bold crimson `hiss` with random
+capitalisation, plus one dim-grey-red `s` per tail device in the
+topology (`total_s = 2 + node_count`). Zero tails → `HiSs »`; five
+tails → `hiSssSss »`. `NO_COLOR` degrades to plain text; piped input
+gets no prompt at all (clean scripting).
+
+Interactive input runs on rustyline: up-arrow history and Ctrl-R search,
+persisted to `~/.ouro/hiss_history`. Ctrl-C clears the line, Ctrl-D
+exits.
 
 ### 2.2 `ouro-registry`
 

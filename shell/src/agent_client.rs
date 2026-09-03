@@ -107,10 +107,6 @@ fn send_raw_with(secret: &Secret, addr: &str, msg: &str, timeout: Duration) -> R
     Ok(body.to_string())
 }
 
-fn send_raw(addr: &str, msg: &str) -> Result<String> {
-    send_raw_with(&cached_secret()?, addr, msg, DEFAULT_TIMEOUT)
-}
-
 /// Raw authenticated request returning the plain response body — for
 /// non-JSON exchanges (e.g. the tagline registration echo).
 pub fn raw_with(secret: &Secret, addr: &str, body: &str) -> Result<String> {
@@ -130,7 +126,12 @@ pub fn ping_with(secret: &Secret, addr: &str) -> Result<bool> {
 
 /// Request telemetry from an agent.
 pub fn telemetry(addr: &str) -> Result<AgentTelemetry> {
-    let resp = send_raw(addr, "telemetry")?;
+    telemetry_with(&cached_secret()?, addr)
+}
+
+/// `telemetry` with an explicit secret (tests, multi-cluster tools).
+pub fn telemetry_with(secret: &Secret, addr: &str) -> Result<AgentTelemetry> {
+    let resp = send_raw_with(secret, addr, "telemetry", DEFAULT_TIMEOUT)?;
     let tel: AgentTelemetry =
         serde_json::from_str(&resp).with_context(|| "parse telemetry response")?;
     Ok(tel)

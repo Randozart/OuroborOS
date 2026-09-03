@@ -4,12 +4,20 @@
 
 use ouro_cluster::bmts::{write_shard, BmtsTensor};
 use ouro_cluster::infer::{ArchConfig, PipelineModel};
+use ouro_cluster::transport::auth;
 use ouro_hiss::pipeline;
 use std::io::{BufRead, BufReader, Write};
 use std::net::TcpStream;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;
+
+/// Fixed test secret — the agent refuses to boot without
+/// OURO_SECRET_FILE and refuses unsigned lines (WP2 gate).
+const TEST_SECRET_HEX: &str = "4242424242424242424242424242424242424242424242424242424242424242";
+fn test_secret() -> auth::Secret {
+    [0x42u8; 32]
+}
 
 const DTYPE_F32: u32 = 0;
 const DTYPE_F16: u32 = 1;
@@ -119,9 +127,12 @@ fn agent_bin() -> PathBuf {
 fn start_agent(port: u16, arch_json: &str) -> Child {
     let bin = agent_bin();
     assert!(bin.exists(), "build ouro-agent first (make test-all)");
+    let secret_file = std::env::temp_dir().join("ouro-pipeline-test-secret");
+    std::fs::write(&secret_file, TEST_SECRET_HEX).unwrap();
     Command::new(&bin)
         .env("OURO_PORT", port.to_string())
         .env("OURO_ARCH", arch_json)
+        .env("OURO_SECRET_FILE", &secret_file)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -129,13 +140,20 @@ fn start_agent(port: u16, arch_json: &str) -> Child {
 }
 
 fn wait_ready(addr: &str) {
+    let secret = test_secret();
     for _ in 0..100 {
         if let Ok(mut s) = TcpStream::connect(addr) {
             s.set_read_timeout(Some(Duration::from_millis(250))).ok();
-            if s.write_all(b"ping\n").is_ok() && s.flush().is_ok() {
+            let signed = auth::sign_line(&secret, 1, "ping");
+            if s.write_all(signed.as_bytes()).is_ok()
+                && s.write_all(b"\n").is_ok()
+                && s.flush().is_ok()
+            {
                 let mut buf = String::new();
-                if BufReader::new(&mut s).read_line(&mut buf).is_ok() && buf.trim() == "pong" {
-                    return;
+                if BufReader::new(&mut s).read_line(&mut buf).is_ok() {
+                    if let Ok((_, "pong")) = auth::open_line(&secret, buf.trim()) {
+                        return;
+                    }
                 }
             }
         }
@@ -168,6 +186,11 @@ fn test_rung_b_tcp_matches_in_process() {
     let dir = std::env::temp_dir().join("ouro_rungb_test");
     std::fs::remove_dir_all(&dir).ok();
     std::fs::create_dir_all(&dir).unwrap();
+
+    // pipeline::run talks through agent_client, which reads the env.
+    let secret_file = std::env::temp_dir().join("ouro-pipeline-test-secret");
+    std::fs::write(&secret_file, TEST_SECRET_HEX).unwrap();
+    std::env::set_var("OURO_SECRET_FILE", &secret_file);
 
     let mut rng = Rng(1234);
     let p1 = make_shard(&dir, 1, &[0, 1], &cfg, &mut rng, true, false);

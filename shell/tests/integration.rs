@@ -5,6 +5,14 @@ use std::process::{Child, Command};
 use std::thread;
 use std::time::Duration;
 
+use ouro_cluster::transport::auth;
+
+/// Fixed test secret (0x42 × 32) — the agent refuses to start without
+/// OURO_SECRET_FILE, and refuses every unsigned line (WP2 gate).
+fn test_secret() -> auth::Secret {
+    [0x42u8; 32]
+}
+
 /// Find the ouro-agent binary in the target directory.
 fn agent_binary() -> PathBuf {
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -25,9 +33,13 @@ fn start_agent() -> (Child, u16) {
     let port = listener.local_addr().unwrap().port();
     drop(listener);
 
+    let secret_file = std::env::temp_dir().join(format!("ouro-agent-test-secret-{port}"));
+    std::fs::write(&secret_file, "42".repeat(32)).unwrap();
+
     let bin = agent_binary();
     let child = Command::new(&bin)
         .env("OURO_PORT", port.to_string())
+        .env("OURO_SECRET_FILE", &secret_file)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()
@@ -43,18 +55,23 @@ fn start_agent() -> (Child, u16) {
     panic!("agent on port {} did not start in time", port);
 }
 
-/// Send a message and read response.
-fn send_and_receive(addr: &str, msg: &str) -> String {
+/// One signed exchange: request `seq body`, expect a verified reply with
+/// the same seq. Returns the reply body.
+fn send_signed(addr: &str, secret: &auth::Secret, seq: u64, body: &str) -> String {
     let mut stream = TcpStream::connect(addr).unwrap();
     stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
-    stream.write_all(msg.as_bytes()).unwrap();
+    stream
+        .write_all(auth::sign_line(secret, seq, body).as_bytes())
+        .unwrap();
     stream.write_all(b"\n").unwrap();
     stream.flush().unwrap();
 
     let mut reader = BufReader::new(stream);
     let mut response = String::new();
     reader.read_line(&mut response).unwrap();
-    response.trim().to_string()
+    let (rseq, out) = auth::open_line(secret, response.trim()).expect("unauthenticated reply");
+    assert_eq!(rseq, seq, "reply seq must echo the request seq");
+    out.to_string()
 }
 
 #[test]
@@ -62,7 +79,7 @@ fn test_agent_ping_roundtrip() {
     let (mut child, port) = start_agent();
     let addr = format!("127.0.0.1:{}", port);
 
-    let resp = send_and_receive(&addr, "ping");
+    let resp = send_signed(&addr, &test_secret(), 1, "ping");
     assert_eq!(resp, "pong");
 
     child.kill().ok();
@@ -74,7 +91,7 @@ fn test_agent_telemetry_roundtrip() {
     let (mut child, port) = start_agent();
     let addr = format!("127.0.0.1:{}", port);
 
-    let resp = send_and_receive(&addr, "telemetry");
+    let resp = send_signed(&addr, &test_secret(), 1, "telemetry");
     let tel: serde_json::Value = serde_json::from_str(&resp).unwrap();
     assert!(tel["hostname"].is_string());
     assert!(tel["ram_total_mib"].is_number());
@@ -90,7 +107,7 @@ fn test_agent_task_echo() {
     let addr = format!("127.0.0.1:{}", port);
 
     let task = r#"{"id":"t1","name":"echo","payload":"hello world","estimated_watts":10,"estimated_seconds":1}"#;
-    let resp = send_and_receive(&addr, task);
+    let resp = send_signed(&addr, &test_secret(), 1, task);
     let result: serde_json::Value = serde_json::from_str(&resp).unwrap();
     assert_eq!(result["status"], "Success");
     assert_eq!(result["output"], "hello world");
@@ -105,7 +122,7 @@ fn test_agent_task_bench_sum() {
     let addr = format!("127.0.0.1:{}", port);
 
     let task = r#"{"id":"t2","name":"bench_sum","payload":"10000","estimated_watts":10,"estimated_seconds":1}"#;
-    let resp = send_and_receive(&addr, task);
+    let resp = send_signed(&addr, &test_secret(), 1, task);
     let result: serde_json::Value = serde_json::from_str(&resp).unwrap();
     assert_eq!(result["status"], "Success");
     assert_eq!(result["output"], "49995000");
@@ -125,7 +142,7 @@ fn test_agent_multiple_tasks() {
             r#"{{"id":"t{}","name":"echo","payload":"msg{}","estimated_watts":10,"estimated_seconds":1}}"#,
             i, i
         );
-        let resp = send_and_receive(&addr, &task);
+        let resp = send_signed(&addr, &test_secret(), 1, &task);
         let result: serde_json::Value = serde_json::from_str(&resp).unwrap();
         assert_eq!(result["status"], "Success");
         assert_eq!(result["output"], format!("msg{}", i));
@@ -145,14 +162,14 @@ fn test_three_agent_cluster() {
     // Verify all three are alive
     for (_, port) in &agents {
         let addr = format!("127.0.0.1:{}", port);
-        let resp = send_and_receive(&addr, "ping");
+        let resp = send_signed(&addr, &test_secret(), 1, "ping");
         assert_eq!(resp, "pong");
     }
 
     // Verify all three have telemetry
     for (_, port) in &agents {
         let addr = format!("127.0.0.1:{}", port);
-        let resp = send_and_receive(&addr, "telemetry");
+        let resp = send_signed(&addr, &test_secret(), 1, "telemetry");
         let tel: serde_json::Value = serde_json::from_str(&resp).unwrap();
         assert!(tel["hostname"].is_string());
     }
@@ -169,10 +186,10 @@ fn test_shell_client_agent_probe() {
     let (mut child, port) = start_agent();
     let addr = format!("127.0.0.1:{}", port);
 
-    let alive = ouro_hiss::agent_client::ping(&addr).unwrap();
+    let alive = ouro_hiss::agent_client::ping_with(&test_secret(), &addr).unwrap();
     assert!(alive);
 
-    let tel = ouro_hiss::agent_client::telemetry(&addr).unwrap();
+    let tel = ouro_hiss::agent_client::telemetry_with(&test_secret(), &addr).unwrap();
     assert!(!tel.hostname.is_empty());
     assert!(tel.ram_total_mib > 0);
 
@@ -183,7 +200,7 @@ fn test_shell_client_agent_probe() {
         estimated_watts: 10,
         estimated_seconds: 1,
     };
-    let result = ouro_hiss::agent_client::execute(&addr, &task).unwrap();
+    let result = ouro_hiss::agent_client::execute_with(&test_secret(), &addr, &task).unwrap();
     assert_eq!(result.status, "Success");
     assert_eq!(result.output, "shell_client_test");
 
@@ -213,7 +230,7 @@ fn test_acts_and_shard_tasks_over_tcp() {
         estimated_watts: 5,
         estimated_seconds: 5,
     };
-    let result = ouro_hiss::agent_client::execute(&addr, &task).unwrap();
+    let result = ouro_hiss::agent_client::execute_with(&test_secret(), &addr, &task).unwrap();
     assert_eq!(result.status, "Success");
     assert!(result.output.contains("elems=2560"));
 
@@ -234,7 +251,7 @@ fn test_acts_and_shard_tasks_over_tcp() {
         estimated_watts: 5,
         estimated_seconds: 5,
     };
-    let result = ouro_hiss::agent_client::execute(&addr, &task).unwrap();
+    let result = ouro_hiss::agent_client::execute_with(&test_secret(), &addr, &task).unwrap();
     assert_eq!(result.status, "Success");
     assert!(result.output.contains("shard node=1"));
 
