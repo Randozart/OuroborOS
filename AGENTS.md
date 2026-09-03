@@ -4,6 +4,10 @@
 > **B**unch **O**f **R**andom **O**ld **S**ervers.
 > The machine that remakes itself. The tail feeds the head.
 
+**Docs**: [`docs/HANDBOOK.md`](docs/HANDBOOK.md) (usage) ·
+[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) (internals) ·
+[`CONSTITUTION.md`](CONSTITUTION.md) (law).
+
 ## Quick Reference
 
 ### Commands
