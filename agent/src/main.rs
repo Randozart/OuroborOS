@@ -1,4 +1,5 @@
 mod executor;
+mod master_link;
 mod stage;
 mod telemetry;
 
@@ -35,6 +36,20 @@ async fn main() -> Result<()> {
         let stdout = std::io::stdout();
         serve_stdio(&secret, stdin.lock(), stdout.lock())?;
         return Ok(());
+    }
+
+    // --master <addr>: push-based registration + telemetry heartbeat to
+    // the registry daemon (runs alongside the task server).
+    if let Some(i) = std::env::args().position(|a| a == "--master") {
+        if let Some(addr) = std::env::args().nth(i + 1) {
+            tokio::spawn(async move {
+                if let Err(e) =
+                    master_link::run(secret, addr, HEARTBEAT_INTERVAL).await
+                {
+                    eprintln!("master-link terminated: {}", e);
+                }
+            });
+        }
     }
 
     println!("auth: OURO_SECRET_FILE loaded (32B HMAC-SHA256)");

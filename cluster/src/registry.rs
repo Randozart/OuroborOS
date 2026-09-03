@@ -1,3 +1,5 @@
+pub mod bus;
+
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -200,6 +202,15 @@ impl Registry {
         }
     }
 
+    /// Find a node ID by its IP address (push registration is idempotent
+    /// per address: re-registering the same box keeps its slot).
+    pub fn find_by_ip(&self, ip: &str) -> Option<String> {
+        self.nodes
+            .values()
+            .find(|r| r.entry.ip == ip)
+            .map(|r| r.entry.id.clone())
+    }
+
     /// Get all alive nodes (last seen within threshold).
     pub fn alive_nodes(&self) -> Vec<&NodeRecord> {
         self.nodes
@@ -342,10 +353,7 @@ mod tests {
         reg.register(&info);
         assert_eq!(reg.alive_nodes().len(), 1);
         assert_eq!(reg.offline_nodes().len(), 0);
-        // Simulate time passing by manipulating last_seen
-        if let Some(record) = reg.nodes.get_mut("n1") {
-            record.last_seen = 0;
-        }
+        reg.touch_last_seen("n1", 0);
         assert_eq!(reg.alive_nodes().len(), 0);
         assert_eq!(reg.offline_nodes().len(), 1);
     }
@@ -384,5 +392,14 @@ mod tests {
         let (id2, _) = reg.register(&info2);
         assert_eq!(id1, "n1");
         assert_eq!(id2, "n2");
+    }
+
+    #[test]
+    fn test_find_by_ip() {
+        let mut reg = Registry::new();
+        let info = test_info("node-a", "192.168.1.10");
+        reg.register(&info);
+        assert_eq!(reg.find_by_ip("192.168.1.10"), Some("n1".to_string()));
+        assert_eq!(reg.find_by_ip("10.9.9.9"), None);
     }
 }
