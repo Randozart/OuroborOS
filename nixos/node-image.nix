@@ -29,27 +29,31 @@ let
     secret_state=REFUSED
     [ -s /run/ouro/secret ] && secret_state=ok
     enroll_state="$(cat /run/ouro/enroll-status 2>/dev/null || echo no-enroll-run)"
-    cat > /run/ouro/issue <<ISSUE
-
-\e[31m   ▄▄▄▄                                        ▄▄▄▄      ▄▄▄▄▄
- ▄█▀▀████▄                 █▄                ▄█▀▀████▄  ██▀▀▀▀█▄
- ██    ██       ▄          ██          ▄     ██    ██   ▀██▄  ▄▀
- ██    ██ ██ ██ ████▄▄███▄ ████▄ ▄███▄ ████▄ ██    ██     ▀██▄▄
- ██    ██ ██ ██ ██   ██ ██ ██ ██ ██ ██ ██    ██    ██   ▄   ▀██▄
-  ▀████▀ ▄▀██▀█▄█▀  ▄▀███▀▄████▀▄▀███▀▄█▀     ▀████▀    ▀██████▀\e[0m
-
- OUROBOROS: One Unified Runtime Orchestrating
-            a Bunch Of Random Old Servers
-
-\e[31m        the machine that remakes itself.\e[0m
-
-\e[31;1m  >> $line\e[0m
-
-  node $node_id · measured admission · secret: $secret_state
-  enroll: $enroll_state
-  nics: $(cat /run/ouro/nics 2>/dev/null || echo unknown)
-
-ISSUE
+    nics="$(cat /run/ouro/nics 2>/dev/null || echo unknown)"
+    # printf interprets \e -> real ESC bytes. A heredoc would bake the
+    # literal two characters into the file, and the agent's raw print
+    # would show ANSI as text (FIRST_LIGHT.md, blocker 10).
+    {
+      printf '\n'
+      printf '\e[31m   ▄▄▄▄                                        ▄▄▄▄      ▄▄▄▄▄\e[0m\n'
+      printf '\e[31m ▄█▀▀████▄                 █▄                ▄█▀▀████▄  ██▀▀▀▀█▄\e[0m\n'
+      printf '\e[31m ██    ██       ▄          ██          ▄     ██    ██   ▀██▄  ▄▀\e[0m\n'
+      printf '\e[31m ██    ██ ██ ██ ████▄▄███▄ ████▄ ▄███▄ ████▄ ██    ██     ▀██▄▄\e[0m\n'
+      printf '\e[31m ██    ██ ██ ██ ██   ██ ██ ██ ██ ██ ██ ██    ██    ██   ▄   ▀██▄\e[0m\n'
+      printf '\e[31m  ▀████▀ ▄▀██▀█▄█▀  ▄▀███▀▄████▀▄▀███▀▄█▀     ▀████▀    ▀██████▀\e[0m\n'
+      printf '\n'
+      printf ' OUROBOROS: One Unified Runtime Orchestrating\n'
+      printf '            a Bunch Of Random Old Servers\n'
+      printf '\n'
+      printf '\e[31m        the machine that remakes itself.\e[0m\n'
+      printf '\n'
+      printf '\e[31;1m  >> %s\e[0m\n' "$line"
+      printf '\n'
+      printf '  node %s · measured admission · secret: %s\n' "$node_id" "$secret_state"
+      printf '  enroll: %s\n' "$enroll_state"
+      printf '  nics: %s\n' "$nics"
+      printf '\n'
+    } > /run/ouro/issue
   '';
 
   ouro-probe = pkgs.writeShellScriptBin "ouro-probe" ''
@@ -178,6 +182,12 @@ in
   # window is honest about it). Real hardware keeps DHCP.
   networking.useNetworkd = true;
   systemd.network.enable = true;
+  # The stock NixOS firewall (default ON, ssh-only) blocked the head's
+  # task channel to the agent port (FIRST_LIGHT.md blocker 9). Tails
+  # are appliances among owned machines: the signed wire is the
+  # gatekeeper (Art. 10) and the fabric is LAN-isolated
+  # (DMA_ROADMAP.md). No host firewall.
+  networking.firewall.enable = false;
   systemd.network.networks."80-ouro" = {
     matchConfig.Type = "ether";
     networkConfig.DHCP = "yes";
@@ -238,9 +248,10 @@ in
   };
   services.getty = {
     autologinUser = "ouro";
-    # our generated issue (brand + measured state), not the default
+    # NO -f issue here: the agent's isatty banner is the only banner
+    # (agetty's issue print collided with it — FIRST_LIGHT.md blocker
+    # 10). greetingLine stays empty so nothing prints before the shim.
     greetingLine = "";
-    extraArgs = [ "-f" "/run/ouro/issue" ];
   };
 
   # raw-serial path (runbook §3 WP3: "SSH pty (or raw serial)"):
