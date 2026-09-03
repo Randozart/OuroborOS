@@ -40,7 +40,6 @@ let
 
  OUROBOROS: One Unified Runtime Orchestrating
             a Bunch Of Random Old Servers
-            (the 'a' is silent)
 
 \e[31m        the machine that remakes itself.\e[0m
 

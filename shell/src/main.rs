@@ -22,17 +22,22 @@ const HISS_WORDMARK: &str = "\
   ███    ███   ███     ▄█    ███    ▄█    ███
   ███    █▀    █▀    ▄████████▀   ▄████████▀";
 
-/// Print the HISS banner.
-fn banner() {
-    println!("{HISS_WORDMARK}");
+/// Print the HISS banner. Crimson matches the prompt brand; colour
+/// drops for NO_COLOR or non-TTY output.
+fn banner(color: bool) {
+    let mark = if color {
+        format!("\x1b[1;31m{HISS_WORDMARK}\x1b[0m")
+    } else {
+        HISS_WORDMARK.to_string()
+    };
+    println!("{mark}");
     println!();
     println!("  HISS — Hierarchical Interactive Shell System");
     println!("  OUROBOROS: One Unified Runtime Orchestrating");
     println!("             a Bunch Of Random Old Servers");
-    println!("             (the 'a' is silent)");
     println!();
     println!("  The cluster is one machine.");
-    println!("  Type ? for cluster summary.");
+    println!("  Type ? for the cluster summary, help for commands.");
     println!();
 }
 
@@ -266,7 +271,9 @@ impl Repl {
 }
 
 fn main() -> Result<()> {
-    banner();
+    let color = std::io::stdout().is_terminal()
+        && std::env::var_os("NO_COLOR").is_none_or(|v| v.is_empty());
+    banner(color);
     let args: Vec<String> = std::env::args().skip(1).collect();
     let nodes_arg = args
         .windows(2)

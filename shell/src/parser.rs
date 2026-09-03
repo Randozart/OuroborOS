@@ -125,6 +125,8 @@ pub enum Command {
     Discover { cidr: Option<String>, port: Option<u16> },
     /// `register.` — register a node via probe
     Register,
+    /// `help` — the command reference
+    Help,
     /// `unregister n3.` — unregister a node
     Unregister { node: String },
     /// `tasks.` — show task queue status
@@ -293,6 +295,9 @@ pub fn interpret(input: &str) -> Command {
     }
     if trimmed == "register." || trimmed == "register" {
         return Command::Register;
+    }
+    if trimmed == "help" || trimmed == "help?" {
+        return Command::Help;
     }
     if trimmed.starts_with("unregister ") || trimmed.starts_with("unregister.") {
         let rest = trimmed

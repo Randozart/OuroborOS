@@ -30,6 +30,41 @@ impl Default for ShellConfig {
     }
 }
 
+/// The `help` verb: every command, one screen (docs/HANDBOOK.md §3 is
+/// the long form).
+const HELP_TEXT: &str = "\
+queries
+  ?  cluster?              cluster summary
+  n1?                      full node record
+  n1.power?                one property (power ram cpu cores threads simd gpu status)
+  power?                   same, on the context node
+  cluster.active?          bulk query (active idle offline sleeping)
+
+placement
+  n1 assign branch_sort.   route through Scheduler::schedule()
+  branch_sort on?          dry-run: would it place? where? why not?
+  budget 400w.             set cluster power budget (Art. 4)
+  tasks.                   the task queue: depth, age, retries, priority
+  recover.                 sweep stale/failed nodes, drain the queue
+
+fleet
+  register.                probe this box, add it to the topology
+  unregister n3.           remove a node
+  discover. [cidr] [port]  one-shot LAN sweep for live agents
+  probe.                   list topology nodes
+  save.  load.             topology to/from JSON
+
+payloads
+  generate <prompt>.       BitNet generation on the target node
+  shards.                  pipeline plan + activation transport probe
+  deploy.  deploy shards.  ship the agent / sync weight shards
+  n1 sleep.                sleep transition (stub)
+  poetry on.  poetry off.  output register
+
+meta
+  help                     this screen
+  quit  exit  q            leave (the wyrm remembers nothing you typed here)";
+
 /// Handle a parsed command against the cluster state.
 pub fn handle(
     cmd: Command,
@@ -452,8 +487,9 @@ pub fn handle(
             Ok(fmt.poetry_toggle(enabled))
         }
 
-        Command::Register => {
-            let info = ouro_cluster::probe::probe_local()
+        Command::Help => Ok(HELP_TEXT.to_string()),
+
+        Command::Register => {            let info = ouro_cluster::probe::probe_local()
                 .map_err(|e| anyhow::anyhow!("probe failed: {}", e))?;
             let entry = topology.add_node(info.clone());
             let net_info = info.network.as_ref().map(|n| format!(" | network: {:.1}ms", n.latency_ms)).unwrap_or_default();
@@ -776,6 +812,20 @@ mod tests {
         let out = handle(cmd, &mut topo, &mut sched, &mut ctx, &mut fmt, &config, &mut test_recovery()).unwrap();
         assert!(out.contains("i5-4200U"));
         assert!(out.contains("8192MiB"));
+    }
+
+    #[test]
+    fn test_handle_help_lists_verbs() {
+        let topo = test_topology();
+        let mut sched = Scheduler::new(topo.clone());
+        let mut ctx = Context::new();
+        let mut fmt = Formatter::new(false);
+        let config = ShellConfig::new();
+        let mut topo = topo;
+        let out = handle(Command::Help, &mut topo, &mut sched, &mut ctx, &mut fmt, &config, &mut test_recovery()).unwrap();
+        for verb in ["budget 400w.", "discover.", "recover.", "register.", "n1.power?", "poetry"] {
+            assert!(out.contains(verb), "help missing {verb}");
+        }
     }
 
     #[test]
