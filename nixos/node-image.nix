@@ -253,11 +253,15 @@ in
       "${pkgs.util-linux}/bin/agetty -n --autologin ouro -f /run/ouro/issue --keep-baud 115200,57600,38400,9600 %I $TERM";
   };
 
-  # serial console for headless boots + the QEMU prove-out
+  # serial console for headless boots + the QEMU prove-out.
+  # nomodeset: tails are headless compute — KMS buys nothing and panics
+  # odd iGPUs into boot loops (first real tail, an HP Pavilion, looped
+  # GRUB→panic on real hardware 2026-09-03). Plain VGA text console.
   boot.kernelParams = [
     "quiet"
     "console=tty0"
     "console=ttyS0,115200n8"
+    "nomodeset"
   ];
   # stamp the issue fresh at each boot after brand picks the tagline
   systemd.services.ouro-brand = {
