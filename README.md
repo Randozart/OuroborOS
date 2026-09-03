@@ -85,6 +85,7 @@ master/slave; those words are retired.
 | [CONSTITUTION.md](CONSTITUTION.md) | The law. Articles, not suggestions. |
 | [docs/R2_BRINGUP.md](docs/R2_BRINGUP.md) | Hardware-day runbook and execution journal |
 | [docs/CONTRACTS.md](docs/CONTRACTS.md) | Parity ladders and acceptance contracts |
+| [docs/DMA_ROADMAP.md](docs/DMA_ROADMAP.md) | Goal: tails as peripheral DMA devices — the ladder, security model, first step |
 
 ## License
 

@@ -7,7 +7,7 @@
 
 **Docs**: [`docs/HANDBOOK.md`](docs/HANDBOOK.md) (usage) ·
 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) (internals) ·
-[`CONSTITUTION.md`](CONSTITUTION.md) (law).
+[`CONSTITUTION.md`](CONSTITUTION.md) (law) · [`docs/DMA_ROADMAP.md`](docs/DMA_ROADMAP.md) (the DMA endgame).
 
 ## Quick Reference
 
