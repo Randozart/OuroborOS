@@ -2,7 +2,7 @@
 
 > **OUROBOROS**: **O**ne **U**nified **R**untime **O**rchestrating
 > *a* **B**unch **O**f **R**andom **O**ld **S**ervers.
-> *(The 'a' is silent.)* The machine that remakes itself. The tail
+> The machine that remakes itself. The tail
 > feeds the head.
 
 <p align="center">
