@@ -1,0 +1,84 @@
+#!/usr/bin/env bash
+# ouro — head-side launcher for the OuroborOS stack.
+#
+# Usage: tools/ouro [up|hiss|stop|status]
+#   up      build (if needed) + start the registry daemon, detached
+#   hiss    run the interactive shell (foreground)
+#   stop    stop the registry daemon
+#   status  registry liveness + the nodes it knows
+#
+# Env overrides: OURO_SECRET_FILE, OURO_ADDR (default 0.0.0.0:9501)
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+SECRET="${OURO_SECRET_FILE:-$ROOT/enroll/secret}"
+ADDR="${OURO_ADDR:-0.0.0.0:9501}"
+REG="$ROOT/target/release/ouro-registry"
+HISS="$ROOT/target/release/ouro-hiss"
+
+[ -f "$SECRET" ] || { echo "ouro: no secret at $SECRET (64 hex chars)"; exit 1; }
+export OURO_SECRET_FILE="$SECRET"
+
+build() {
+  [ -x "$REG" ] && [ -x "$HISS" ] && return 0
+  echo "ouro: building release binaries…"
+  (cd "$ROOT" && cargo build --release -p ouro-hiss --bin ouro-registry --bin ouro-hiss)
+}
+
+registry_pid() { pgrep -f 'ouro-registr[y] --addr' | head -n1 || true; }
+
+cmd="${1:-status}"
+case "$cmd" in
+  up)
+    build
+    if pid="$(registry_pid)"; [ -n "$pid" ]; then
+      echo "ouro: registry already running (pid $pid)"
+    else
+      setsid nohup "$REG" --addr "$ADDR" --state "$ROOT/registry.json" \
+        >> "$ROOT/registry-live.log" 2>&1 < /dev/null &
+      for _ in $(seq 1 20); do
+        ss -tln 2>/dev/null | grep -q ":${ADDR##*:}" && break
+        sleep 0.25
+      done
+      ss -tln 2>/dev/null | grep -q ":${ADDR##*:}" \
+        && echo "ouro: registry listening on $ADDR" \
+        || { echo "ouro: registry failed to start — see registry-live.log"; exit 1; }
+    fi
+    echo "ouro: tails join via the OURO partition's head file. The wyrm waits."
+    ;;
+  hiss)
+    build
+    exec "$HISS"
+    ;;
+  stop)
+    if pid="$(registry_pid)"; [ -n "$pid" ]; then
+      kill "$pid" && echo "ouro: registry (pid $pid) stopped"
+    else
+      echo "ouro: registry not running"
+    fi
+    ;;
+  status)
+    if pid="$(registry_pid)"; [ -n "$pid" ]; then
+      echo "registry: running (pid $pid, $(ss -tln 2>/dev/null | grep -o ":9501" | head -n1 || echo 'NOT LISTENING'))"
+    else
+      echo "registry: not running"
+    fi
+    if [ -f "$ROOT/registry.json" ]; then
+      python3 - "$ROOT/registry.json" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+for nid, n in d.get("nodes", {}).items():
+    e, s = n["entry"], n["state"]
+    print(f"  {nid}: {e['hostname']} @ {e['ip']} | {e['cpu_model']} "
+          f"| {s['power_watts']}W {s['thermal_c']}C load {s['load_avg']:.1f} [{s['status']}]")
+if not d.get("nodes"):
+    print("  (no tails yet — the wyrm is hungry)")
+PY
+    else
+      echo "state: no registry.json yet"
+    fi
+    ;;
+  *)
+    sed -n '2,14p' "$0"
+    ;;
+esac

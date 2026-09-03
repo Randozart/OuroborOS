@@ -26,17 +26,19 @@ Everything needs one shared secret: 64 hex chars, never on the wire.
 # 1. Secret (once; same file on head and tails)
 python3 -c "import secrets; print(secrets.token_hex(32))" > /etc/ouro/secret
 chmod 600 /etc/ouro/secret
-export OURO_SECRET_FILE=/etc/ouro/secret
 
-# 2. Head side: registry daemon (push-based node bookkeeping)
-cargo run --release --bin ouro-registry -- --addr 0.0.0.0:9501 --state registry.json
+# 2. Head side: registry daemon + shell — or just: tools/ouro up && tools/ouro hiss
+export OURO_SECRET_FILE="$PWD/enroll/secret"
+tools/ouro up
+tools/ouro hiss
 
 # 3. Tail side (or same box for a smoke test): agent, linked to the head
-OURO_PORT=9500 cargo run --release --bin ouro-agent -- --head 192.168.1.10:9501
-
-# 4. Drive the machine
-cargo run --release --bin ouro-hiss
+OURO_PORT=9500 cargo run --release --bin ouro-agent -- --head 192.168.1.103:9501
 ```
+
+`tools/ouro` ([up|hiss|stop|status]) builds, launches, and inspects the
+head stack; it reads `enroll/secret` unless `OURO_SECRET_FILE` says
+otherwise. The longhand form below is the same thing spelled out.
 
 You should see the agent print `head-link: registered as n1 @ …` and the
 registry persist `registry.json`. In HISS:
