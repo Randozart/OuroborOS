@@ -9,7 +9,11 @@ pub struct Telemetry {
     pub cpu_model: String,
     pub cores: u32,
     pub threads: u32,
+    #[serde(default)]
+    pub has_avx: bool,
     pub has_avx2: bool,
+    #[serde(default)]
+    pub has_sse42: bool,
     pub ram_total_mib: u64,
     pub ram_used_mib: u64,
     pub power_watts: u32,
@@ -42,7 +46,9 @@ pub fn collect() -> Result<Telemetry> {
         cpu_model: cpu.0,
         cores: cpu.1,
         threads: cpu.2,
-        has_avx2: cpu.3,
+        has_avx: cpu.3,
+        has_avx2: cpu.4,
+        has_sse42: cpu.5,
         ram_total_mib: mem.0,
         ram_used_mib: mem.1,
         power_watts: power,
@@ -52,12 +58,14 @@ pub fn collect() -> Result<Telemetry> {
     })
 }
 
-/// Read CPU model, cores, threads, and AVX2 from /proc/cpuinfo.
-fn read_cpuinfo() -> Result<(String, u32, u32, bool)> {
+/// Read CPU model, cores, threads, and SIMD flags from /proc/cpuinfo.
+fn read_cpuinfo() -> Result<(String, u32, u32, bool, bool, bool)> {
     let data = fs::read_to_string("/proc/cpuinfo")?;
     let mut model = String::new();
     let mut cores = 0u32;
+    let mut has_avx = false;
     let mut has_avx2 = false;
+    let mut has_sse42 = false;
 
     for line in data.lines() {
         if line.starts_with("model name") {
@@ -71,7 +79,9 @@ fn read_cpuinfo() -> Result<(String, u32, u32, bool)> {
             }
         }
         if line.starts_with("flags") || line.starts_with("Features") {
+            has_avx = line.contains(" avx ");
             has_avx2 = line.contains(" avx2 ");
+            has_sse42 = line.contains(" sse4_2 ");
         }
     }
 
@@ -80,7 +90,7 @@ fn read_cpuinfo() -> Result<(String, u32, u32, bool)> {
         cores = threads;
     }
 
-    Ok((model, cores, threads, has_avx2))
+    Ok((model, cores, threads, has_avx, has_avx2, has_sse42))
 }
 
 /// Read total and used RAM from /proc/meminfo.

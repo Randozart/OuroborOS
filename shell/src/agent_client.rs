@@ -34,7 +34,11 @@ pub struct AgentTelemetry {
     pub cpu_model: String,
     pub cores: u32,
     pub threads: u32,
+    #[serde(default)]
+    pub has_avx: bool,
     pub has_avx2: bool,
+    #[serde(default)]
+    pub has_sse42: bool,
     pub ram_total_mib: u64,
     pub ram_used_mib: u64,
     pub power_watts: u32,
@@ -48,6 +52,8 @@ pub struct AgentTelemetry {
 pub struct GpuMini {
     pub model: String,
     pub vram_mib: u64,
+    #[serde(default)]
+    pub driver: String,
 }
 
 /// Task sent to a node agent.

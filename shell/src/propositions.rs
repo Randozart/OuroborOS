@@ -582,25 +582,23 @@ fn local_subnet() -> anyhow::Result<String> {
 
 /// Telemetry snapshot -> topology entry (id assigned by caller context).
 fn telemetry_to_node(addr: &str, tel: &crate::agent_client::AgentTelemetry, id: String) -> ouro_cluster::beast::topology::NodeEntry {
-    let mut e = ouro_cluster::beast::topology::NodeEntry {
+    ouro_cluster::beast::topology::NodeEntry {
         id,
         hostname: tel.hostname.clone(),
         ip: addr.split(':').next().unwrap_or(addr).to_string(),
         cpu_model: tel.cpu_model.clone(),
         cores: tel.cores,
         threads: tel.threads,
-        has_avx: tel.has_avx2,
+        has_avx: tel.has_avx,
         has_avx2: tel.has_avx2,
-        has_sse42: true,
+        has_sse42: tel.has_sse42,
         ram_mib: tel.ram_total_mib,
         tdp_watts: tel.power_watts.max(15),
         has_gpu: !tel.gpus.is_empty(),
         gpu_model: tel.gpus.first().map(|g| g.model.clone()).unwrap_or_default(),
         gpu_vram_mib: tel.gpus.first().map(|g| g.vram_mib).unwrap_or(0),
-        gpu_driver: String::new(),
-    };
-    let _ = &mut e;
-    e
+        gpu_driver: tel.gpus.first().map(|g| g.driver.clone()).unwrap_or_default(),
+    }
 }
 
 /// Append GPU census line to a cluster summary when any node has a GPU.
@@ -789,5 +787,39 @@ mod tests {
         assert_eq!(resolve_node_property(&node, "power", &ctx), "35W");
         assert_eq!(resolve_node_property(&node, "ram", &ctx), "8192MiB");
         assert_eq!(resolve_node_property(&node, "simd", &ctx), "AVX2, AVX, SSE4.2");
+    }
+
+    #[test]
+    fn test_telemetry_to_node_mapping() {
+        use crate::agent_client::{AgentTelemetry, GpuMini};
+        let tel = AgentTelemetry {
+            hostname: "test-node".into(),
+            cpu_model: "i7-3770".into(),
+            cores: 4,
+            threads: 8,
+            has_avx: true,
+            has_avx2: false,
+            has_sse42: true,
+            ram_total_mib: 16384,
+            ram_used_mib: 8192,
+            power_watts: 77,
+            temp_c: 45,
+            load_avg: 0.5,
+            gpus: vec![GpuMini {
+                model: "RTX 3060".into(),
+                vram_mib: 12288,
+                driver: "580.178.04".into(),
+            }],
+        };
+        let node = telemetry_to_node("192.168.1.50:9500", &tel, "n1".into());
+        assert_eq!(node.hostname, "test-node");
+        assert_eq!(node.ip, "192.168.1.50");
+        assert!(node.has_avx, "has_avx should be true");
+        assert!(!node.has_avx2, "has_avx2 should be false (i7-3770 is Ivy Bridge)");
+        assert!(node.has_sse42, "has_sse42 should be true");
+        assert!(node.has_gpu);
+        assert_eq!(node.gpu_model, "RTX 3060");
+        assert_eq!(node.gpu_driver, "580.178.04");
+        assert_eq!(node.gpu_vram_mib, 12288);
     }
 }

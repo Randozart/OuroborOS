@@ -36,11 +36,12 @@ fn parse_cpuinfo(data: &str) -> Result<CpuInfo> {
             }
         }
         if line.starts_with("flags") || line.starts_with("Features") {
-            has_avx = line.contains(" avx ");
-            has_avx2 = line.contains(" avx2 ");
-            has_sse42 = line.contains(" sse4_2 ");
-            has_bmi1 = line.contains(" bmi1 ");
-            has_bmi2 = line.contains(" bmi2 ");
+            let flags = line.to_string();
+            has_avx = flags.contains(" avx ") || flags.ends_with(" avx");
+            has_avx2 = flags.contains(" avx2 ") || flags.ends_with(" avx2");
+            has_sse42 = flags.contains(" sse4_2 ") || flags.ends_with(" sse4_2");
+            has_bmi1 = flags.contains(" bmi1 ") || flags.ends_with(" bmi1");
+            has_bmi2 = flags.contains(" bmi2 ") || flags.ends_with(" bmi2");
         }
     }
 
@@ -81,5 +82,55 @@ fn estimate_tdp(model: &str) -> u32 {
         15
     } else {
         35 // default
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_cpuinfo_with_simd_flags() {
+        let data = "\
+processor\t: 0
+model name\t: Intel(R) Core(TM) i7-3770 CPU @ 3.40GHz
+cpu cores\t: 4
+flags\t\t: fpu vme de pse tsc msr pae mce cx8 apic sep mtrr pge mca cmov pat pse36 clflush dts acpi mmx fxsr sse sse2 ss ht tm pbe syscall nx rdtscp lm constant_tsc avx avx2 sse4_1 sse4_2 bmi1 bmi2
+processor\t: 1
+model name\t: Intel(R) Core(TM) i7-3770 CPU @ 3.40GHz
+cpu cores\t: 4
+flags\t\t: fpu vme de pse tsc msr pae mce cx8 apic sep mtrr pge mca cmov pat pse36 clflush dts acpi mmx fxsr sse sse2 ss ht tm pbe syscall nx rdtscp lm constant_tsc avx avx2 sse4_1 sse4_2 bmi1 bmi2
+processor\t: 2
+model name\t: Intel(R) Core(TM) i7-3770 CPU @ 3.40GHz
+cpu cores\t: 4
+flags\t\t: fpu vme de pse tsc msr pae mce cx8 apic sep mtrr pge mca cmov pat pse36 clflush dts acpi mmx fxsr sse sse2 ss ht tm pbe syscall nx rdtscp lm constant_tsc avx avx2 sse4_1 sse4_2 bmi1 bmi2
+processor\t: 3
+model name\t: Intel(R) Core(TM) i7-3770 CPU @ 3.40GHz
+cpu cores\t: 4
+flags\t\t: fpu vme de pse tsc msr pae mce cx8 apic sep mtrr pge mca cmov pat pse36 clflush dts acpi mmx fxsr sse sse2 ss ht tm pbe syscall nx rdtscp lm constant_tsc avx avx2 sse4_1 sse4_2 bmi1 bmi2
+";
+        let info = parse_cpuinfo(data).unwrap();
+        assert_eq!(info.model, "Intel(R) Core(TM) i7-3770 CPU @ 3.40GHz");
+        assert_eq!(info.cores, 4);
+        assert_eq!(info.threads, 4);
+        assert!(info.has_avx);
+        assert!(info.has_avx2);
+        assert!(info.has_sse42);
+        assert!(info.has_bmi1);
+        assert!(info.has_bmi2);
+    }
+
+    #[test]
+    fn test_parse_cpuinfo_no_avx() {
+        let data = "\
+processor\t: 0
+model name\t: Intel(R) Core(TM)2 Duo CPU E8400 @ 3.00GHz
+cpu cores\t: 2
+flags\t\t: fpu vme de pse tsc msr pae mce cx8 apic sep mtrr pge mca cmov pat pse36 clflush dts acpi mmx fxsr sse sse2 ss ht tm pbe syscall nx lm
+";
+        let info = parse_cpuinfo(data).unwrap();
+        assert!(!info.has_avx);
+        assert!(!info.has_avx2);
+        assert!(!info.has_sse42);
     }
 }

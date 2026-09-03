@@ -65,6 +65,7 @@ pub fn probe_node(hostname: &str, ip: &str) -> Result<NodeInfo> {
     let cpu = cpu::probe_remote(ip)?;
     let memory = memory::probe_remote(ip)?;
     let energy = energy::probe_remote(ip)?;
+    let network = network::probe_remote(ip).ok();
 
     Ok(NodeInfo {
         hostname: hostname.to_string(),
@@ -72,7 +73,7 @@ pub fn probe_node(hostname: &str, ip: &str) -> Result<NodeInfo> {
         cpu,
         memory,
         energy,
-        network: None,
+        network,
         status: NodeStatus::Idle,
     })
 }
@@ -86,6 +87,7 @@ pub fn probe_local() -> Result<NodeInfo> {
     let cpu = cpu::probe_local()?;
     let memory = memory::probe_local()?;
     let energy = energy::probe_local()?;
+    let network = network::probe_agent("127.0.0.1:9500").ok();
 
     Ok(NodeInfo {
         hostname,
@@ -93,7 +95,7 @@ pub fn probe_local() -> Result<NodeInfo> {
         cpu,
         memory,
         energy,
-        network: None,
+        network,
         status: NodeStatus::Idle,
     })
 }
