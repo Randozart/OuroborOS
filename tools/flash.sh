@@ -31,12 +31,13 @@ sleep 3
 # 1. image
 dd if="$IMG" of="$DEV" bs=4M status=progress conv=fsync
 
-# 2. OURO partition (best effort: needs free space after the image)
-SIZE=$(lsblk -bno size "$DEV")
-PART_START_SECT=""
-IFS=: read -r _ START _ _ < <(sfdisk -d "$DEV" 2>/dev/null | head -n1) || true
-
-if FREE=$((SIZE - $(lsblk -bno size "${DEV}1" 2>/dev/null || echo SIZE))); [ "$FREE" -gt 33554432 ]; then
+# 2. OURO partition (needs free space after the image). lsblk may report
+# the pre-dd table's partitions until partprobe — parse defensively.
+SIZE=$(lsblk -bno size "$DEV" | head -n1)
+P1SIZE=$(lsblk -bno size "${DEV}1" 2>/dev/null | head -n1 || echo 0)
+FREE=$((SIZE - P1SIZE))
+OURO_WRITTEN=0
+if [ "$FREE" -gt 33554432 ]; then
   sfdisk --append "$DEV" <<PART
 label: dos
 type=c
@@ -51,10 +52,16 @@ PART
   # Bus join: `head` names the registry (IP:PORT) the tail registers with.
   [ -f "$ENROLL/head" ] && install -m 644 "$ENROLL/head" "$mnt/head"
   sync && umount "$mnt" && rmdir "$mnt"
+  OURO_WRITTEN=1
   echo "flash: OURO partition written (/dev/$LAST)"
 else
   echo "flash: WARNING no room for OURO partition — use a second USB labeled OURO (enroll dir: $ENROLL)"
 fi
 
 # 3. verify readback
-head -c 512 "$DEV" | cmp - <(head -c 512 "$IMG") && echo "flash: $DEV ready. boot-order is the only step left."
+head -c 512 "$DEV" | cmp - <(head -c 512 "$IMG") || die "readback mismatch — the image on $DEV is not trustworthy, reflash"
+if [ "$OURO_WRITTEN" = 1 ]; then
+  echo "flash: $DEV ready with OURO enrollment. boot-order is the only step left."
+else
+  die "$DEV has the image but NO OURO partition — the tail will refuse the wire. Reflash or enroll via a second USB."
+fi
