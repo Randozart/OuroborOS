@@ -205,7 +205,7 @@ CLUSTER context.
 
 ```
 # Assign a workload to a node
-> n3 assign branch_sort.
+> n3 assign branch_sort
 THE COUNSEL ACTS:
   [1] Serialize branch_sort.bv.              [OK]
   [2] Check: n3 supports branch_prediction.  [YES]
@@ -218,7 +218,7 @@ RESULT: branch_sort assigned to n3. [TRUE]
 Node休眠. Power: 12W → 2W.
 
 # Set energy budget
-> budget 400w.
+> budget 400w
 Cluster power budget: 400W. [SET]
 
 # Remove a node from the cluster
@@ -316,7 +316,7 @@ The rest dream of silicon and electrons.
 Node休眠. Its fan slows. The heat fades. 12W → 2W. A small silence.
 
 # Workload assignment (poetic)
-> n3 assign branch_sort.
+> n3 assign branch_sort
 The Counsel considers. The contract holds.
 branch_sort finds a home in Node_3. 28W added to the dream.
 
@@ -352,10 +352,10 @@ Poetry mode disabled.
 | `?` alone | `?` | Cluster summary |
 | `property?` (bare) | `?` | Query current context's property |
 | `poetry on/off` | — | Toggle poetry mode |
-| `probe.` | — | Probe all nodes |
-| `deploy.` | — | Deploy node-agent |
-| `save.` | — | Save cluster state |
-| `load.` | — | Load cluster state |
+| `probe` | — | Probe all nodes |
+| `deploy` | — | Deploy node-agent |
+| `save` | — | Save cluster state |
+| `load` | — | Load cluster state |
 | `budget Nw.` | — | Set energy budget |
 
 ---
@@ -483,7 +483,7 @@ OuroborOS/
 | 3.7 | `agent/telemetry.rs` | RAPL power, thermal, load reporting |
 | 3.8 | `agent/main.rs` | Daemon: accept tasks, heartbeat, graceful shutdown |
 
-**Deliverable:** `n3 assign branch_sort.` → task dispatched → result returned.
+**Deliverable:** `n3 assign branch_sort` → task dispatched → result returned.
 
 ### Phase 4: Workloads + Benchmarks (Weeks 9-12)
 

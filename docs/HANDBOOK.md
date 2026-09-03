@@ -67,7 +67,7 @@ hiss> n1.power?
 cargo run --release --bin ouro-hiss
 ```
 
-No flags. Starts with a demo topology; `discover.` or the bus fills it
+No flags. Starts with a demo topology; `discover` or the bus fills it
 with truth.
 
 **The prompt is a gauge** (spec: [`docs/PROMPT.md`](PROMPT.md)): the
@@ -124,11 +124,11 @@ FIFO cannot bypass Art. 4.
 
 ```bash
 echo 'ping' > /srv/ouro/tty/n1.in && cat /srv/ouro/tty/n1.out   # -> ok pong
-echo 'budget 120w.' > /srv/ouro/tty/n1.in && cat /srv/ouro/tty/n1.out
+echo 'budget 120w' > /srv/ouro/tty/n1.in && cat /srv/ouro/tty/n1.out
 ```
 
 In: `ping` | `echo <text>` | `stage_setup <path>` | `stage_reset` |
-`tagline` | dot-notation shell lines (`budget 120w.`, `n1?`, `probe.`).
+`tagline` | dot-notation shell lines (`budget 120w`, `n1?`, `probe`).
 Out: `ok <text>` | `queued <reason>` | `err <msg>`.
 
 ---
@@ -152,21 +152,21 @@ selects node 1; `cluster` deselects.
 
 | Input | Meaning |
 |-------|---------|
-| `n1 assign branch_sort.` | Route through `Scheduler::schedule()`: class match → capability rank → budget gate. Dispatch or queue, step by step. |
+| `n1 assign branch_sort` | Route through `Scheduler::schedule()`: class match → capability rank → budget gate. Dispatch or queue, step by step. |
 | `branch_sort on?` | Dry-run: would it place? where? why not? |
-| `budget 400w.` | Set cluster power budget. May re-place anything, any time. |
-| `tasks.` | Task queue: depth, per-task age, retries, priority |
-| `recover.` | Sweep stale/failed nodes, drain the queue |
+| `budget 400w` | Set cluster power budget. May re-place anything, any time. |
+| `tasks` | Task queue: depth, per-task age, retries, priority |
+| `recover` | Sweep stale/failed nodes, drain the queue |
 
 ### Fleet truth
 
 | Input | Meaning |
 |-------|---------|
-| `register.` | Probe this box locally, add it to the topology |
-| `unregister n3.` | Remove a node |
+| `register` | Probe this box locally, add it to the topology |
+| `unregister n3` | Remove a node |
 | `discover. [cidr] [port]` | One-shot sweep: TCP-probe a /24, pull telemetry from live agents, absorb them (`discover. 127.0.0.1 9501` for localhost) |
-| `probe.` | List all topology nodes |
-| `save.` / `load.` | Topology ↔ JSON on disk |
+| `probe` | List all topology nodes |
+| `save` / `load` | Topology ↔ JSON on disk |
 
 ### Payloads
 
@@ -174,10 +174,10 @@ selects node 1; `cluster` deselects.
 |-------|---------|
 | `generate <prompt>.` | BitNet generation on the target node |
 | `shards.` | Pipeline plan + activation transport probe |
-| `deploy.` | Ship the agent binary to known node addrs (SSH/SCP) |
-| `deploy shards.` | Checksum-aware shard sync |
-| `n1休眠.` or `n1 sleep.` | Sleep transition (stub) |
-| `poetry on.` / `poetry off.` | Output register |
+| `deploy` | Ship the agent binary to known node addrs (SSH/SCP) |
+| `deploy shards` | Checksum-aware shard sync |
+| `n1休眠` or `n1 sleep` | Sleep transition (stub) |
+| `poetry on` / `poetry off` | Output register |
 
 ### Example session
 
@@ -186,10 +186,10 @@ hiss> ?
 hiss> discover.
 hiss> n2
 hiss> power?
-hiss> budget 120w.
-hiss> n2 assign llm_decode.
+hiss> budget 120w
+hiss> n2 assign llm_decode
 hiss> tasks.
-hiss> recover.
+hiss> recover
 ```
 
 ---
@@ -231,9 +231,9 @@ keeps no other state — it is remade from the graph, not from disk.
 | Banner says `secret: REFUSED` | OURO partition missing/unreadable | Check `enroll:` line in banner + `ouro-enroll` console lines; re-flash |
 | Registry replies `unknown` to heartbeat | Daemon restarted without `--state`, or node's IP changed | Agent re-registers automatically; nothing to do |
 | `head-link: … — retry in 5s` | Daemon down / wrong `--head` address | Check registry is up; verify address |
-| Task shows `queued (queue depth: N)` | Budget exceeded or no capable node | `tasks.` to inspect; `budget 600w.` or free a node; `recover.` drains |
-| Node listed but `?` shows it idle with stale watts | Heartbeat gap > 30s | Node offline — `recover.`; check its link |
-| `discover.` finds nothing | Agents not listening on that port | `discover. <cidr> 9500`; prefer the push bus over sweeps |
+| Task shows `queued (queue depth: N)` | Budget exceeded or no capable node | `tasks` to inspect; `budget 600w` or free a node; `recover` drains |
+| Node listed but `?` shows it idle with stale watts | Heartbeat gap > 30s | Node offline — `recover`; check its link |
+| `discover` finds nothing | Agents not listening on that port | `discover. <cidr> 9500`; prefer the push bus over sweeps |
 | FIFO `.out` shows `err empty line` | Wrote newline only | Each request must be one non-empty line |
 
 ---

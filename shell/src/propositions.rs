@@ -41,25 +41,25 @@ queries
   cluster.active?          bulk query (active idle offline sleeping)
 
 placement
-  n1 assign branch_sort.   route through Scheduler::schedule()
+  n1 assign branch_sort   route through Scheduler::schedule()
   branch_sort on?          dry-run: would it place? where? why not?
-  budget 400w.             set cluster power budget (Art. 4)
-  tasks.                   the task queue: depth, age, retries, priority
-  recover.                 sweep stale/failed nodes, drain the queue
+  budget 400w             set cluster power budget (Art. 4)
+  tasks                   the task queue: depth, age, retries, priority
+  recover                 sweep stale/failed nodes, drain the queue
 
 fleet
-  register.                probe this box, add it to the topology
-  unregister n3.           remove a node
-  discover. [cidr] [port]  one-shot LAN sweep for live agents
-  probe.                   list topology nodes
-  save.  load.             topology to/from JSON
+  register                probe this box, add it to the topology
+  unregister n3           remove a node
+  discover [cidr] [port]  one-shot LAN sweep for live agents
+  probe                   list topology nodes
+  save  load             topology to/from JSON
 
 payloads
   generate <prompt>.       BitNet generation on the target node
   shards.                  pipeline plan + activation transport probe
-  deploy.  deploy shards.  ship the agent / sync weight shards
-  n1 sleep.                sleep transition (stub)
-  poetry on.  poetry off.  output register
+  deploy  deploy shards  ship the agent / sync weight shards
+  n1 sleep                sleep transition (stub)
+  poetry on  poetry off  output register
 
 meta
   help                     this screen
@@ -375,7 +375,7 @@ pub fn handle(
                     if tel.gpus.is_empty() { String::new() } else { format!(" | GPU {}MiB", tel.gpus[0].vram_mib) }
                 ));
             }
-            out.push_str(&format!("{} node(s) absorbed. `save.` to persist. [DONE]", found.len()));
+            out.push_str(&format!("{} node(s) absorbed. `save` to persist. [DONE]", found.len()));
             Ok(out)
         }
 
@@ -823,7 +823,7 @@ mod tests {
         let config = ShellConfig::new();
         let mut topo = topo;
         let out = handle(Command::Help, &mut topo, &mut sched, &mut ctx, &mut fmt, &config, &mut test_recovery()).unwrap();
-        for verb in ["budget 400w.", "discover.", "recover.", "register.", "n1.power?", "poetry"] {
+        for verb in ["budget 400w", "discover", "recover", "register", "n1.power?", "poetry"] {
             assert!(out.contains(verb), "help missing {verb}");
         }
     }

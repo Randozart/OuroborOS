@@ -204,7 +204,7 @@ pub fn parse(tokens: &[Token]) -> Command {
             }
         }
 
-        // `n3 assign branch_sort.` — proposition
+        // `n3 assign branch_sort.` / `n3 assign branch_sort` — proposition
         [Token::Ident(name), Token::Ident(pred), Token::Ident(wl), Token::Dot]
             if name.starts_with('n') && pred == "assign" =>
         {
@@ -213,8 +213,16 @@ pub fn parse(tokens: &[Token]) -> Command {
                 workload: wl.clone(),
             }
         }
+        [Token::Ident(name), Token::Ident(pred), Token::Ident(wl)]
+            if name.starts_with('n') && pred == "assign" =>
+        {
+            Command::AssignProposition {
+                node: name.clone(),
+                workload: wl.clone(),
+            }
+        }
 
-        // `n3休眠.` — power state
+        // `n3休眠.` / `n3 sleep` — power state
         [Token::Ident(name), Token::Ident(state), Token::Dot]
             if name.starts_with('n')
                 && (state == "休眠" || state == "sleep") =>
@@ -224,32 +232,55 @@ pub fn parse(tokens: &[Token]) -> Command {
                 sleeping: true,
             }
         }
+        [Token::Ident(name), Token::Ident(state)]
+            if name.starts_with('n')
+                && (state == "休眠" || state == "sleep") =>
+        {
+            Command::PowerState {
+                node: name.clone(),
+                sleeping: true,
+            }
+        }
 
-        // `budget 400w.` or `budget 400.`
+        // `budget 400w.` / `budget 400w`
         [Token::Ident(b), Token::Ident(val), Token::Dot] if b == "budget" => {
             let watts_str = val.trim_end_matches('w').trim_end_matches('W');
             let watts = watts_str.parse::<u32>().unwrap_or(0);
             Command::SetBudget { watts }
         }
+        [Token::Ident(b), Token::Ident(val)] if b == "budget" => {
+            let watts_str = val.trim_end_matches('w').trim_end_matches('W');
+            let watts = watts_str.parse::<u32>().unwrap_or(0);
+            Command::SetBudget { watts }
+        }
 
-        // `poetry on.` / `poetry off.`
+        // `poetry on.` / `poetry on`
         [Token::Ident(p), Token::Ident(val), Token::Dot] if p == "poetry" => {
             Command::Poetry {
                 enabled: val == "on",
             }
         }
+        [Token::Ident(p), Token::Ident(val)] if p == "poetry" => {
+            Command::Poetry {
+                enabled: val == "on",
+            }
+        }
 
-        // `probe.`
+        // `probe.` / `probe`
         [Token::Ident(p), Token::Dot] if p == "probe" => Command::Probe,
+        [Token::Ident(p)] if p == "probe" => Command::Probe,
 
-        // `deploy.`
+        // `deploy.` / `deploy`
         [Token::Ident(d), Token::Dot] if d == "deploy" => Command::Deploy,
+        [Token::Ident(d)] if d == "deploy" => Command::Deploy,
 
-        // `save.`
+        // `save.` / `save`
         [Token::Ident(s), Token::Dot] if s == "save" => Command::Save,
+        [Token::Ident(s)] if s == "save" => Command::Save,
 
-        // `load.`
+        // `load.` / `load`
         [Token::Ident(l), Token::Dot] if l == "load" => Command::Load,
+        [Token::Ident(l)] if l == "load" => Command::Load,
 
         // `cluster` — reset context
         [Token::Ident(c)] if c == "cluster" => Command::ResetContext,
@@ -271,18 +302,23 @@ pub fn parse(tokens: &[Token]) -> Command {
 /// Convenience: lex + strip whitespace + parse.
 pub fn interpret(input: &str) -> Command {
     let trimmed = input.trim();
+    // The sentence-period is decoration, never structure: strip one
+    // trailing '.' so `budget 400w` and `budget 400w.` are the same
+    // command. Property dots (`n1.power?`) are internal separators and
+    // unaffected. `generate` keeps its own suffix handling below.
+    let trimmed = trimmed.strip_suffix('.').unwrap_or(trimmed);
     // Raw-string shortcut: prompts may contain any characters except a trailing '.'
     if let Some(rest) = trimmed.strip_prefix("generate ") {
         let prompt = rest.strip_suffix('.').unwrap_or(rest).trim().to_string();
         return Command::Generate { prompt };
     }
-    if trimmed == "shards." || trimmed.starts_with("shards ") {
+    if trimmed == "shards" || trimmed == "shards." || trimmed.starts_with("shards ") {
         return Command::ShardStatus;
     }
     if trimmed.starts_with("deploy shards") {
         return Command::DeployShards;
     }
-    if trimmed.starts_with("discover.") || trimmed.starts_with("discover ") {
+    if trimmed == "discover" || trimmed.starts_with("discover") {
         let rest = trimmed
             .trim_start_matches("discover")
             .trim_start_matches('.')
@@ -428,6 +464,37 @@ mod tests {
     fn test_interpret_bare_property() {
         let cmd = interpret("power?");
         assert!(matches!(cmd, Command::ContextPropertyQuery { property } if property == "power"));
+    }
+
+    /// The sentence-period is decoration: every dotted form has an
+    /// undotted twin (the property dot in `n1.power?` is untouched).
+    #[test]
+    fn test_interpret_undotted_equivalents() {
+        assert!(
+            matches!(interpret("n3 assign branch_sort"), Command::AssignProposition { node, workload } if node == "n3" && workload == "branch_sort")
+        );
+        assert!(matches!(interpret("n3 sleep"), Command::PowerState { sleeping: true, .. }));
+        assert!(matches!(interpret("budget 400w"), Command::SetBudget { watts: 400 }));
+        assert!(matches!(interpret("budget 400"), Command::SetBudget { watts: 400 }));
+        assert!(matches!(interpret("poetry off"), Command::Poetry { enabled: false }));
+        assert!(matches!(interpret("probe"), Command::Probe));
+        assert!(matches!(interpret("deploy"), Command::Deploy));
+        assert!(matches!(interpret("save"), Command::Save));
+        assert!(matches!(interpret("load"), Command::Load));
+        assert!(matches!(interpret("register"), Command::Register));
+        assert!(matches!(interpret("tasks"), Command::Tasks));
+        assert!(matches!(interpret("recover"), Command::Recover));
+        assert!(matches!(interpret("help"), Command::Help));
+    }
+
+    #[test]
+    fn test_property_dot_survives_period_strip() {
+        // `n1.power?` ends in '?' — unaffected. But a command whose
+        // property query is written with a trailing period still
+        // resolves: the strip happens once, before tokenizing.
+        assert!(
+            matches!(interpret("cluster.active?"), Command::BulkQuery { filter } if filter == "active")
+        );
     }
 }
 

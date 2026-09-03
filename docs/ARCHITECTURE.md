@@ -149,7 +149,7 @@ NodeRecord
   re-registration (per-IP idempotence), freed on `unregister`.
 - **Liveness**: a record is *alive* if `now - last_seen < 30s`
   (heartbeat window). Past that it is *offline* — the 10s daemon sweep
-  reports it and `recover.` can act.
+  reports it and `recover` can act.
 - **Events**: `NodeJoined`, `NodeLeft {reason}`, `NodeUpdated {fields}`,
   `NodeStateChanged {from, to}` — appended to an in-memory journal and
   consumed by error recovery.
@@ -184,7 +184,7 @@ nothing — HISS verb, FIFO line, future API — may place work around it.
    priority inserts ahead; retry pushes to the back), `max_retries = 3`
    per task, optional deadlines (`expire()`), hard cap 1000, `drain()`
    re-offers everything when conditions change (budget raised, node
-   joined, `recover.`).
+   joined, `recover`).
 5. **Release**: `complete(watts)` returns energy to the budget; queued
    work is then drainable.
 
@@ -197,7 +197,7 @@ nothing — HISS verb, FIFO line, future API — may place work around it.
   a 300s recovery timeout.
 - `sweep_stale(registry)` finds records past the heartbeat window;
   `cleanup` forgets tracking for nodes no longer registered.
-- `recover.` (HISS) sweeps, reports, and drains the queue so displaced
+- `recover` (HISS) sweeps, reports, and drains the queue so displaced
   work finds a new tail.
 
 ## 8. Probes (`cluster/src/probe/`)
@@ -249,7 +249,7 @@ tagline under HMAC.
 ## 10. Inference stack
 
 - **BMTS** (`bmts.rs`): weight shard format for raw placement; shards
-  are pushed checksum-aware (`deploy shards.`).
+  are pushed checksum-aware (`deploy shards`).
 - **ACTS** (`pipeline.rs`): activation framing between stages —
   `sequence, token_pos, layer bounds, dims, bytes`; the pipeline plan
   maps layer ranges to node ids.

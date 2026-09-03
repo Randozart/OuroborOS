@@ -35,7 +35,7 @@ that carries no letter at all.
   task queue (priority, retries, drain). Nothing places work around
   `Scheduler::schedule()`.
 - **Error recovery**: failure counting with cooldown, stale sweeps,
-  `recover.` drains displaced work to a new tail.
+  `recover` drains displaced work to a new tail.
 - **Node image** (NixOS, flake): stateless boot, measured identity
   (`sha256(SMBIOS | MAC)`), enrollment from an `OURO`-labeled partition
   with breadcrumbs, random boot motto, and a QEMU-proved signed serial
@@ -64,8 +64,8 @@ hiss> ?
 hiss> discover.
 hiss> n2
 hiss> power?
-hiss> budget 120w.
-hiss> recover.
+hiss> budget 120w
+hiss> recover
 ```
 
 ## Terminology
