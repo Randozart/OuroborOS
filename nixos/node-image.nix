@@ -31,13 +31,20 @@ let
     enroll_state="$(cat /run/ouro/enroll-status 2>/dev/null || echo no-enroll-run)"
     cat > /run/ouro/issue <<ISSUE
 
+\e[31m   ▄▄▄▄                                        ▄▄▄▄      ▄▄▄▄▄
+ ▄█▀▀████▄                 █▄                ▄█▀▀████▄  ██▀▀▀▀█▄
+ ██    ██       ▄          ██          ▄     ██    ██   ▀██▄  ▄▀
+ ██    ██ ██ ██ ████▄▄███▄ ████▄ ▄███▄ ████▄ ██    ██     ▀██▄▄
+ ██    ██ ██ ██ ██   ██ ██ ██ ██ ██ ██ ██    ██    ██   ▄   ▀██▄
+  ▀████▀ ▄▀██▀█▄█▀  ▄▀███▀▄████▀▄▀███▀▄█▀     ▀████▀    ▀██████▀\e[0m
+
+ OUROBOROS: One Unified Runtime Orchestrating
+            a Bunch Of Random Old Servers
+            (the 'a' is silent)
+
 \e[31m        the machine that remakes itself.\e[0m
 
 \e[31;1m  >> $line\e[0m
-
-  OUROBOROS: One Unified Runtime Orchestrating
-             a Bunch Of Random Old Servers
-             (the 'a' is silent)
 
   node $node_id · measured admission · secret: $secret_state
   enroll: $enroll_state

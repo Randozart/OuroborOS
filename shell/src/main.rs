@@ -10,13 +10,20 @@ use ouro_hiss::formatter::Formatter;
 use ouro_hiss::parser::interpret;
 use ouro_hiss::propositions;
 
+/// The HISS wordmark (docs/brand/hiss-ascii.txt), frozen at compile time.
+const HISS_WORDMARK: &str = "\
+   ▄█    █▄     ▄█     ▄████████    ▄████████
+  ███    ███   ███    ███    ███   ███    ███
+  ███    ███   ███▌   ███    █▀    ███    █▀
+ ▄███▄▄▄▄███▄▄ ███▌   ███          ███
+▀▀███▀▀▀▀███▀  ███▌ ▀███████████ ▀███████████
+  ███    ███   ███           ███          ███
+  ███    ███   ███     ▄█    ███    ▄█    ███
+  ███    █▀    █▀    ▄████████▀   ▄████████▀";
+
 /// Print the HISS banner.
 fn banner() {
-    println!(" _   _ ___ ____ ");
-    println!("| | | |_ _/ ___|");
-    println!("| |_| || |\\___ \\");
-    println!("|  _  || | ___) |");
-    println!("|_| |_|___|____/ ");
+    println!("{HISS_WORDMARK}");
     println!();
     println!("  HISS — Hierarchical Interactive Shell System");
     println!("  OUROBOROS: One Unified Runtime Orchestrating");
