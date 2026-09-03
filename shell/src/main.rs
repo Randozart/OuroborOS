@@ -165,6 +165,7 @@ fn main() -> Result<()> {
 
     let stdin = io::stdin();
     let mut reader = stdin.lock();
+    let mut recovery = ouro_cluster::error_recovery::ErrorRecovery::new();
 
     loop {
         print!("> ");
@@ -211,7 +212,7 @@ fn main() -> Result<()> {
             _ => {}
         }
 
-        match propositions::handle(cmd, &mut topology, &mut scheduler, &mut ctx, &mut fmt, &config) {
+        match propositions::handle(cmd, &mut topology, &mut scheduler, &mut ctx, &mut fmt, &config, &mut recovery) {
             Ok(output) => println!("{}", output),
             Err(e) => println!("Error: {}", e),
         }
@@ -258,8 +259,9 @@ mod tests {
         let mut fmt = Formatter::new(false);
         let mut topo = topo;
         let config = propositions::ShellConfig::new();
+        let mut recovery = ouro_cluster::error_recovery::ErrorRecovery::new();
         let cmd = interpret("n1");
-        let out = propositions::handle(cmd, &mut topo, &mut sched, &mut ctx, &mut fmt, &config).unwrap();
+        let out = propositions::handle(cmd, &mut topo, &mut sched, &mut ctx, &mut fmt, &config, &mut recovery).unwrap();
         assert_eq!(out, "n1 selected.");
     }
 }

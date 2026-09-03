@@ -3,6 +3,7 @@ pub mod bmts;
 pub mod pipeline;
 pub mod infer;
 pub mod error;
+pub mod error_recovery;
 pub mod probe;
 pub mod registry;
 pub mod scheduler;

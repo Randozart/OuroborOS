@@ -129,6 +129,8 @@ pub enum Command {
     Unregister { node: String },
     /// `tasks.` — show task queue status
     Tasks,
+    /// `recover.` — trigger error recovery sweep
+    Recover,
     /// `poetry on.` / `poetry off.`
     Poetry { enabled: bool },
     /// `cluster?` with assignment check
@@ -303,6 +305,9 @@ pub fn interpret(input: &str) -> Command {
     }
     if trimmed == "tasks." || trimmed == "tasks" {
         return Command::Tasks;
+    }
+    if trimmed == "recover." || trimmed == "recover" {
+        return Command::Recover;
     }
     let tokens = lex(input);
     let stripped = strip_whitespace(tokens);

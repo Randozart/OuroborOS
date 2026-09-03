@@ -38,6 +38,7 @@ pub fn handle(
     ctx: &mut Context,
     fmt: &mut Formatter,
     config: &ShellConfig,
+    recovery: &mut ouro_cluster::error_recovery::ErrorRecovery,
 ) -> Result<String> {
     match cmd {
         Command::ClusterSummary => {
@@ -495,6 +496,31 @@ pub fn handle(
             Ok(out)
         }
 
+        Command::Recover => {
+            let stale = recovery.sweep_stale(&ouro_cluster::registry::Registry::new());
+            let failed: Vec<_> = recovery.failed_nodes().iter().map(|f| f.node_id.clone()).collect();
+            let mut out = String::new();
+            if stale.is_empty() && failed.is_empty() {
+                out.push_str("No stale or failed nodes. [OK]");
+            } else {
+                for id in &stale {
+                    out.push_str(&format!("  stale: {} — scheduling recovery\n", id));
+                }
+                for id in &failed {
+                    out.push_str(&format!("  failed: {} — tracking\n", id));
+                }
+            }
+            // Drain queue to retry any queued tasks
+            let results = scheduler.drain_queue();
+            if !results.is_empty() {
+                out.push_str(&format!("\nDrained {} queued tasks:\n", results.len()));
+                for (name, outcome) in &results {
+                    out.push_str(&format!("  {} → {:?}\n", name, outcome));
+                }
+            }
+            Ok(out)
+        }
+
         Command::Unknown(input) => Ok(fmt.unknown(&input)),
     }
 }
@@ -713,6 +739,10 @@ mod tests {
     use ouro_cluster::beast::topology::NodeEntry;
     use crate::formatter::Formatter;
 
+    fn test_recovery() -> ouro_cluster::error_recovery::ErrorRecovery {
+        ouro_cluster::error_recovery::ErrorRecovery::new()
+    }
+
     fn test_topology() -> ClusterTopology {
         let mut topo = ClusterTopology::new();
         topo.nodes.push(NodeEntry {
@@ -743,7 +773,7 @@ mod tests {
         let mut fmt = Formatter::new(false);
         let config = ShellConfig::new();
         let cmd = Command::NodeQuery { node: "n1".into() };
-        let out = handle(cmd, &mut topo, &mut sched, &mut ctx, &mut fmt, &config).unwrap();
+        let out = handle(cmd, &mut topo, &mut sched, &mut ctx, &mut fmt, &config, &mut test_recovery()).unwrap();
         assert!(out.contains("i5-4200U"));
         assert!(out.contains("8192MiB"));
     }
@@ -757,7 +787,7 @@ mod tests {
         let config = ShellConfig::new();
         let cmd = Command::SetBudget { watts: 400 };
         let mut topo = topo;
-        let out = handle(cmd, &mut topo, &mut sched, &mut ctx, &mut fmt, &config).unwrap();
+        let out = handle(cmd, &mut topo, &mut sched, &mut ctx, &mut fmt, &config, &mut test_recovery()).unwrap();
         assert_eq!(out, "Cluster power budget: 400W. [SET]");
         assert_eq!(sched.budget.budget_watts, 400);
     }
@@ -798,10 +828,10 @@ mod tests {
         config.topology_file = "/tmp/ouro_test_save".to_string();
 
         let mut topo = topo;
-        let out = handle(Command::Save, &mut topo, &mut sched, &mut ctx, &mut fmt, &config).unwrap();
+        let out = handle(Command::Save, &mut topo, &mut sched, &mut ctx, &mut fmt, &config, &mut test_recovery()).unwrap();
         assert!(out.contains("DONE"));
 
-        let out = handle(Command::Load, &mut topo, &mut sched, &mut ctx, &mut fmt, &config).unwrap();
+        let out = handle(Command::Load, &mut topo, &mut sched, &mut ctx, &mut fmt, &config, &mut test_recovery()).unwrap();
         assert!(out.contains("DONE"));
         assert_eq!(topo.node_count(), 1);
 

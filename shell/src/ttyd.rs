@@ -133,6 +133,7 @@ pub struct TtySession {
     fmt: Formatter,
     config: propositions::ShellConfig,
     child: Option<ChildWire>,
+    recovery: ouro_cluster::error_recovery::ErrorRecovery,
 }
 
 impl TtySession {
@@ -180,6 +181,7 @@ impl TtySession {
             fmt: Formatter::new(false),
             config,
             child: None,
+            recovery: ouro_cluster::error_recovery::ErrorRecovery::new(),
         }
     }
 
@@ -211,6 +213,7 @@ impl TtySession {
             &mut self.ctx,
             &mut self.fmt,
             &self.config,
+            &mut self.recovery,
         ) {
             Ok(out) => TtyResponse::Ok(out),
             Err(e) => TtyResponse::Err(e.to_string()),

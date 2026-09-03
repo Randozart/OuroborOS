@@ -193,6 +193,13 @@ impl Registry {
         self.nodes.get(node_id)
     }
 
+    /// Backdate a node's last_seen (recovery drills, tests, offline marking).
+    pub fn touch_last_seen(&mut self, node_id: &str, epoch_secs: u64) {
+        if let Some(record) = self.nodes.get_mut(node_id) {
+            record.last_seen = epoch_secs;
+        }
+    }
+
     /// Get all alive nodes (last seen within threshold).
     pub fn alive_nodes(&self) -> Vec<&NodeRecord> {
         self.nodes
