@@ -390,3 +390,30 @@ operator is looking.
   `-D warnings` clean. **Next: physical R2** — flash a stick
   (`tools/flash.sh`), boot-order, §6 acceptance test. Brand `docs/brand/`
   has the crimson ouroboros SVG; Braille TTY variant pending from owner.
+
+- 2026-09-03: **No-hardware build-out (5 phases, all committed).** The
+  stack between shell and hardware is now real:
+  - **WP8 polish** (`628f87a`): agent reports has_avx/has_sse42 (was
+    avx2-only); `telemetry_to_node()` no longer hardcodes SIMD/TDP/GPU
+    driver; network probe actually wired into probe_node()/probe_local();
+    flag parser handles end-of-line flags.
+  - **WP9 registry** (`5953546`): `cluster/src/registry.rs` — NodeRecord
+    (static HW + live state + tags), lifecycle events (Joined/Left/
+    Updated/StateChanged), JSON persistence, alive/offline windows,
+    `register.` / `unregister n3.` verbs.
+  - **WP10 task queue** (`aa448ea`): real TaskQueue (priority order,
+    max_retries, deadline expiry, drain); schedule() auto-enqueues on
+    budget/suitability failure; `tasks.` verb.
+  - **Error recovery** (`09d5d36`): failure counts with cooldown, stale
+    sweep over the registry, queue drain on recovery; `recover.` verb.
+  - **Push bus** (`eef0b18`): `ouro-registry` daemon + agent
+    `--master` link. Signed-line wire, one exchange per connection;
+    register on boot (idempotent per peer IP), heartbeat every 5s,
+    auto re-register on daemon state loss. Live smoke passed: agent
+    registered as n1, RAPL power + temp + Working status persisted,
+    events recorded, zero broken pipes. Next wiring step: node image
+    gets `--master` from an enroll-partition file (one ExecStart line,
+    then re-prove WP7).
+  Tests: 101 cluster + 49 shell + 21 agent, clippy `-D warnings` clean.
+  Still pending for R2 day: strip debug SSH key from node-image.nix,
+  flash.sh dry-run, physical §6 acceptance.
