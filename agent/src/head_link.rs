@@ -18,6 +18,18 @@ use crate::telemetry;
 
 const RETRY_BACKOFF: Duration = Duration::from_secs(5);
 
+/// Full anyhow chain — the context alone hides the errno ("connect
+/// registry daemon 10.0.2.2:x" is useless without "Connection refused").
+fn err_chain(e: &anyhow::Error) -> String {
+    let mut s = e.to_string();
+    let mut src = e.source();
+    while let Some(x) = src {
+        s.push_str(&format!(": {x}"));
+        src = x.source();
+    }
+    s
+}
+
 /// Build the `register`/`heartbeat` request body for this node.
 pub fn request_body(verb: &str) -> Result<String> {
     let tel = telemetry::collect()?;
@@ -59,7 +71,7 @@ pub async fn run(secret: Secret, head: String, period: Duration) -> Result<()> {
         let body = match request_body("register") {
             Ok(b) => b,
             Err(e) => {
-                eprintln!("head-link: telemetry collect failed: {} — retry in {}s", e, RETRY_BACKOFF.as_secs());
+                eprintln!("head-link: telemetry collect failed: {} — retry in {}s", err_chain(&e), RETRY_BACKOFF.as_secs());
                 sleep(RETRY_BACKOFF).await;
                 continue;
             }
@@ -75,7 +87,7 @@ pub async fn run(secret: Secret, head: String, period: Duration) -> Result<()> {
                 continue;
             }
             Err(e) => {
-                eprintln!("head-link: {} — retry in {}s", e, RETRY_BACKOFF.as_secs());
+                eprintln!("head-link: {} — retry in {}s", err_chain(&e), RETRY_BACKOFF.as_secs());
                 sleep(RETRY_BACKOFF).await;
                 continue;
             }
@@ -103,7 +115,7 @@ pub async fn run(secret: Secret, head: String, period: Duration) -> Result<()> {
                     break;
                 }
                 Err(e) => {
-                    eprintln!("head-link: {} — re-registering", e);
+                    eprintln!("head-link: {} — re-registering", err_chain(&e));
                     break;
                 }
             }

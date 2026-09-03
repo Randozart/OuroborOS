@@ -417,3 +417,43 @@ operator is looking.
   Tests: 101 cluster + 49 shell + 21 agent, clippy `-D warnings` clean.
   Still pending for R2 day: strip debug SSH key from node-image.nix,
   flash.sh dry-run, physical §6 acceptance.
+
+## 11. Hardware night (WP7.5-unlocked)
+
+The node image now joins the bus on its own. Boot a flashed tail and it
+registers with the head's registry, heartbeating every 5s — no sweeps,
+no manual steps.
+
+```bash
+# 0. once: secret + head address
+mkdir -p enroll
+python3 -c "import secrets; print(secrets.token_hex(32))" > enroll/secret
+cp ~/.ssh/id_ed25519.pub enroll/authorized_keys      # your head key
+echo "<head-LAN-IP>:9501" > enroll/head              # registry address
+
+# 1. image (if stale) + flash (sudo, DESTRUCTIVE — device = your stick)
+nix build ./nixos#node-image
+lsblk                                                # find the stick
+sudo tools/flash.sh result/iso/nixos-*.iso /dev/sdX "$PWD/enroll"
+
+# 2. head side: registry + shell
+export OURO_SECRET_FILE="$PWD/enroll/secret"
+cargo run --release --bin ouro-registry -- --addr 0.0.0.0:9501 --state registry.json
+cargo run --release --bin ouro-hiss
+
+# 3. boot the tail from the stick. Watch the head:
+#    its prompt hisses one extra 's' per tail that joins.
+```
+
+Acceptance (2026-09-03, QEMU): `tools/wp7_prove.py` ALL PASS — brand,
+enrollment, signed serial wire, and the bus join: the QEMU tail read
+`head` from the OURO partition, registered as `n1 @ nixos`, and
+delivered 11 heartbeats (35W, Working) to a host-side registry.
+
+Notes:
+- QEMU boots use a static slirp lease (MAC 52:54:00:* → 10.0.2.15,
+  host 10.0.2.2) applied by the `ouro-net` unit; real hardware uses
+  DHCP (networkd). TCG DHCP proved flaky, hence the deterministic path.
+- The debug SSH key is stripped from the image; tails accept only the
+  keys flashed onto their OURO partition.
+- Head firewall: open 9500 (agent task channel) + 9501 (registry).

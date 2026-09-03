@@ -4,8 +4,8 @@
 # Usage: tools/flash.sh <image.iso> <device> [enroll-dir]
 #   image.iso   nix build .#node-image result path (ISO, dd-able)
 #   device      /dev/sdX — WILL BE OVERWRITTEN, no confirmations
-#   enroll-dir  directory with `secret` (+ optional `authorized_keys`);
-#               default: ./enroll
+#   enroll-dir  directory with `secret` (+ optional `authorized_keys`,
+#               `head` = registry IP:PORT); default: ./enroll
 #
 # Writes the image, then appends an OURO-labeled FAT partition (if the
 # image leaves room) carrying the HMAC secret + head SSH pubkey.
@@ -48,6 +48,8 @@ PART
   mount "/dev/$LAST" "$mnt"
   install -m 600 "$ENROLL/secret" "$mnt/secret"
   [ -f "$ENROLL/authorized_keys" ] && install -m 644 "$ENROLL/authorized_keys" "$mnt/authorized_keys"
+  # Bus join: `head` names the registry (IP:PORT) the tail registers with.
+  [ -f "$ENROLL/head" ] && install -m 644 "$ENROLL/head" "$mnt/head"
   sync && umount "$mnt" && rmdir "$mnt"
   echo "flash: OURO partition written (/dev/$LAST)"
 else

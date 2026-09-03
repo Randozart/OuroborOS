@@ -48,6 +48,7 @@ let
 
   node $node_id · measured admission · secret: $secret_state
   enroll: $enroll_state
+  nics: $(cat /run/ouro/nics 2>/dev/null || echo unknown)
 
 ISSUE
   '';
@@ -69,6 +70,15 @@ ISSUE
     [ -e "/sys/class/net/$nic/device" ] && \
       "${pkgs.ethtool}/bin/ethtool" "$nic_real" 2>/dev/null | grep -q 'Supports Wake-on: .*p' && wol=true
     printf '%s' "$wol" > /run/ouro/wol
+    # measured NIC census: name + carrier per interface (bus-join drill)
+    nics=""
+    for n in /sys/class/net/*; do
+      [ -e "$n" ] || continue
+      name="$(basename "$n")"
+      c="$(cat "$n/carrier" 2>/dev/null || echo '?')"
+      nics="$nics $name=$c"
+    done
+    printf '%s' "''${nics# }" > /run/ouro/nics
   '';
 
   ouro-enroll = pkgs.writeShellScriptBin "ouro-enroll" ''
@@ -114,6 +124,13 @@ ISSUE
         "$mnt/authorized_keys" /home/ouro/.ssh/authorized_keys
       status keys-installed
     fi
+    if [ -s "$mnt/head" ]; then
+      "${pkgs.coreutils}/bin/install" -m 600 -o ouro -g ouro \
+        "$mnt/head" /run/ouro/head
+      status head-installed
+    else
+      status "no-head-file"
+    fi
     "${pkgs.util-linux}/bin/umount" "$mnt" || true
     status complete
   '';
@@ -124,7 +141,13 @@ ISSUE
     #!/usr/bin/env bash
     export OURO_SECRET_FILE=/run/ouro/secret
     export OURO_TAGLINE="$(cat /run/ouro/tagline 2>/dev/null || true)"
-    exec ${ouro-agent}/bin/ouro-agent --stdio-tty
+    # Bus join: the enroll partition's `head` file names the registry.
+    if [ -s /run/ouro/head ]; then
+      exec ${ouro-agent}/bin/ouro-agent --stdio-tty \
+        --head "$(cat /run/ouro/head)"
+    else
+      exec ${ouro-agent}/bin/ouro-agent --stdio-tty
+    fi
   '') // { shellPath = "/bin/ouro-shim"; };
 in
 {
@@ -148,6 +171,56 @@ in
   # stateless cattle: nothing to mutate
   nix.enable = false;
 
+  # Networking: any ethernet NIC, DHCP, don't block boot on it. The bus
+  # link (head_link) retries every 5s until the address lands.
+  # QEMU/TCG slirp is deterministic — MAC 52:54:00:* is always 10.0.2.15
+  # with the host at 10.0.2.2 — so QEMU NICs get a static lease applied
+  # by a scripted oneshot (networkd races login under TCG and the prove
+  # window is honest about it). Real hardware keeps DHCP.
+  networking.useNetworkd = true;
+  systemd.network.enable = true;
+  systemd.network.networks."80-ouro" = {
+    matchConfig.Type = "ether";
+    networkConfig.DHCP = "yes";
+    linkConfig.RequiredForOnline = "no";
+  };
+  systemd.services.ouro-net = {
+    description = "OuroborOS static slirp address (QEMU MACs)";
+    wantedBy = [ "multi-user.target" ];
+    before = [ "multi-user.target" ];
+    path = [ pkgs.iproute2 ];
+    serviceConfig = {
+      Type = "oneshot";
+      RemainAfterExit = true;
+    };
+    script = ''
+      say() { echo "ouro-net: $1" > /dev/console 2>/dev/null || true; }
+      # virtio_net may load after this unit runs — wait for a QEMU MAC
+      # (slirp is deterministic: 10.0.2.15/24, host at 10.0.2.2).
+      say "waiting for a QEMU-MAC NIC"
+      for i in $(seq 1 45); do
+        applied=0
+        for nic in /sys/class/net/*; do
+          n="$(basename "$nic")"
+          [ "$n" = "lo" ] && continue
+          mac="$(cat "$nic/address" 2>/dev/null || true)"
+          say "saw $n mac=$mac"
+          case "$mac" in
+            52:54:00:*)
+              ip link set "$n" up && say "raised $n"
+              ip address add 10.0.2.15/24 dev "$n" 2>/dev/null || say "addr add failed"
+              ip route add default via 10.0.2.2 dev "$n" 2>/dev/null || say "route add failed"
+              applied=1
+              ;;
+          esac
+        done
+        [ "$applied" = 1 ] && { say "slirp address applied"; exit 0; }
+        sleep 2
+      done
+      say "no QEMU-MAC NIC appeared in 90s"
+    '';
+  };
+
   # sleep is not a node state (route B leftover absorbed here)
   systemd.targets.sleep.enable = false;
   systemd.targets.suspend.enable = false;
@@ -160,12 +233,9 @@ in
     group = "ouro";
     description = "OuroborOS node";
     shell = ouro-shim;
-    # WP7 debug image only: the flash-time key (OURO partition) is the
-    # production path; this baked key lets `ssh` in for journal debugging.
-    openssh.authorizedKeys.keys = [
-      ''command="/run/current-system/sw/bin/bash" ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAILSQiBkmB9O4KP66DDXjcJtlNPguZZuDSY2vutp0zoJG ouro-wp7-debug-shell''
-      "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAILSQiBkmB9O4KP66DDXjcJtlNPguZZuDSY2vutp0zoJG ouro-wp7-test"
-    ];
+    # No baked keys — SSH access arrives via the OURO partition's
+    # authorized_keys at enroll time. Whoever holds the stick holds
+    # the node (R2_BRINGUP.md §8).
   };
   services.getty = {
     autologinUser = "ouro";
@@ -252,7 +322,7 @@ in
     ];
   };
 
-  environment.systemPackages = [ ouro-agent ouro-brand ouro-probe ouro-enroll ouro-shim ];
+  environment.systemPackages = [ ouro-agent ouro-brand ouro-probe ouro-enroll ouro-shim pkgs.iproute2 ];
 
   # login(1)-friendly: register the custom shell
   environment.etc."shells".text = lib.mkAfter ''

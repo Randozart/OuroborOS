@@ -31,15 +31,9 @@ const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(5);
 async fn main() -> Result<()> {
     let secret = auth::secret_from_env()?;
 
-    if std::env::args().any(|a| a == "--stdio-tty") {
-        let stdin = std::io::stdin();
-        let stdout = std::io::stdout();
-        serve_stdio(&secret, stdin.lock(), stdout.lock())?;
-        return Ok(());
-    }
-
     // --head <addr>: push-based registration + telemetry heartbeat to
-    // the registry daemon (runs alongside the task server).
+    // the registry daemon. Spawned FIRST so it coexists with every mode
+    // below (the getty shim passes both --stdio-tty and --head).
     if let Some(i) = std::env::args().position(|a| a == "--head") {
         if let Some(addr) = std::env::args().nth(i + 1) {
             tokio::spawn(async move {
@@ -50,6 +44,13 @@ async fn main() -> Result<()> {
                 }
             });
         }
+    }
+
+    if std::env::args().any(|a| a == "--stdio-tty") {
+        let stdin = std::io::stdin();
+        let stdout = std::io::stdout();
+        serve_stdio(&secret, stdin.lock(), stdout.lock())?;
+        return Ok(());
     }
 
     println!("auth: OURO_SECRET_FILE loaded (32B HMAC-SHA256)");
@@ -222,6 +223,37 @@ fn process_message(msg: &str) -> String {
     // Ping
     else if trimmed == "ping" {
         "pong".into()
+    }
+    // Diagnostic: measured network facts (head-link drills). Read-only,
+    // no claims — the kernel's own tables, not our opinion of them.
+    else if trimmed == "diag" {
+        let mut out = String::from("diag:");
+        for f in ["/proc/net/route"] {
+            if let Ok(data) = std::fs::read_to_string(f) {
+                out.push_str(&format!("\n--- {f} ---\n{data}"));
+            }
+        }
+        if let Ok(dirs) = std::fs::read_dir("/sys/class/net") {
+            for d in dirs.flatten() {
+                let name = d.file_name().to_string_lossy().to_string();
+                let carrier = std::fs::read_to_string(d.path().join("carrier"))
+                    .map(|s| s.trim().to_string())
+                    .unwrap_or_else(|_| "?".into());
+                let mac = std::fs::read_to_string(d.path().join("address"))
+                    .map(|s| s.trim().to_string())
+                    .unwrap_or_default();
+                out.push_str(&format!("\nnic {name} carrier={carrier} mac={mac}"));
+            }
+        }
+        let out = out.replace('\n', " | ");
+        // tty line discipline truncates ~4KB canonical lines; keep the
+        // essential facts (route + NIC census) well under that.
+        let mut out = out;
+        if out.len() > 1400 {
+            out.truncate(1400);
+            out.push_str(" …");
+        }
+        out
     }
     // Tagline: this boot's motto, for the head's registration echo
     else if trimmed == "tagline" {
