@@ -800,6 +800,7 @@ dependencies = [
  "anyhow",
  "bitnet-rs",
  "hostname",
+ "libc",
  "ouro-cluster",
  "serde",
  "serde_json",
@@ -820,7 +821,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "ouro-shell"
+name = "ouro-hiss"
 version = "0.1.0"
 dependencies = [
  "anyhow",

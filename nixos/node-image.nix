@@ -35,6 +35,9 @@ let
 
 \e[31;1m  >> $line\e[0m
 
+  OUROBOROS: One Unified Runtime Orchestrating
+             Bunch Of Random Old Servers
+
   node $node_id · measured admission · secret: $secret_state
   enroll: $enroll_state
 
@@ -62,7 +65,7 @@ ISSUE
 
   ouro-enroll = pkgs.writeShellScriptBin "ouro-enroll" ''
     #!/usr/bin/env bash
-    # Consume the labeled OURO partition: HMAC secret + master pubkey.
+    # Consume the labeled OURO partition: HMAC secret + head pubkey.
     # Missing partition => no secret => agent refuses the wire (WP2 gate).
     set -euo pipefail
     status() {
@@ -213,7 +216,7 @@ in
     };
   };
 
-  # the wire: master reaches the node over ssh -T; keys only
+  # the wire: head reaches the node over ssh -T; keys only
   services.openssh = {
     enable = true;
     settings = {

@@ -1,5 +1,5 @@
 [package]
-name = "ouro-shell"
+name = "ouro-hiss"
 version.workspace = true
 edition.workspace = true
 
@@ -12,7 +12,7 @@ libc.workspace = true
 tokio = { version = "1", features = ["full"] }
 
 [lib]
-name = "ouro_shell"
+name = "ouro_hiss"
 path = "src/lib.rs"
 
 [dev-dependencies]
@@ -20,7 +20,7 @@ bitnet-rs = { path = "../bitnet-rs" }
 serde_json.workspace = true
 
 [[bin]]
-name = "ouro-shell"
+name = "ouro-hiss"
 path = "src/main.rs"
 
 [[bin]]

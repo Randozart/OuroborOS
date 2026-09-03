@@ -8,7 +8,7 @@
 #               default: ./enroll
 #
 # Writes the image, then appends an OURO-labeled FAT partition (if the
-# image leaves room) carrying the HMAC secret + master SSH pubkey.
+# image leaves room) carrying the HMAC secret + head SSH pubkey.
 # Sticks are keys: whoever holds the stick can join the cluster.
 set -euo pipefail
 

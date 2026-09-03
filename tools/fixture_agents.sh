@@ -6,7 +6,7 @@
 #   ./tools/fixture_agents.sh [count]    # default: 3 agents
 #
 # Then run the shell with:
-#   cargo run --bin ouro-shell -- --nodes 127.0.0.1:9501,127.0.0.1:9502,127.0.0.1:9503
+#   cargo run --bin ouro-hiss -- --nodes 127.0.0.1:9501,127.0.0.1:9502,127.0.0.1:9503
 
 set -euo pipefail
 
@@ -38,7 +38,7 @@ sleep 2
 
 echo ""
 echo "Agents ready. Connect with:"
-echo "  cargo run --bin ouro-shell -- --nodes 127.0.0.1:9501,127.0.0.1:9502,127.0.0.1:9503"
+echo "  cargo run --bin ouro-hiss -- --nodes 127.0.0.1:9501,127.0.0.1:9502,127.0.0.1:9503"
 echo ""
 echo "Or test manually:"
 echo "  echo ping | nc 127.0.0.1 9501"

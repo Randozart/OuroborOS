@@ -1,4 +1,4 @@
-//! Master link: the agent-side push client for the registry bus.
+//! Head link: the agent-side push client for the registry bus.
 //!
 //! One signed line per exchange, one connection per exchange — the
 //! daemon is stateless per connection. On boot: `register` (full
@@ -26,10 +26,10 @@ pub fn request_body(verb: &str) -> Result<String> {
 }
 
 /// One signed line out, one signed line back, connection closed.
-async fn exchange(secret: &Secret, master: &str, seq: u64, body: &str) -> Result<String> {
-    let stream = TcpStream::connect(master)
+async fn exchange(secret: &Secret, head: &str, seq: u64, body: &str) -> Result<String> {
+    let stream = TcpStream::connect(head)
         .await
-        .with_context(|| format!("connect registry daemon {}", master))?;
+        .with_context(|| format!("connect registry daemon {}", head))?;
     stream.set_nodelay(true).ok();
     let (reader, mut writer) = stream.into_split();
     let mut reader = BufReader::new(reader);
@@ -52,30 +52,30 @@ async fn exchange(secret: &Secret, master: &str, seq: u64, body: &str) -> Result
 /// Top-level link loop: register, then heartbeat forever. Re-registers
 /// on daemon state loss; backs off on transport errors. Never returns
 /// under normal operation.
-pub async fn run(secret: Secret, master: String, period: Duration) -> Result<()> {
+pub async fn run(secret: Secret, head: String, period: Duration) -> Result<()> {
     let mut seq: u64 = 1;
     loop {
         // Register pass.
         let body = match request_body("register") {
             Ok(b) => b,
             Err(e) => {
-                eprintln!("master-link: telemetry collect failed: {} — retry in {}s", e, RETRY_BACKOFF.as_secs());
+                eprintln!("head-link: telemetry collect failed: {} — retry in {}s", e, RETRY_BACKOFF.as_secs());
                 sleep(RETRY_BACKOFF).await;
                 continue;
             }
         };
-        match exchange(&secret, &master, seq, &body).await {
+        match exchange(&secret, &head, seq, &body).await {
             Ok(resp) if resp.starts_with("registered") => {
                 let id = resp.split_whitespace().nth(1).unwrap_or("?").to_string();
-                eprintln!("master-link: registered as {} @ {}", id, master);
+                eprintln!("head-link: registered as {} @ {}", id, head);
             }
             Ok(resp) => {
-                eprintln!("master-link: register refused: {} — retry", resp);
+                eprintln!("head-link: register refused: {} — retry", resp);
                 sleep(RETRY_BACKOFF).await;
                 continue;
             }
             Err(e) => {
-                eprintln!("master-link: {} — retry in {}s", e, RETRY_BACKOFF.as_secs());
+                eprintln!("head-link: {} — retry in {}s", e, RETRY_BACKOFF.as_secs());
                 sleep(RETRY_BACKOFF).await;
                 continue;
             }
@@ -88,22 +88,22 @@ pub async fn run(secret: Secret, master: String, period: Duration) -> Result<()>
             let body = match request_body("heartbeat") {
                 Ok(b) => b,
                 Err(e) => {
-                    eprintln!("master-link: telemetry collect failed: {}", e);
+                    eprintln!("head-link: telemetry collect failed: {}", e);
                     continue;
                 }
             };
-            match exchange(&secret, &master, seq, &body).await {
+            match exchange(&secret, &head, seq, &body).await {
                 Ok(resp) if resp.starts_with("ok") => {}
                 Ok(resp) if resp.starts_with("unknown") => {
-                    eprintln!("master-link: daemon lost our registration; re-registering");
+                    eprintln!("head-link: daemon lost our registration; re-registering");
                     break;
                 }
                 Ok(resp) => {
-                    eprintln!("master-link: bad heartbeat reply: {} — re-registering", resp);
+                    eprintln!("head-link: bad heartbeat reply: {} — re-registering", resp);
                     break;
                 }
                 Err(e) => {
-                    eprintln!("master-link: {} — re-registering", e);
+                    eprintln!("head-link: {} — re-registering", e);
                     break;
                 }
             }

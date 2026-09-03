@@ -126,7 +126,7 @@ mod tests {
 
     #[test]
     fn test_parse_recorded_csv() {
-        // Recorded 2026-08-29 on the master box (RTX 3060 live, r610)
+        // Recorded 2026-08-29 on the head box (RTX 3060 live, r610)
         let csv = "NVIDIA GeForce RTX 3060, 12288, 610.57.04, 8.6\n";
         let g = parse_nvidia_smi(csv);
         assert_eq!(g.len(), 1);
@@ -153,7 +153,7 @@ mod tests {
 
     #[test]
     fn test_parse_vulkaninfo_two_gpu() {
-        // Recorded 2026-08-31 on the master box (580.178.04, both cards live).
+        // Recorded 2026-08-31 on the head box (580.178.04, both cards live).
         let summary = "Devices:\n========\nGPU0:\n\tapiVersion         = 1.4.312\n\tdriverVersion      = 580.178.4.0\n\tdeviceType         = PHYSICAL_DEVICE_TYPE_DISCRETE_GPU\n\tdeviceName         = NVIDIA GeForce RTX 3060\n\tdriverInfo         = 580.178.04\nGPU1:\n\tapiVersion         = 1.4.312\n\tdriverVersion      = 580.178.4.0\n\tdeviceType         = PHYSICAL_DEVICE_TYPE_DISCRETE_GPU\n\tdeviceName         = NVIDIA GeForce GTX 1070 Ti\n\tdriverInfo         = 580.178.04\n";
         let v = parse_vulkaninfo_summary(summary);
         assert_eq!(v.len(), 2);
@@ -199,7 +199,7 @@ mod tests {
 
     #[test]
     fn test_detect_on_this_machine() {
-        // If nvidia-smi exists (master box), it must report the 3060 truthfully
+        // If nvidia-smi exists (head box), it must report the 3060 truthfully
         // and, when vulkaninfo is present, both cards carry their Vulkan API.
         let g = detect_gpus();
         for card in &g {

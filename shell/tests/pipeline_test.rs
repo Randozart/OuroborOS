@@ -4,7 +4,7 @@
 
 use ouro_cluster::bmts::{write_shard, BmtsTensor};
 use ouro_cluster::infer::{ArchConfig, PipelineModel};
-use ouro_shell::pipeline;
+use ouro_hiss::pipeline;
 use std::io::{BufRead, BufReader, Write};
 use std::net::TcpStream;
 use std::path::PathBuf;

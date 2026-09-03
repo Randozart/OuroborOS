@@ -8,7 +8,7 @@
 //!                 [--tokens 16]
 
 use anyhow::{bail, Result};
-use ouro_shell::pipeline;
+use ouro_hiss::pipeline;
 
 fn parse_nodes(arg: &str) -> Vec<(String, String)> {
     arg.split(',')

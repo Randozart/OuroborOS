@@ -38,7 +38,7 @@ argument for the ladder.
 
 | Contract | Threshold | Command | Status |
 |---|---|---|---|
-| synthetic toy 3-shard: TCP == in-process | token-exact | `cargo test -p ouro-shell --test pipeline_test` (fast tier) | PASSING |
+| synthetic toy 3-shard: TCP == in-process | token-exact | `cargo test -p ouro-hiss --test pipeline_test` (fast tier) | PASSING |
 | BitNet-2.4B real shards, 3 agents == in-process | token-exact `[374, 264, 2678, 3363, 11]` | `--test pipeline_test -- --ignored` | PASSING |
 | Qwen3.8-9B, 4 agents == in-process | token-exact `[17018, 7529, 998, 14541, 364]` | `--test qwen_tcp -- --ignored` | PASSING |
 | out-of-order position contract per stage | hard reject | agent slot check | PASSING |

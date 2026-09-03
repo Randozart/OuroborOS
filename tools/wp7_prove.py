@@ -40,8 +40,8 @@ def sign(seq, body):
 
 
 def main():
-    master, slave = pty.openpty()
-    tty = os.ttyname(slave)
+    fd, tty_fd = pty.openpty()
+    tty = os.ttyname(tty_fd)
     print(f"[wp7] serial pty: {tty}")
     qemu = subprocess.Popen(
         [
@@ -60,10 +60,10 @@ def main():
 
     def pump(timeout=5.0):
         nonlocal buf
-        r, _, _ = select.select([master], [], [], timeout)
-        if master in r:
+        r, _, _ = select.select([fd], [], [], timeout)
+        if fd in r:
             try:
-                buf += os.read(master, 65536)
+                buf += os.read(fd, 65536)
             except OSError:
                 return False
         return True
@@ -117,7 +117,7 @@ def main():
         if now - last_send > 5:
             seq += 1
             send_body = "tagline" if pong else "ping"
-            os.write(master, (sign(seq, send_body) + "\n").encode())
+            os.write(fd, (sign(seq, send_body) + "\n").encode())
             last_send = now
         text = buf.decode("utf-8", "replace")
         for line in text.splitlines():

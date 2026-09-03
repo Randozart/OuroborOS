@@ -109,7 +109,7 @@ The scheduling engine. Built on the Briev reactor model: dependency-driven, reac
 
 #### 2.2.4 Transport Layer
 
-The communication pipe between master and workers.
+The communication pipe between head and workers.
 
 **MVP:** SSH-based task dispatch. ~1ms overhead per task. Proven, reliable, works everywhere.
 
@@ -118,7 +118,7 @@ The communication pipe between master and workers.
 #### 2.2.5 Node Agent
 
 A daemon running on each laptop. Responsibilities:
-- Accept task dispatch from master
+- Accept task dispatch from head
 - Execute tasks (SIMD-optimized where possible)
 - Report telemetry: power draw (Intel RAPL), temperature, load, availability
 - Heartbeat: periodic "I'm alive" signal
@@ -422,7 +422,7 @@ OurobourOS/
 │
 ├── nixos/
 │   ├── flake.nix                       # NixOS flake
-│   ├── master.nix                      # Master node configuration
+│   ├── head.nix                      # Head node configuration
 │   ├── worker.nix                      # Worker node configuration
 │   └── common.nix                      # Shared configuration
 │
@@ -561,9 +561,9 @@ OurobourOS/
 
   outputs = { self, nixpkgs }: {
     nixosConfigurations = {
-      master = nixpkgs.lib.nixosSystem {
+      head = nixpkgs.lib.nixosSystem {
         system = "x86_64-linux";
-        modules = [ ./master.nix ];
+        modules = [ ./head.nix ];
       };
       worker = nixpkgs.lib.nixosSystem {
         system = "x86_64-linux";
@@ -577,25 +577,25 @@ OurobourOS/
 ### 7.2 Deployment Steps
 
 ```bash
-# 1. On master: generate SSH key
-ssh-keygen -t ed25519 -f ~/.ssh/ouro-master
+# 1. On head: generate SSH key
+ssh-keygen -t ed25519 -f ~/.ssh/ouro-head
 
 # 2. On each worker: install NixOS with worker.nix
 
-# 3. On master: copy SSH key to each worker
+# 3. On head: copy SSH key to each worker
 for ip in 192.168.1.{101..112}; do
-  ssh-copy-id -i ~/.ssh/ouro-master.pub ouro@$ip
+  ssh-copy-id -i ~/.ssh/ouro-head.pub ouro@$ip
 done
 
-# 4. On master: build and deploy node-agent
+# 4. On head: build and deploy node-agent
 cargo build --release --bin node-agent
 for ip in 192.168.1.{101..112}; do
   scp target/release/node-agent ouro@$ip:~/
   ssh ouro@$ip "sudo cp ~/node-agent /usr/local/bin/ouro-agent && sudo systemctl enable ouro-agent"
 done
 
-# 5. On master: run probe
-cargo run --bin ouro-shell -- probe.
+# 5. On head: run probe
+cargo run --bin ouro-hiss -- probe.
 ```
 
 ---
@@ -642,7 +642,7 @@ cargo run --bin ouro-shell -- probe.
 
 | # | Decision | Options | Recommendation |
 |---|---|---|---|
-| 1 | Master node | One of 12 laptops vs. main PC | Main PC |
+| 1 | Head node | One of 12 laptops vs. main PC | Main PC |
 | 2 | Network topology | Switch vs. direct | Switch |
 | 3 | IP addressing | DHCP vs. static | Static |
 | 4 | Node agent auth | SSH key vs. mTLS | SSH key |

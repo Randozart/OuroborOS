@@ -95,7 +95,7 @@ Declarative node specs, cryptographic hash verification, reproducible builds. Th
 | Linux suspend/resume | Broken, shutdown may sleep instead |
 | AGA port | Windows-only, poorly documented on Linux |
 
-**Recommendation:** Alpha R2 is a worker node, not a master. GTX 960 (4GB VRAM) can run small BitNet models natively. Add PCIe 2.5GbE adapter if pipeline bandwidth needed.
+**Recommendation:** Alpha R2 is a worker node, not a head. GTX 960 (4GB VRAM) can run small BitNet models natively. Add PCIe 2.5GbE adapter if pipeline bandwidth needed.
 
 ### 2.4 Kria K26 Constraints
 
@@ -359,11 +359,11 @@ Node Crash Detection:
   - TCP connection reset
 
 Recovery:
-  1. Master detects node failure
-  2. Master halts pipeline
-  3. Master re-calculates layer distribution
-  4. Master streams new weights to surviving nodes
-  5. Master resumes pipeline from last checkpoint
+  1. Head detects node failure
+  2. Head halts pipeline
+  3. Head re-calculates layer distribution
+  4. Head streams new weights to surviving nodes
+  5. Head resumes pipeline from last checkpoint
   6. Total recovery time: < 5 seconds
 ```
 
@@ -406,7 +406,7 @@ set base http://192.168.1.50
 
 menu OurobourOS Boot
 item worker Worker Node
-item master Master Node
+item head Head Node
 item memtest Memtest86+
 choose --timeout 30 target && goto ${target}
 
@@ -414,8 +414,8 @@ choose --timeout 30 target && goto ${target}
 kernel ${base}/ouro-worker
 boot
 
-:master
-kernel ${base}/ouro-master
+:head
+kernel ${base}/ouro-head
 boot
 ```
 
@@ -515,7 +515,7 @@ Total Frame: 8222 bytes (fits in 9000-byte Jumbo Frame)
 ### 7.2 MAC Address Assignment
 
 ```
-Master Node:     00:00:00:00:00:01
+Head Node:     00:00:00:00:00:01
 Worker Node 1:   00:00:00:00:00:02
 Worker Node 2:   00:00:00:00:00:03
 Worker Node 3:   00:00:00:00:00:04
@@ -683,7 +683,7 @@ NODE_2 HEALTH
 
 | # | Decision | Options | Recommendation | Status |
 |---|----------|---------|---------------|--------|
-| 1 | Master node | One laptop vs main PC | Main PC | Decided |
+| 1 | Head node | One laptop vs main PC | Main PC | Decided |
 | 2 | Network topology | Switch vs direct | Switch | Decided |
 | 3 | IP addressing | DHCP vs static | Static | Decided |
 | 4 | Node agent auth | SSH key vs mTLS | SSH key (MVP) | Decided |
@@ -704,10 +704,10 @@ under a power budget, governed by the shell.
 
 | Node | GPU | VRAM | Arch | Driver | Role |
 |------|-----|------|------|--------|------|
-| Master (this box, CachyOS) | RTX 3060 LHR | 12 GB | sm_86 | r610 live | orchestrator + biggest stage + lm_head |
-| Master (second card) | GTX 1070 Ti | 8 GB | sm_61 | **needs r580** | stage |
-| IdeaPad/ThinkPad slave | GTX 1080 | 8 GB | sm_61 | r580 | stage |
-| Alienware Alpha R2 slave | GTX 960 | 4 GB | sm_52 | r580 (last Maxwell branch) | small stage |
+| Head (this box, CachyOS) | RTX 3060 LHR | 12 GB | sm_86 | r610 live | orchestrator + biggest stage + lm_head |
+| Head (second card) | GTX 1070 Ti | 8 GB | sm_61 | **needs r580** | stage |
+| IdeaPad/ThinkPad tail | GTX 1080 | 8 GB | sm_61 | r580 | stage |
+| Alienware Alpha R2 tail | GTX 960 | 4 GB | sm_52 | r580 (last Maxwell branch) | small stage |
 
 **Driver finding:** r610 dropped Pascal/Maxwell (1070 Ti invisible to
 nvidia-smi despite being bound). **r580 is the only branch covering
@@ -767,7 +767,7 @@ reads per-node probe (FLOPS class + VRAM) and emits stage -> [layer list].
 | 8 | wgpu compute backend: TQ1_0 first, then Q4_K gemv + delta state ops | new crate |
 | 9 | Shard shipping in `deploy.`: resume + checksum (15.4 GB over 1GbE ~25 min one-time) | shell/tools |
 | 10 | llama.cpp (fork has fused GatedDeltaNet; verify/refresh vs upstream) as test oracle only | tests |
-| 11 | Your hands: r580 on master (2 cards up), flash slaves (CachyOS minimal), wire LAN | - |
+| 11 | Your hands: r580 on head (2 cards up), flash tails (CachyOS minimal), wire LAN | - |
 | 12 | MTP speculative decoding head (throughput bonus) | later |
 
 **Non-goals (explicit):** training 20B+ BitNet (compute reality: ~10^22 FLOPs vs
@@ -795,10 +795,10 @@ quant types (~2-4 MAC/byte) -> cost ~ bytes/token / device-GB/s:
 
 | Device | ~Bandwidth | ~Watts | GB/s/W | Sweet spot |
 |--------|-----------|--------|--------|-----------|
-| RTX 3060 (master) | 360 GB/s | 170 W | 2.1 | heaviest layers + 204 MB lm_head |
-| GTX 1080 (slave) | 320 GB/s | 180 W | 1.8 | heavy layers |
-| GTX 1070 Ti (master) | 256 GB/s | 120 W | 2.1 | heavy layers |
-| GTX 960 (slave) | 112 GB/s | ~120 W | ~1.0 | light layers or control plane |
+| RTX 3060 (head) | 360 GB/s | 170 W | 2.1 | heaviest layers + 204 MB lm_head |
+| GTX 1080 (tail) | 320 GB/s | 180 W | 1.8 | heavy layers |
+| GTX 1070 Ti (head) | 256 GB/s | 120 W | 2.1 | heavy layers |
+| GTX 960 (tail) | 112 GB/s | ~120 W | ~1.0 | light layers or control plane |
 | i7-3770 CPU | 20 GB/s | 45 W | 0.45 | f32 micro-ops (conv, gates, norms) — us each |
 
 Spec numbers are placeholders: agents MEASURE bandwidth at registration
@@ -811,7 +811,7 @@ theoretical ceiling ~75 tok/s; realistic M4 target **30 tok/s**. CPU-only:
 
 ### 14.3 Two regimes (the honesty constraint)
 
-- **Within one box** (CPU + 2 GPUs on master): per-tensor routing is nearly
+- **Within one box** (CPU + 2 GPUs on head): per-tensor routing is nearly
   free — activations cross PCIe in us. GPUs eat big matvecs; CPU runs
   norms/gates/conv; recurrent state never leaves host RAM.
 - **Across boxes** (1 GbE): each cut costs one 20 KB activation hop ~160 us.
@@ -907,8 +907,8 @@ TMDS 8b/10b arrives error-free over quality cable <= 3 m.
   between devices between requests without stalling the cluster.
 - **MoE expert cold-fetch**, checkpoint replication, initial shard deploy
   (15.4 GB one-time: 110 s -> 60 s per box).
-- Natural topology: **star downlink** - master's 3060 + 1070Ti HDMI-out feed
-  capture sticks in the two slave boxes (230 MB/s each way down); 1 GbE
+- Natural topology: **star downlink** - head's 3060 + 1070Ti HDMI-out feed
+  capture sticks in the two tail boxes (230 MB/s each way down); 1 GbE
   carries the small return/control flow. Display cable = data plane,
   Ethernet = signaling.
 
@@ -935,8 +935,8 @@ surrounding space is occupied by excellent work.
 
 | Work | Provenance | What it establishes | Status vs us |
 |------|-----------|--------------------|--------------|
-| llama.cpp RPC backend | github.com/ggml-org/llama.cpp/tree/master/tools/rpc | Official distributed path: `ggml-rpc-server` exposes devices; weights+KV split proportionally to device memory; `--tensor-split` override; worker-side tensor cache (`-c`); **RDMA auto-negotiated over RoCEv2 when libibverbs present**; documented "proof-of-concept, fragile and insecure" | Reinvented at tool level; their worker cache is our shard-deploy resume design; their insecurity is our contract-Article-10 opening |
-| Distributed-inference field survey + benchmarks | localaimaster.com/blog/distributed-inference-local-ai (2026-02-26) | 70B Q4_K_M 2-node: **2.8 tok/s @1GbE, 6.1 @2.5GbE, 7.4 @10GbE, 7.6 @TB4**; pipeline carries only ~8-16 KB activations/token; cross-machine vLLM TP "unusable on 1GbE"; tool comparison table (RPC 6.1, exo 4.3, Petals 0.9 tok/s); verdict: "distributed inference on old GPUs is a Saturday afternoon project" | Sets our honest baseline: capability is commodity — see 15.9 |
+| llama.cpp RPC backend | github.com/ggml-org/llama.cpp/tree/head/tools/rpc | Official distributed path: `ggml-rpc-server` exposes devices; weights+KV split proportionally to device memory; `--tensor-split` override; worker-side tensor cache (`-c`); **RDMA auto-negotiated over RoCEv2 when libibverbs present**; documented "proof-of-concept, fragile and insecure" | Reinvented at tool level; their worker cache is our shard-deploy resume design; their insecurity is our contract-Article-10 opening |
+| Distributed-inference field survey + benchmarks | localaihead.com/blog/distributed-inference-local-ai (2026-02-26) | 70B Q4_K_M 2-node: **2.8 tok/s @1GbE, 6.1 @2.5GbE, 7.4 @10GbE, 7.6 @TB4**; pipeline carries only ~8-16 KB activations/token; cross-machine vLLM TP "unusable on 1GbE"; tool comparison table (RPC 6.1, exo 4.3, Petals 0.9 tok/s); verdict: "distributed inference on old GPUs is a Saturday afternoon project" | Sets our honest baseline: capability is commodity — see 15.9 |
 | Multi-node guide | fungies.io/multi-node-local-llm-inference-guide-2026 (2026-07-01) | 10GbE = practical home minimum ($200 used ConnectX pair); PP cross-node + TP intra-node doctrine; heterogeneous mixing "performance limited by slowest card — isolate via PP" | Confirms §14.3 two-regimes independently |
 | exo | cited in llms.blog/decentralized-llm-inference (2026-08-23) | **Ring memory-weighted partitioning** across heterogeneous fleets (Mac/Linux/GPU); mDNS/UDP-multicast zero-config discovery; heartbeat + **cluster re-benchmark on node churn** | Our PlacementPlan = its compute-weighted generalization; steal discovery + churn re-plan |
 | Petals (NeurIPS 2023) | llms.blog + petals papers | Public volunteer swarm: Hivemind/libp2p DHT advertises layer blocks; latency-aware path construction; **8-bit activation quantization on the wire**; redundancy per block | Wire-activation quant = optional ACTS v2 mode for bad links |
@@ -976,7 +976,7 @@ surrounding space is occupied by excellent work.
 | **Singularity** | arxiv.org/abs/2202.07848 | Device-proxy intercepts CUDA via LD_PRELOAD; GPU state decoupled from host address space → **transparent checkpoint/restore + live migration + time-slicing of GPU DNN jobs** (2-3% context switch overhead) | Live state relocation for *accelerated jobs* is production-proven; our Art. 4 (moving the orchestrator itself) extends beyond it |
 | **GPUVM** | arxiv.org/abs/2411.05309 | GPU threads drive paging **through the NIC** (one-sided RDMA), host OS removed from critical path, 4× UVM | Direct precedent for Art. 6: measured hop-killing, not vibes |
 | CUDA unified memory / HMM / ATS | docs.nvidia.com CUDA Programming Guide §2.6 | Industry converging on "all memory is one pool" from above (Grace-Hopper C2C hardware coherence) | We do it from below, on the cards the above-market rejects |
-| **sched_ext** | docs.kernel.org/scheduler/sched_ext.html + github.com/sched-ext/scx | Mainline Linux: BPF schedulers with DSQ queues, verifier safety, **watchdog auto-revert to fair scheduler**; Meta/Google production use; shipped by gaming distros incl. CachyOS | Article 6's first sanctioned lever: `scx` for stage-host isolation is a config file away on the master today |
+| **sched_ext** | docs.kernel.org/scheduler/sched_ext.html + github.com/sched-ext/scx | Mainline Linux: BPF schedulers with DSQ queues, verifier safety, **watchdog auto-revert to fair scheduler**; Meta/Google production use; shipped by gaming distros incl. CachyOS | Article 6's first sanctioned lever: `scx` for stage-host isolation is a config file away on the head today |
 
 ### 15.5 Energy-first scheduling
 
@@ -1003,7 +1003,7 @@ surrounding space is occupied by excellent work.
 | 4. Productionization | github.com/QuixiAI/open-gpu-kernel-modules (Eric Hartford, 610.57.04) | 610 driver ships NVIDIA's own BAR1-P2P path, never selected on GeForce; one-commit force-enable over Turing/Ampere/Ada/Blackwell (open kernel module floor = **Turing**; Pascal/Maxwell stay locked out — legacy driver branch has no open modules). Verified: **NCCL all-reduce busbw 2.7 → 24.7 GB/s** (8×3090); needs BAR1 ≥ VRAM (ReBAR/resize dance) |
 | 5. FPGA analogues | FPGA² (doi 10.1109/reconfig.2013.6732296): open-source **direct FPGA↔GPU DMA**, >5 GB/s, needed gdev/nouveau to even read GPU buffer physical addresses; APEnet+ (INFN): FPGA PCIe board, GPU BAR access, custom torus fabric, 34 Gbps/link, RDMA semantics in fabric | Direct-DMA bypass of host staging across vendors is a decade-old open practice |
 
-**Consequence:** our master's 3060+1070Ti pair cannot use this unlock (mixed generations + Pascal lacks open modules + no P2P need at 1 GPU per box today) — but the case is *exhibit A* for Article 8's distinction and Article 2's program. Documented so future silicon (a pair of 3090s from the e-waste stream) activates a known path.
+**Consequence:** our head's 3060+1070Ti pair cannot use this unlock (mixed generations + Pascal lacks open modules + no P2P need at 1 GPU per box today) — but the case is *exhibit A* for Article 8's distinction and Article 2's program. Documented so future silicon (a pair of 3090s from the e-waste stream) activates a known path.
 
 ### 15.8 Optical/side channels (lowered expectations)
 
@@ -1053,7 +1053,7 @@ the combination, none of which we found together in any system:
    llama-RPC bridge benchmarks RDMA-fast AND are graph edges for us
    (kernel-bypass, GPUVM-adjacent). Add to hardware shopping list as optional
    measurement instrument, not dependency.
-6. **sched_ext (scx) lever** on master now: CachyOS ships it; stage-host
+6. **sched_ext (scx) lever** on head now: CachyOS ships it; stage-host
    cores under `scx` with pinned/busy-poll class = Art. 6's first priced hop-kill.
 7. **8-bit activation wire mode** (Petals) as ACTS v2 flag for 2.5G-class
    links (halves activation bytes if we ever bottleneck).
@@ -1075,7 +1075,7 @@ the combination, none of which we found together in any system:
    == in-process PipelineModel exactly; `#[ignore]` real 3×TQ1 shards TCP ==
    rung-A greedy ids. Gate = token-id equality (text is convenience, not
    contract).
-4. M3 readiness: same binary against LAN addresses when slaves arrive.
+4. M3 readiness: same binary against LAN addresses when tails arrive.
 
 **Track Q — ladder to the 27B summit:**
 5. cb_eval oracle harness (fork exposes `llama_context_params.cb_eval`) —
@@ -1102,7 +1102,7 @@ the combination, none of which we found together in any system:
 
 Next: r580 driver (2 GPUs live here) → bridge benchmark M2; 27B forward
 (its Q3_K/Q4_K/Q5_K mix already executes — needs swap-friendly loading or
-the slave RAM); slave bring-up; scx + ClassAd + modem per §16 deferred list.
+the tail RAM); tail bring-up; scx + ClassAd + modem per §16 deferred list.
 
 ## 16.2 Build-Now Backlog (settled 2026-08-29 — this box, zero user action)
 
@@ -1111,7 +1111,7 @@ Order: **A → B → E → C → D → F** (prove-it-then-speed-it).
 | # | Build | Success rationale | Gate |
 |---|-------|-------------------|------|
 | A | mmap shard loading → **27B full-model Rust differential** | The mountain itself runs on our kernels; page cache does the paging; oracle+Rust share clean pages of the same file | 27B logits vs llama.cpp: cos>0.999, top-1 equal |
-| B | GPU probe (nvidia-smi/Vulkan) + NodeEntry vram/compute fields + scheduler ranking + `n1.gpu?` | 3060 live NOW; slaves join a GPU-literate graph | probe test vs recorded CSV + real 3060 |
+| B | GPU probe (nvidia-smi/Vulkan) + NodeEntry vram/compute fields + scheduler ranking + `n1.gpu?` | 3060 live NOW; tails join a GPU-literate graph | probe test vs recorded CSV + real 3060 |
 | E | `tools/m2_bridge.sh` — pre-staged CUDA build + benchmark script (needs user `pacman -S cuda`) | One user command turns into M2 baseline + wgpu-priority data | produces PLAN results table |
 | C | AVX1 fused dequant-dot (Q6_K/Q4_K hot loops) + head-parallel delta recurrence | measurable here (i7-3770 has AVX1); runtime-gated AVX2 later; kills "glacial CPU" objection | parity cos>0.999 vs scalar; tok/s reported |
 | D | bring-up kit: `discover.` subnet sweep, `deploy --shards` (checksum+resume), `--packing w1,w2,..` weighted layers | hardware weekend becomes hours; kills hardcoded IPs | synthetic + loopback tests |
@@ -1130,7 +1130,7 @@ chunked-delta prefill, 27B *throughput*.
 | NVK caveat: pre-Turing lacks GSP -> **stuck at boot clocks** (no reclocking) | same post | prefer NVIDIA proprietary ICD for perf; NVK = purity fallback + Plan B |
 | NVIDIA proprietary provides **full Vulkan 1.2 on Maxwell-2/Pascal/Volta** | nvidia developer Vulkan support page (archived matrix) | r580 ICD meets wgpu's floor on all four cards |
 | **`nvidia-580xx-dkms` exists, actively maintained** — AUR 580.178.04 (updated 2026-08-13, maintainer ptr1337/CachyOS) and **in CachyOS own repo** (580.173.02, built Jun 2026) | aur.archlinux.org/packages/nvidia-580xx-dkms; packages.cachyos.org | the driver question that gated GPU-first is a one-line pacman on every machine. Trap: avoid linux-lts (AUR note re 6.12.x) |
-| Arch advisory: driver 590 dropped Pascal/Maxwell -> "switch to nvidia-580xx-dkms" | bbs.archlinux.org id=311143 | the whole cluster converges on ONE branch (r580 covers Maxwell->Ampere incl. the 3060) — **master must swap r610 -> 580xx to see the 1070 Ti** |
+| Arch advisory: driver 590 dropped Pascal/Maxwell -> "switch to nvidia-580xx-dkms" | bbs.archlinux.org id=311143 | the whole cluster converges on ONE branch (r580 covers Maxwell->Ampere incl. the 3060) — **head must swap r610 -> 580xx to see the 1070 Ti** |
 | **llama.cpp Vulkan scoreboard**: GTX 1080 Ti tg 67.8–71.6 t/s (L2-7B-Q4_0); 1070 Ti tg 42.9–43.4 (eGPU); 1070 tg 41–43 | github ggml-org/llama.cpp discussion #10879 (2026-era commits) | decode on Pascal desktop cards is 40–70 t/s on 7B — the M4 contract (30 tok/s on 27B across four) is bracketed by evidence |
 | **GTX 1060: Vulkan tg BEATS CUDA tg** (90.6 vs 61.7 small; 28.1 vs 25.4 on 7B) | issue #19817 (2026-02) | on pre-tensor-core chips Vulkan is not consolation — it wins on decode. ggml reports Pascal `coopmat:none, int dot:1` -> general path is the hot path |
 | 27B pipeline bound: spec aggregate ~1.04 TB/s (360+320+256+112); at ~45% eff. ÷ 13.8 GB/token | §14.2 math + scoreboard calibration | **~30–35 tok/s projected M4; plausible, not heroic** |
@@ -1142,12 +1142,12 @@ chunked-delta prefill, 27B *throughput*.
   recipe (R2: **single SATA bay — shrink existing disk, owner-approved**;
   IdeaPad: shrink NVMe; shared ESP; nvidia-580xx-dkms; headless boot =
   join-the-graph) -> T2 OurobourOS.iso (mkosi/archiso) post-M3.
-- **Master btrfs** (CachyOS default `@,@home,@srv` on sda, 432 G free):
+- **Head btrfs** (CachyOS default `@,@home,@srv` on sda, 432 G free):
   `/srv/ouro/{repo,gen,shards}` subvolume tree; releases =
   `gen/<UTC>` + `current` symlink flip (atomic rollback);
   **qgroup fence proposed ~100 G** (subvolumes share the pool — capacity
   independence is a lie until qgroups exist); btrfs send deltas = LAN
-  replication to slaves AND backup stream to sdb if owner elects.
+  replication to tails AND backup stream to sdb if owner elects.
 - **sdb (931 G NTFS): owner's backup drive — hands-off, no reformat.**
 - Honest limits recorded: subvolume independence = namespace/snapshot/
   replication depth only; fate (device, pool, power) is shared — mitigated
@@ -1187,7 +1187,7 @@ chunked-delta prefill, 27B *throughput*.
 | qwen35 in static agent | **DECIDED yes** |
 | R2 disk shrink | **DECIDED OK** (single-bay chassis, recipe = gparted live) |
 | VITRIOL llama-server kill for Phase 0 | **approved** (first act when executed) |
-| Master driver swap r610 -> 580xx-dkms | **RESOLVED (2026-08-30)**: both GPUs live on 580.178.04 (1070 Ti enumerated). Caveat: CUDA 13.3 dropped sm_61 — 1070 Ti CUDA needs 12.x sidecar or Vulkan |
+| Head driver swap r610 -> 580xx-dkms | **RESOLVED (2026-08-30)**: both GPUs live on 580.178.04 (1070 Ti enumerated). Caveat: CUDA 13.3 dropped sm_61 — 1070 Ti CUDA needs 12.x sidecar or Vulkan |
 | qgroup size /srv/ouro | PENDING (proposed 100 G) |
 | sdb usage for btrfs-send backup | PENDING (owner's drive) |
 | ARCHITECTURE.md + docs/CONTRACTS.md | **written this session** — canonical |
@@ -1303,7 +1303,7 @@ the unit, never just kill the PID.**
 ### 16.3d VITRIOL transplant — fold-back executed (2026-08-30)
 
 Following §16.3c's verdict, VITRIOL got a fresh-transplant branch
-`vitriol-ku` (upstream/master 9723942ad, no common ancestor — squash
+`vitriol-ku` (upstream/head 9723942ad, no common ancestor — squash
 history — so hand-port, not merge): VITRIOL's ggml-layer hooks (perf
 diagnostics, LULL graph instrumentation + pool reset, buffer type, init)
 re-applied onto 1572 commits of new upstream kernels. Expert-LRU hooks,
@@ -1369,7 +1369,7 @@ cos > 0.9999). Current kernel is a correctness artifact: per-element
 ### 18.2 Track W — two-GPU local graph (3060 + 1070 Ti)
 
 Driver 580.178.04 live on both cards (§16.3c.5). No network involved —
-this is M4 arithmetic measured locally before slaves exist.
+this is M4 arithmetic measured locally before tails exist.
 
 **W1 — multi-adapter selection**
 - `GpuPool::new()` currently takes `request_adapter(HighPerformance)` —
@@ -1427,7 +1427,7 @@ token/ACTS hot path stays on frames (seq ids, mux, ACKs — a tty has none).
 
 **T2 — bootstrap: getty-shim agent (T0 tier)**
 - `ouro-agent --stdio-tty`: speaks the same line protocol over
-  stdin/stdout. A slave's getty line spawns it; master's ttyd connects
+  stdin/stdout. A tail's getty line spawns it; head's ttyd connects
   via SSH pty (or raw serial). **Zero install**: any booted Linux with a
   login joins the graph — the bring-up recipe (§17.2 T0) becomes "boot,
   log in, done".
@@ -1440,7 +1440,7 @@ token/ACTS hot path stays on frames (seq ids, mux, ACKs — a tty has none).
 **T3 — modem bridge (deferred, integration point)**
 - §14.7 HDMI video-modem stream lands as just another tty node — same
   FIFO face, exotic transport. The abstraction is the payoff: the OS
-  cannot tell a slave from a display cable, and does not need to.
+  cannot tell a tail from a display cable, and does not need to.
 
 **Milestones**: T1 loopback demo → T2 = R2/IdeaPad bring-up (this IS the
 M3 physical-wiring step) → T3 with modem hardware.
@@ -1457,7 +1457,7 @@ T1 → (HMAC) → T2 ──┘         └→ W3 (Q3_K ladder first)
 - T1 parallel-safe (different crate); T2 waits on HMAC decision.
 - W2 is the convergence demo: G4 output + W1 selection + D-kit packing.
 - W3 introduces the Q3_K GPU ladder — enter it only after W2 measures,
-  so the 27B decision (2-card vs 4-card across slaves) is evidence-led.
+  so the 27B decision (2-card vs 4-card across tails) is evidence-led.
 
 Risks logged: 1070 Ti 8.1 GB stage budget (9B halves fit; 27B needs
 Q3_K + tight packing); wgpu adapter ambiguity on dual-GPU (W1 pins by
@@ -1477,7 +1477,7 @@ Executing §18.4 with gates; numbers land in this table as measured.
 | S3 | W1: `enumerate_adapters` + `OURO_GPU_NAME`/index pick; Vulkan adapter fields in probe | 1070 Ti selectable by name on the dual-GPU box | ✅ b4079a7: both cards enumerate (3060=idx0, 1070 Ti=idx1, DiscreteGpu); `OURO_GPU_NAME=1070` picks it; probe merges `vulkaninfo --summary` → vulkan_api 1.4.312 both cards |
 | S4 | T1: `ouro-ttyd` FIFO face, loopback demo (HMAC decision before any cross-chassis) | TTY == TCP == in-process token ids | queued next session |
 | S5 | W2: two-GPU 9B Q6_K demo + watts table (stop `vitriol-server.service` unit first) | greedy ids equal; t/s + W/token row appended to §16.3c lineage | blocked-ish: agent shell cannot run systemctl — owner stops the unit before bench (server idle at 0% util during S1-S3, numbers believed clean) |
-| S6 | W3: Q3_K gemv ladder → 27B across two cards, only after W2 measures | evidence decides 2-card now vs wait for slaves | gated on S5 |
+| S6 | W3: Q3_K gemv ladder → 27B across two cards, only after W2 measures | evidence decides 2-card now vs wait for tails | gated on S5 |
 
 G-rung ladder so far (same matvec, 3060, release): L1 kernel 9.8 ms →
 G1 3.3 ms → G2 2.6 ms (31.5× scalar). Kernel time is now minor; the
@@ -1496,8 +1496,8 @@ Physical-layer findings, purchase rules, and the fabric-pitfall checklist
 from the 2026-09-02 hardware session live in **`docs/FLEET.md`** — do not
 re-survey; read that file. Headlines:
 
-- **Master AM5 swap (€470–540, parts list in FLEET.md §2)** is the unblock
-  for the `27B mmap full-Rust forward` rung: master measured 16GB RAM with
+- **Head AM5 swap (€470–540, parts list in FLEET.md §2)** is the unblock
+  for the `27B mmap full-Rust forward` rung: head measured 16GB RAM with
   6.3GB swap resident. Hardware blocker, not software.
 - **Node N+1 (OptiPlex): decide SFF vs MT before purchase** — SFF's
   proprietary ~260W PSU rules out the 1080 Ti stage (FLEET.md §3).
@@ -1516,9 +1516,9 @@ test, open owner decisions — lives in **`docs/R2_BRINGUP.md`**.
 Nothing implemented yet; owner explicitly deferred implementation.
 
 Sequence: S4/T1 ttyd loopback → HMAC §9.3 → getty-shim → R2 join
-(live USB first, dual-boot after). Needs only the master's 3060 —
+(live USB first, dual-boot after). Needs only the head's 3060 —
 no r580 swap required for this test (that stays paired with S5/W2).
-Independencies: master AM5 swap (FLEET.md §2) and W2 are parallel,
+Independencies: head AM5 swap (FLEET.md §2) and W2 are parallel,
 not prerequisites.
 
 ## 18.8 R2 bring-up kickoff (2026-09-02, second session)
@@ -1545,11 +1545,11 @@ boot its OS + agent from one stick — flash + boot-order + boot, zero
 disk changes. Pure-Rust static agent (`--no-default-features`; stage
 path needs no bitnet-cpp). Stateless: identity derived from SMBIOS at
 each boot (node_id), roles never persisted — they are prices, not
-identities (Art. 1). Secrets + master pubkey provisioned per stick at
+identities (Art. 1). Secrets + head pubkey provisioned per stick at
 flash time (WP6, tools/flash.sh; sticks are keys). Whole Nix ramp
-proven in QEMU before hardware (WP7; gate: install Nix on master).
+proven in QEMU before hardware (WP7; gate: install Nix on head).
 All six mottos baked in, one picked at random per boot, echoed in
-crimson on the master's terminal at registration — the boot reveal
+crimson on the head's terminal at registration — the boot reveal
 happens on the host screen. WoL/suspend measured as graph attributes;
 wake-on-demand pricing deferred as an Art. 4 energy feature.
 

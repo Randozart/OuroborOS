@@ -1,6 +1,6 @@
 # FLEET.md — Hardware roadmap & procurement notes
 
-Session findings, 2026-09-02 (coding-agent session; sysinfo measured on master).
+Session findings, 2026-09-02 (coding-agent session; sysinfo measured on head).
 Statuses: `[x]` done/measured, `[ ]` pending decision, `[!]` blocked.
 
 Companion docs: `CLUSTER.md` (topology), `PLAN.md` (order of work),
@@ -13,16 +13,16 @@ what to buy, what to skip, and why — so future sessions don't re-litigate.
 
 | Node | Silicon | Measured state |
 |---|---|---|
-| master (dev box) | i7-3770, 16GB DDR3, RTX 3060 12GB + GTX 1070 Ti 8GB, 2TB SATA SSD (btrfs, 81% full) + 1TB HDD | **6.3GB swap in use** — memory-starved; this is the `27B Rust forward pending RAM/swap` blocker in PLAN.md |
-| slave: ThinkPad/IdeaPad | mobile GTX 1080 8GB (soldered — not removable) | per CLUSTER.md |
-| slave: Alienware Alpha R2 | GTX 960 4GB, 16GB DDR4 | single SATA bay, needs disk shrink |
+| head (dev box) | i7-3770, 16GB DDR3, RTX 3060 12GB + GTX 1070 Ti 8GB, 2TB SATA SSD (btrfs, 81% full) + 1TB HDD | **6.3GB swap in use** — memory-starved; this is the `27B Rust forward pending RAM/swap` blocker in PLAN.md |
+| tail: ThinkPad/IdeaPad | mobile GTX 1080 8GB (soldered — not removable) | per CLUSTER.md |
+| tail: Alienware Alpha R2 | GTX 960 4GB, 16GB DDR4 | single SATA bay, needs disk shrink |
 | [ ] node N+1 | OptiPlex, model TBD | see §3 |
 
-Onboard NIC on master is dead/unclaimed (no `network` class in `lspci`); USB
-WiFi/BT is the current link. Any new master board with onboard 2.5/5GbE is a
+Onboard NIC on head is dead/unclaimed (no `network` class in `lspci`); USB
+WiFi/BT is the current link. Any new head board with onboard 2.5/5GbE is a
 direct upgrade — keep the USB adapter as failover.
 
-## 2. Master upgrade = the Summit unblock `[!]`
+## 2. Head upgrade = the Summit unblock `[!]`
 
 The AM5 platform swap is not a general "PC upgrade": it unblocks the
 `27B mmap full-Rust forward` TODO (PLAN §16) and gives the orchestrator
@@ -51,7 +51,7 @@ used market for DDR3/cards.
 ## 3. Node N+1: OptiPlex decision tree `[ ]`
 
 The OptiPlex is a *stage node*, not an "inference box" — the 3060 on the
-master already out-inferences anything under €200 (see §5).
+head already out-inferences anything under €200 (see §5).
 
 | Option | Hardware | ~EUR | Verdict |
 |---|---|---|---|
@@ -121,9 +121,9 @@ Two corrections to "just dumb boxes":
 
 ## 7. Resume pointers
 
-- `[!]` Master AM5 swap → unblocks 27B mmap forward (PLAN §16). Budget €470–540.
+- `[!]` Head AM5 swap → unblocks 27B mmap forward (PLAN §16). Budget €470–540.
 - `[ ]` OptiPlex: decide SFF vs MT **before** purchase (option B depends on it).
 - `[ ]` §4 checklist items fold into PLAN §16.2/S5/S6 as verification steps.
-- `[ ]` After master swap: re-run sysinfo (swap should be ~0), then 27B mmap task.
+- `[ ]` After head swap: re-run sysinfo (swap should be ~0), then 27B mmap task.
 - Evidence thread this session: sysinfo (free/lspci/lsblk) → bol price survey
   → OurobourOS repo read → this file.

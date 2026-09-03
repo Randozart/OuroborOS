@@ -1,7 +1,7 @@
 //! `ouro-ttyd` core: FIFO face for one node (WP1, PLAN §18.3 T1).
 //!
 //! Runbook: `docs/R2_BRINGUP.md` §3. Lives in the shell crate because the
-//! master-side transport client (`agent_client`) lives here; the daemon
+//! head-side transport client (`agent_client`) lives here; the daemon
 //! binary is `src/bin/ouro-ttyd.rs`.
 //!
 //! Line protocol, one request in flight (lockstep):
@@ -44,7 +44,7 @@ pub const TASK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120
 /// Transport to the agent behind this FIFO face.
 #[derive(Debug, Clone)]
 pub enum TtyWire {
-    /// Master-side TCP client (`agent_client`), one connection per request.
+    /// Head-side TCP client (`agent_client`), one connection per request.
     Tcp(String),
     /// Child process speaking the authed stdio protocol — WP3 getty-shim
     /// path, e.g. `ssh -T user@host -- ouro-agent --stdio-tty` or a raw
@@ -121,7 +121,7 @@ impl fmt::Display for TtyResponse {
     }
 }
 
-/// Master-side state for one FIFO face. Persisted across tty reconnects so
+/// Head-side state for one FIFO face. Persisted across tty reconnects so
 /// budget decisions survive a writer going away.
 pub struct TtySession {
     pub node: String,
@@ -264,7 +264,7 @@ impl TtySession {
     }
 
     /// This node's boot tagline, over the signed wire (registration
-    /// echo: the master prints it in crimson when the node joins).
+    /// echo: the head prints it in crimson when the node joins).
     /// Empty on the node = no banner.
     pub fn motto(&mut self) -> Result<String> {
         let task = Task {
@@ -660,7 +660,7 @@ mod tests {
             serve_connection(&mut session, &in_c, &out_c).unwrap();
         });
 
-        // Master side: open .in (write) + .out (read), keep both across
+        // Head side: open .in (write) + .out (read), keep both across
         // requests, one request in flight.
         let mut req = OpenOptions::new().write(true).open(&in_path).unwrap();
         let resp = BufReader::new(File::open(&out_path).unwrap());

@@ -12,9 +12,9 @@ topology in `CLUSTER.md`.
 
 ## 1. Why R2 first
 
-- Cheapest full test of the thesis: master (3060) + one slave over 1GbE,
+- Cheapest full test of the thesis: head (3060) + one tail over 1GbE,
   token-exact parity across a real wire (L3 contract, `docs/CONTRACTS.md`).
-- Needs **no master changes**: the 3060 runs on r610 today; the r580 swap
+- Needs **no head changes**: the 3060 runs on r610 today; the r580 swap
   stays paired with the W2 two-GPU milestone (PLAN §18.5 S5), not with this.
 - GTX 960 4GB = smallest stage; if the pipeline works at 4GB with a 35W
   TDP host CPU, it works everywhere else in the fleet.
@@ -24,7 +24,7 @@ topology in `CLUSTER.md`.
 | Piece | State |
 |---|---|
 | 9B token-exact over 4 TCP localhost agents | done (M3, in-process equivalent) |
-| 27B pure-Rust CPU forward | **[!] blocked on master RAM/swap** — FLEET.md §2 (independent of R2) |
+| 27B pure-Rust CPU forward | **[!] blocked on head RAM/swap** — FLEET.md §2 (independent of R2) |
 | wgpu Q6_K matvec, adapter pinning | done, S1–S3 committed (G-rung: 2.6 ms, 31.5x) |
 | r580 driver decision | solved on paper: `nvidia-580xx-dkms` in CachyOS repo; **avoid linux-lts kernel** (AUR note re 6.12.x) |
 | R2 disk shrink | owner-approved; recipe = gparted live (single SATA bay) |
@@ -53,7 +53,7 @@ Per PLAN §18.3 T1, restated as build spec:
 
 - Frame auth: HMAC-SHA256, 32 bytes, over header+payload, shared secret.
 - **[ ] OPEN DECISION — key provisioning**: manual copy to the first
-  slave (acceptable for node #1) vs. deploy tooling carries the secret
+  tail (acceptable for node #1) vs. deploy tooling carries the secret
   from day one. Owner to decide before WP3 ships.
 - Threat model note (§9.2): without this, the TTY face is an
   unauthenticated execution orifice on the LAN. Loopback demo first,
@@ -63,8 +63,8 @@ Per PLAN §18.3 T1, restated as build spec:
 
 Per PLAN §18.3 T2:
 
-- Same line protocol over stdin/stdout; a slave's getty line spawns it;
-  master's `ouro-ttyd` connects via SSH pty (or raw serial).
+- Same line protocol over stdin/stdout; a tail's getty line spawns it;
+  head's `ouro-ttyd` connects via SSH pty (or raw serial).
 - **Zero install**: any booted Linux with a login joins the graph.
 - Upgrade path: identical frames ride raw L2 (EtherType 0x88B5) later;
   ttyd swaps transport behind the same FIFO face. Nothing above ttyd
@@ -79,11 +79,11 @@ Plan of record (2026-09-02):
 - Agent: `ouro-agent --stdio-tty` — stdin line → `authed_process` →
   signed stdout line, flush per line. Auth fail → `err auth`, exit
   (getty respawns = fresh login). EOF → exit 0.
-- Master: `ouro-ttyd --pty-cmd '<cmd>'` (replaces `--addr`) — spawns
+- Head: `ouro-ttyd --pty-cmd '<cmd>'` (replaces `--addr`) — spawns
   the command once per tty connection, persistent child, lockstep
   signed lines over its pipes. One SSH handshake per tty session, not
   per request. Respawns the child if it dies.
-- Master uses `ssh -T` (no pty allocation — no echo corruption); raw
+- Head uses `ssh -T` (no pty allocation — no echo corruption); raw
   serial paths must `stty -echo` for the same reason.
 - Secrets: same `OURO_SECRET_FILE` on both ends (manual copy, §8).
 
@@ -98,7 +98,7 @@ Plan of record (2026-09-02):
 
 | # | Task | Route |
 |---|---|---|
-| [ ] | LAN: R2 on master's subnet (switch or direct cable) | all |
+| [ ] | LAN: R2 on head's subnet (switch or direct cable) | all |
 | [ ] | **Node image stick** (§10): `tools/flash.sh` a USB, set boot order, boot. Zero disk changes, fully reversible. Plain CachyOS live = fallback | image |
 | [x] | ~~B — durable dual-boot: gparted shrink~~ **cancelled** (§8: node image replaces it) | — |
 | [ ] | `nvidia-580xx` driver in NixOS — deferred to its own WP; image v1 is CPU-only (smoke needs no GPU) | later |
@@ -109,7 +109,7 @@ Plan of record (2026-09-02):
 
 | Constraint | Consequence for this test |
 |---|---|
-| 35W TDP CPU | stage sizing small; CPU micro-op pools thin — keep heavy layers on master |
+| 35W TDP CPU | stage sizing small; CPU micro-op pools thin — keep heavy layers on head |
 | GTX 960 4GB | light-layer group only (§14 packing already prices it lowest) |
 | Single SODIMM | halved memory bandwidth — expect honest probe numbers to reflect it |
 | 1GbE only | fine: ACTS frames are 20–50KB/token; wire is not the bottleneck (§14) |
@@ -119,13 +119,13 @@ Plan of record (2026-09-02):
 
 1. R2 boots Linux (live USB counts), user logs in, getty spawns
    `ouro-agent --stdio-tty`.
-2. Master `ouro-ttyd` connects; R2 registers; its probes (memcpy, gemv,
+2. Head `ouro-ttyd` connects; R2 registers; its probes (memcpy, gemv,
    RTT, power estimate) land in the Beast graph — measured-only
    admission, nothing from spec sheets.
 3. Pipeline runs: bitnet-2.4B for first smoke, then 9B Q6_K split
-   master-stage → LAN cut → R2-stage.
+   head-stage → LAN cut → R2-stage.
 4. **Parity**: token ids equal to in-process reference (L3).
-5. Watts row appended (RAPL on master; R2 estimate flagged as estimate
+5. Watts row appended (RAPL on head; R2 estimate flagged as estimate
    until/unless a meter exists).
 6. All traffic authenticated (WP2 live on the wire).
 
@@ -135,7 +135,7 @@ Plan of record (2026-09-02):
 WP1 (ttyd + loopback) ──> WP2 (HMAC) ──> WP3 (getty-shim) ──> R2 test
                                      └─ WP4 (discover., parallel-safe)
 R2 physical: LAN + live USB can be prepared any time; joins at WP3.
-Master AM5 swap (FLEET.md §2) is independent — unblocks 27B, not this.
+Head AM5 swap (FLEET.md §2) is independent — unblocks 27B, not this.
 W2 two-GPU demo (S5) is independent — both feed the 27B decision.
 ```
 
@@ -152,7 +152,7 @@ W2 two-GPU demo (S5) is independent — both feed the 27B decision.
       **cancelled** — R2's disk is never touched; the owner's shrink
       approval goes unspent.
 - [x] Taglines: all six mottos baked into the image; **each boot picks
-      one at random** (kernel entropy, stateless-safe). Master echoes
+      one at random** (kernel entropy, stateless-safe). Head echoes
       a node's tagline in crimson at registration — the boot reveal
       happens on the host screen.
 - [x] Node identity: **derived, never stored** — `node_id` =
@@ -170,7 +170,7 @@ W2 two-GPU demo (S5) is independent — both feed the 27B decision.
   (`ouro-ttyd` FIFO face + loopback demo). Order: WP1 → WP2 (manual
   provisioning) → WP3 → physical (live USB).
 - 2026-09-02: **WP1 done.** `ouro-ttyd` lives in the shell crate
-  (master-side; `agent_client` is there — deviation from "agent crate"
+  (head-side; `agent_client` is there — deviation from "agent crate"
   noted), module `shell/src/ttyd.rs`, bin `shell/src/bin/ouro-ttyd.rs`.
   Line protocol: `ping` / `echo` / `stage_* <payload>` / other agent
   tasks / dot-form (`budget 120w.`, `probe.`, `n1?`) in; `ok|queued|err`
@@ -212,7 +212,7 @@ W2 two-GPU demo (S5) is independent — both feed the 27B decision.
   secret cache, signs every request, verifies reply tag over the
   request's seq; `*_with` variants expose explicit secrets (tests).
   `TtySession` owns a secret — construction is the gate. Note: the
-  FIFO face itself stays master-local plaintext; auth is a wire (TCP)
+  FIFO face itself stays head-local plaintext; auth is a wire (TCP)
   property — `agent_client` signs at the transport boundary. Tests:
   tag determinism/seq+key sensitivity, tamper/wrong-key/structural
   reject (opaque errors), unsigned-reply reject, wrong-key exchange
@@ -223,12 +223,12 @@ W2 two-GPU demo (S5) is independent — both feed the 27B decision.
   `cargo test --lib` (115) + `cargo clippy -- -D warnings` clean.
 - Next: **WP3** — `ouro-agent --stdio-tty` getty-shim: same line
   protocol on stdin/stdout (authed the same way), getty spawns it on
-  R2, master's ttyd connects via SSH pty.
+  R2, head's ttyd connects via SSH pty.
 - 2026-09-02: **WP3 done — repo work packages complete.** Agent:
   `ouro-agent --stdio-tty` (`serve_stdio`, agent/src/main.rs) — signed
   line in, signed line out, flush per line; auth fail → `err auth` +
   exit (getty respawn = fresh login); EOF → clean exit; refuses to
-  start without `OURO_SECRET_FILE`. Master: `ouro-ttyd --pty-cmd
+  start without `OURO_SECRET_FILE`. Head: `ouro-ttyd --pty-cmd
   '<cmd>'` (`TtyWire::{Tcp,Child}`, shell/src/ttyd.rs) — spawns the
   command once per tty connection (one SSH handshake per session, not
   per request), lockstep signed lines over its pipes, dead child
@@ -295,7 +295,7 @@ nixos/
   **No role flags anywhere** — "host"/"sleeper" are prices, not
   identities (Art. 1); the control plane relocates per Art. 4.
 - **Enrollment artifacts**: boot service mounts the labeled `OURO`
-  partition → `/run/ouro/secret` (32B hex HMAC secret) + master SSH
+  partition → `/run/ouro/secret` (32B hex HMAC secret) + head SSH
   pubkey → `authorized_keys`. Missing partition = no secret = agent
   refuses the wire (WP2 gate holds, no bypass).
 - sshd: key-only auth. getty autologin tty1 → `ouro-agent --stdio-tty`.
@@ -307,19 +307,19 @@ nixos/
 ### WP6 — `tools/flash.sh` (one command per stick)
 
 `dd` the image → create the labeled `OURO` partition → write the secret
-file + master pubkey → verify readback. Extends §8's manual-copy
+file + head pubkey → verify readback. Extends §8's manual-copy
 decision to per-stick provisioning; sticks are keys — custody matters.
 
 ### WP7 — QEMU prove-out (before any physical USB)
 
-Boot the image in QEMU on the master: banner + random tagline, `OURO`
+Boot the image in QEMU on the head: banner + random tagline, `OURO`
 partition consumed, signed wire up, `ouro-ttyd --pty-cmd` (QEMU as the
 child) completes the loopback. The entire Nix ramp is debugged with
-zero physical risk. **Gate: install Nix on master first** (none
+zero physical risk. **Gate: install Nix on head first** (none
 present as of 2026-09-02); WP5 files are written to be
 correct-by-inspection until then.
 
-### Master-side cinematic echo
+### Head-side cinematic echo
 
 `ouro-ttyd` prints a node's tagline in crimson on the host terminal at
 registration. Transport: the agent's first response carries
@@ -338,7 +338,7 @@ operator is looking.
 
 ### Sequencing
 
-1. WP5 scaffolding → WP7 QEMU loop (needs Nix on master) → WP6 flash
+1. WP5 scaffolding → WP7 QEMU loop (needs Nix on head) → WP6 flash
 2. Physical (parallel): R2 LAN + boot-order
 3. First light: image stick in R2 → §6 acceptance test
 4. Owner works `docs/brand/` SVG/Braille logo in parallel — TTY banner
@@ -352,14 +352,14 @@ operator is looking.
   sleep targets masked, crimson console palette remap, brand/probe/
   enroll services, tagline pool). WP6: `tools/flash.sh` (dd + OURO
   partition + secret/pubkey + verify; syntax-checked only — destructive
-  tool, needs hardware to truly prove). Master-side cinematic echo:
+  tool, needs hardware to truly prove). Head-side cinematic echo:
   agent answers `tagline` (OURO_TAGLINE env or /run/ouro/tagline);
   `TtySession::motto()` rides the signed wire (schedules 1W like any
   op); `serve_connection` writes the crimson banner as the first
   `.out` line before serving requests — consumers skip ANSI lines.
   Verified: full workspace `cargo test --lib` (137) + agent (20) +
   `cargo clippy -- -D warnings` clean; FIFO e2e test now asserts the
-  banner line. **Blocked, explicit: no Nix on master** (checked
+  banner line. **Blocked, explicit: no Nix on head** (checked
   2026-09-02) — WP7 QEMU prove-out gate. Owner: install Nix, then
   `nix build .#node-image` (expect one cargoLock hash dance), and
   work `docs/brand/` logo in parallel.
@@ -407,12 +407,12 @@ operator is looking.
   - **Error recovery** (`09d5d36`): failure counts with cooldown, stale
     sweep over the registry, queue drain on recovery; `recover.` verb.
   - **Push bus** (`eef0b18`): `ouro-registry` daemon + agent
-    `--master` link. Signed-line wire, one exchange per connection;
+    `--head` link. Signed-line wire, one exchange per connection;
     register on boot (idempotent per peer IP), heartbeat every 5s,
     auto re-register on daemon state loss. Live smoke passed: agent
     registered as n1, RAPL power + temp + Working status persisted,
     events recorded, zero broken pipes. Next wiring step: node image
-    gets `--master` from an enroll-partition file (one ExecStart line,
+    gets `--head` from an enroll-partition file (one ExecStart line,
     then re-prove WP7).
   Tests: 101 cluster + 49 shell + 21 agent, clippy `-D warnings` clean.
   Still pending for R2 day: strip debug SSH key from node-image.nix,

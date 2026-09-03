@@ -169,21 +169,21 @@ fn test_shell_client_agent_probe() {
     let (mut child, port) = start_agent();
     let addr = format!("127.0.0.1:{}", port);
 
-    let alive = ouro_shell::agent_client::ping(&addr).unwrap();
+    let alive = ouro_hiss::agent_client::ping(&addr).unwrap();
     assert!(alive);
 
-    let tel = ouro_shell::agent_client::telemetry(&addr).unwrap();
+    let tel = ouro_hiss::agent_client::telemetry(&addr).unwrap();
     assert!(!tel.hostname.is_empty());
     assert!(tel.ram_total_mib > 0);
 
-    let task = ouro_shell::agent_client::AgentTask {
+    let task = ouro_hiss::agent_client::AgentTask {
         id: "test1".into(),
         name: "echo".into(),
         payload: "shell_client_test".into(),
         estimated_watts: 10,
         estimated_seconds: 1,
     };
-    let result = ouro_shell::agent_client::execute(&addr, &task).unwrap();
+    let result = ouro_hiss::agent_client::execute(&addr, &task).unwrap();
     assert_eq!(result.status, "Success");
     assert_eq!(result.output, "shell_client_test");
 
@@ -206,14 +206,14 @@ fn test_acts_and_shard_tasks_over_tcp() {
         layer_end: 29,
         data: vec![0.5; 2560],
     };
-    let task = ouro_shell::agent_client::AgentTask {
+    let task = ouro_hiss::agent_client::AgentTask {
         id: "acts".into(),
         name: "acts_echo".into(),
         payload: to_hex(&act.encode()),
         estimated_watts: 5,
         estimated_seconds: 5,
     };
-    let result = ouro_shell::agent_client::execute(&addr, &task).unwrap();
+    let result = ouro_hiss::agent_client::execute(&addr, &task).unwrap();
     assert_eq!(result.status, "Success");
     assert!(result.output.contains("elems=2560"));
 
@@ -227,14 +227,14 @@ fn test_acts_and_shard_tasks_over_tcp() {
         &[1, 2, 3, 4],
     )
     .unwrap();
-    let task = ouro_shell::agent_client::AgentTask {
+    let task = ouro_hiss::agent_client::AgentTask {
         id: "shard".into(),
         name: "load_shard".into(),
         payload: path.to_str().unwrap().into(),
         estimated_watts: 5,
         estimated_seconds: 5,
     };
-    let result = ouro_shell::agent_client::execute(&addr, &task).unwrap();
+    let result = ouro_hiss::agent_client::execute(&addr, &task).unwrap();
     assert_eq!(result.status, "Success");
     assert!(result.output.contains("shard node=1"));
 

@@ -1,19 +1,24 @@
 # OurobourOS — Agent Guidelines
 
+> **OUROBOROS**: **O**ne **U**nified **R**untime **O**rchestrating
+> **B**unch **O**f **R**andom **O**ld **S**ervers.
+> The machine that remakes itself. The tail feeds the head.
+
 ## Quick Reference
 
 ### Commands
 - **Build**: `cargo build --release`
 - **Test**: `cargo test --lib`
-- **Run shell**: `cargo run --bin ouro-shell`
+- **Run shell (HISS)**: `cargo run --bin ouro-hiss`
 - **Run agent**: `cargo run --bin ouro-agent`
+- **Run registry**: `cargo run --bin ouro-registry`
 - **Clippy**: `cargo clippy -- -D warnings`
 
 ### Workspace Structure
 ```
 OurobourOS/
 ├── cluster/    — Core library (Beast, scheduler, probes, transport)
-├── shell/      — Interactive REPL (dot notation, context memory)
+├── shell/      — HISS + control-plane daemons (ouro-ttyd, ouro-registry)
 ├── agent/      — Node daemon (task execution, telemetry)
 ├── workloads/  — Briev workload files (.bv)
 ├── nixos/      — NixOS deployment configs

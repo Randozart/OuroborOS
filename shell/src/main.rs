@@ -4,19 +4,23 @@ use anyhow::Result;
 use ouro_cluster::beast::topology::ClusterTopology;
 use ouro_cluster::scheduler::Scheduler;
 
-use ouro_shell::agent_client;
-use ouro_shell::context::Context;
-use ouro_shell::formatter::Formatter;
-use ouro_shell::parser::interpret;
-use ouro_shell::propositions;
+use ouro_hiss::agent_client;
+use ouro_hiss::context::Context;
+use ouro_hiss::formatter::Formatter;
+use ouro_hiss::parser::interpret;
+use ouro_hiss::propositions;
 
-/// Print the OurobourOS banner.
+/// Print the HISS banner.
 fn banner() {
-    println!("  ___  ____  _____ _   _ ______   __");
-    println!(" / _ \\/ ___|| ____| \\ | | __ \\ \\ / /");
-    println!("| | | \\___ \\|  _| |  \\| |  _ \\ \\ V / ");
-    println!("| |_| |___) | |___| |\\  | |_) || |  ");
-    println!(" \\___/|____/|_____|_| \\_|____/ |_|  ");
+    println!(" _   _ ___ ____ ");
+    println!("| | | |_ _/ ___|");
+    println!("| |_| || |\\___ \\");
+    println!("|  _  || | ___) |");
+    println!("|_| |_|___|____/ ");
+    println!();
+    println!("  HISS — Hierarchical Interactive Shell System");
+    println!("  OUROBOROS: One Unified Runtime Orchestrating");
+    println!("             Bunch Of Random Old Servers");
     println!();
     println!("  The cluster is one machine.");
     println!("  Type ? for cluster summary.");
@@ -96,7 +100,7 @@ fn demo_topology() -> ClusterTopology {
 
 /// Parse --nodes ip:port,... CLI argument into (node_id, addr) pairs.
 /// Convert agent telemetry into live property cache entries.
-fn tel_props(tel: &ouro_shell::agent_client::AgentTelemetry) -> std::collections::HashMap<String, String> {
+fn tel_props(tel: &ouro_hiss::agent_client::AgentTelemetry) -> std::collections::HashMap<String, String> {
     let mut props = std::collections::HashMap::new();
     props.insert("power".to_string(), format!("{}W", tel.power_watts));
     props.insert("temp".to_string(), format!("{}C", tel.temp_c));
@@ -168,7 +172,7 @@ fn main() -> Result<()> {
     let mut recovery = ouro_cluster::error_recovery::ErrorRecovery::new();
 
     loop {
-        print!("> ");
+        print!("hiss> ");
         io::stdout().flush()?;
 
         let mut line = String::new();
@@ -191,7 +195,7 @@ fn main() -> Result<()> {
         let cmd = interpret(input);
 
         match &cmd {
-            ouro_shell::parser::Command::Probe if !node_addrs.is_empty() => {
+            ouro_hiss::parser::Command::Probe if !node_addrs.is_empty() => {
                 println!("Probing all nodes...");
                 for (id, addr) in &node_addrs {
                     match agent_client::telemetry(addr) {

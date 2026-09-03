@@ -4,7 +4,7 @@
 //!   cargo test --release -p ouro-shell --test qwen_tcp -- --ignored
 
 use ouro_cluster::infer::qwen35::{Card, Qwen35Model};
-use ouro_shell::pipeline;
+use ouro_hiss::pipeline;
 use std::io::{BufRead, BufReader, Write};
 use std::net::TcpStream;
 use std::path::PathBuf;

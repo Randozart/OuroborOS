@@ -1,5 +1,5 @@
 mod executor;
-mod master_link;
+mod head_link;
 mod stage;
 mod telemetry;
 
@@ -19,13 +19,13 @@ const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(5);
 
 /// Agent daemon entry point.
 ///
-/// Default mode: TCP daemon for the master node, HMAC-authenticated
+/// Default mode: TCP daemon for the head node, HMAC-authenticated
 /// newline protocol (`seq tag body`); refuses to start without
 /// OURO_SECRET_FILE.
 ///
 /// `ouro-agent --stdio-tty` (getty-shim, WP3): same authed protocol on
-/// stdin/stdout instead of TCP. A slave's getty line spawns it; the
-/// master's ouro-ttyd connects via `ssh -T` (or raw serial). Zero
+/// stdin/stdout instead of TCP. The tail's getty line spawns it; the
+/// head's ouro-ttyd connects via `ssh -T` (or raw serial). Zero
 /// install: any booted Linux with a login joins the graph.
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -38,15 +38,15 @@ async fn main() -> Result<()> {
         return Ok(());
     }
 
-    // --master <addr>: push-based registration + telemetry heartbeat to
+    // --head <addr>: push-based registration + telemetry heartbeat to
     // the registry daemon (runs alongside the task server).
-    if let Some(i) = std::env::args().position(|a| a == "--master") {
+    if let Some(i) = std::env::args().position(|a| a == "--head") {
         if let Some(addr) = std::env::args().nth(i + 1) {
             tokio::spawn(async move {
                 if let Err(e) =
-                    master_link::run(secret, addr, HEARTBEAT_INTERVAL).await
+                    head_link::run(secret, addr, HEARTBEAT_INTERVAL).await
                 {
-                    eprintln!("master-link terminated: {}", e);
+                    eprintln!("head-link terminated: {}", e);
                 }
             });
         }
@@ -208,7 +208,7 @@ fn serve_stdio<R: std::io::BufRead, W: std::io::Write>(
     Ok(())
 }
 
-/// Process a single message from the master.
+/// Process a single message from the head.
 fn process_message(msg: &str) -> String {
     let trimmed = msg.trim();
 
@@ -223,7 +223,7 @@ fn process_message(msg: &str) -> String {
     else if trimmed == "ping" {
         "pong".into()
     }
-    // Tagline: this boot's motto, for the master's registration echo
+    // Tagline: this boot's motto, for the head's registration echo
     else if trimmed == "tagline" {
         let from_env = std::env::var("OURO_TAGLINE").unwrap_or_default();
         if !from_env.trim().is_empty() {

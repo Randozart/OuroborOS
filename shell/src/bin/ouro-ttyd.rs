@@ -5,7 +5,7 @@
 //!   `ouro-ttyd --node r2 --pty-cmd 'ssh -T r2@192.168.1.50 -- ouro-agent --stdio-tty'`
 //!
 //! Writes request lines to `<tty-dir>/<node>.in`, reads one response line
-//! per request from `.out`. Line protocol: `ouro_shell::ttyd` module docs.
+//! per request from `.out`. Line protocol: `ouro_hiss::ttyd` module docs.
 //! Reconnects: when the tty writer closes the FIFO, the daemon re-arms and
 //! waits for the next writer; session state (budget) persists. A dead
 //! child wire (getty respawn, auth failure) is respawned on next use.
@@ -15,7 +15,7 @@ use std::path::PathBuf;
 use anyhow::{bail, Result};
 
 use ouro_cluster::transport::auth;
-use ouro_shell::ttyd::{ensure_fifo, fifo_paths, serve_connection, TtySession, TtyWire};
+use ouro_hiss::ttyd::{ensure_fifo, fifo_paths, serve_connection, TtySession, TtyWire};
 
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
