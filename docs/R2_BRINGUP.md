@@ -147,7 +147,7 @@ W2 two-GPU demo (S5) is independent — both feed the 27B decision.
       (§10). Plain CachyOS live demoted to 30-min fallback.
 - [x] First model: bitnet-2.4B smoke → 9B Q6_K split — **confirmed as
       assumed**.
-- [x] Boot OS: **USB-booted OurobourOS node image** (2026-09-02,
+- [x] Boot OS: **USB-booted OuroborOS node image** (2026-09-02,
       §10). Route B (gparted shrink + CachyOS-minimal dual-boot) is
       **cancelled** — R2's disk is never touched; the owner's shrink
       approval goes unspent.
@@ -249,7 +249,7 @@ W2 two-GPU demo (S5) is independent — both feed the 27B decision.
 
 ---
 
-## 10. The node image — USB-booted OurobourOS (plan of record, 2026-09-02)
+## 10. The node image — USB-booted OuroborOS (plan of record, 2026-09-02)
 
 The zero-install thesis, generalized: the OS **is** the agent. One stick
 per cluster device; adding a node = flash + boot-order + boot. Any x86

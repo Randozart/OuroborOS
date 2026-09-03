@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # M2 bridge benchmark: llama.cpp CUDA tensor-split on local GPUs vs CPU baseline.
-# Establishes the performance bar the OurobourOS pipeline must eventually beat.
+# Establishes the performance bar the OuroborOS pipeline must eventually beat.
 #
 # Prereqs (user hands, once):
 #   pacman -S cuda                                    # nvcc 12.8

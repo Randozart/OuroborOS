@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# OurobourOS CI gate. Fast tier always; parity tier on --heavy.
+# OuroborOS CI gate. Fast tier always; parity tier on --heavy.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 

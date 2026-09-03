@@ -1,5 +1,5 @@
 {
-  description = "OurobourOS node image — the OS is the agent (R2_BRINGUP.md §10)";
+  description = "OuroborOS node image — the OS is the agent (R2_BRINGUP.md §10)";
 
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
 
@@ -21,7 +21,7 @@
             prev.fetchurl (removeAttrs args [ "curlOptsList" ] // {
               curlOptsList = [
                 "-A"
-                "OurobourOS-node-image/1.0 (nix; contact: randozart@gmail.com)"
+                "OuroborOS-node-image/1.0 (nix; contact: randozart@gmail.com)"
               ] ++ opts;
             });
       };

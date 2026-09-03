@@ -1,8 +1,9 @@
-# OurobourOS Handbook
+# OuroborOS Handbook
 
 > **OUROBOROS**: **O**ne **U**nified **R**untime **O**rchestrating
-> **B**unch **O**f **R**andom **O**ld **S**ervers.
-> The machine that remakes itself. The tail feeds the head.
+> *a* **B**unch **O**f **R**andom **O**ld **S**ervers.
+> *(The 'a' is silent.)* The machine that remakes itself. The tail
+> feeds the head.
 
 **HISS** — the **H**ierarchical **I**nteractive **S**hell **S**ystem — is
 how you drive the cluster. Everything else (agent, registry, ttyd) exists

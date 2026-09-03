@@ -1,8 +1,9 @@
-# OurobourOS Architecture
+# OuroborOS Architecture
 
 > **OUROBOROS**: **O**ne **U**nified **R**untime **O**rchestrating
-> **B**unch **O**f **R**andom **O**ld **S**ervers.
-> The machine that remakes itself. The tail feeds the head.
+> *a* **B**unch **O**f **R**andom **O**ld **S**ervers.
+> *(The 'a' is silent.)* The machine that remakes itself. The tail
+> feeds the head.
 
 This document is the internals reference. For usage, see
 [`HANDBOOK.md`](HANDBOOK.md). Design authority is

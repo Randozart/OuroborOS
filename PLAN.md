@@ -1,4 +1,4 @@
-# OurobourOS Enhanced Plan
+# OuroborOS Enhanced Plan
 
 **Date:** 2026-08-29
 **Status:** Phase 0 ✅, Phase 1 ✅, Phase 2 in progress — see §5 tables
@@ -67,9 +67,9 @@ Declarative node specs, cryptographic hash verification, reproducible builds. Th
 | Open issues | 8 |
 | Pull requests | 0 |
 
-**Risk:** Cannot build OurobourOS microkernels in Briev today. The compiler is still in completion phase (Phase 7 nested recursive types deferred, ForAll/Exists stubs only).
+**Risk:** Cannot build OuroborOS microkernels in Briev today. The compiler is still in completion phase (Phase 7 nested recursive types deferred, ForAll/Exists stubs only).
 
-**Recommendation:** Build OurobourOS control plane in Rust (already started). Use Briev for workloads and future bare-metal nodes once LLVM backend stabilizes.
+**Recommendation:** Build OuroborOS control plane in Rust (already started). Use Briev for workloads and future bare-metal nodes once LLVM backend stabilizes.
 
 ### 2.2 Unikraft Has NO GPU Support
 
@@ -137,7 +137,7 @@ Declarative node specs, cryptographic hash verification, reproducible builds. Th
 
 ## 3. Existing Codebase Analysis
 
-### 3.1 What's Built (OurobourOS/cluster/)
+### 3.1 What's Built (OuroborOS/cluster/)
 
 | Module | Status | Lines |
 |--------|--------|-------|
@@ -181,7 +181,7 @@ This is the official Microsoft BitNet-b1.58-2B-4T model. Ready for single-node t
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│                    OurobourOS Shell (Rust)                    │
+│                    OuroborOS Shell (Rust)                    │
 │  Propositional interface │ Context memory │ Dot notation     │
 └──────────────────────┬──────────────────────────────────────┘
                        ▼
@@ -404,7 +404,7 @@ Recovery:
 #!ipxe
 set base http://192.168.1.50
 
-menu OurobourOS Boot
+menu OuroborOS Boot
 item worker Worker Node
 item head Head Node
 item memtest Memtest86+
@@ -492,7 +492,7 @@ Clang >= 18
   - Source MAC: 6 bytes (current node)
   - EtherType: 2 bytes (0x88B5 = IEEE Local Experimental)
 
-[OurobourOS Header]
+[OuroborOS Header]
   - Magic: 4 bytes (0x4F55524F = "OURO")
   - Version: 1 byte
   - Frame Type: 1 byte (ACTIVATION=1, WEIGHT=2, HEARTBEAT=3, CHECKPOINT=4)
@@ -610,7 +610,7 @@ Raw L2 Ethernet has no authentication. Any device on the same switch can:
 ### 9.3 HMAC Header Extension
 
 ```
-[OurobourOS Header with HMAC]
+[OuroborOS Header with HMAC]
   - Magic: 4 bytes
   - Version: 1 byte
   - Frame Type: 1 byte
@@ -697,7 +697,7 @@ NODE_2 HEALTH
 ## 13. The Qwen Program (2026-08-29) — THE SUMMIT
 
 **Thesis statement:** a 27B-class model, bigger than any single card in the
-cluster, streamed across four scrap GPUs by OurobourOS's own machinery,
+cluster, streamed across four scrap GPUs by OuroborOS's own machinery,
 under a power budget, governed by the shell.
 
 ### 13.1 Cluster Hardware (4 GPUs, 32 GB VRAM)
@@ -1012,7 +1012,7 @@ LiFi-class: OpenVLC ~150 Kbps @4m; LiFOD 400 Kbps (doi in TOSN; MCU-rate-limited
 ### 15.9 What survives scrutiny — the six deltas
 
 The capability ("run 70B across old machines") is **commodity**: llama.cpp RPC
-does it tonight with no auth and no contracts. OurobourOS is differentiated by
+does it tonight with no auth and no contracts. OuroborOS is differentiated by
 the combination, none of which we found together in any system:
 
 1. **Contract-gated re-placement** — no prior live-migration (exo churn,
@@ -1141,7 +1141,7 @@ chunked-delta prefill, 27B *throughput*.
   qwen35 engine included — CPU stages proven) -> T1 dual-boot CachyOS-minimal
   recipe (R2: **single SATA bay — shrink existing disk, owner-approved**;
   IdeaPad: shrink NVMe; shared ESP; nvidia-580xx-dkms; headless boot =
-  join-the-graph) -> T2 OurobourOS.iso (mkosi/archiso) post-M3.
+  join-the-graph) -> T2 OuroborOS.iso (mkosi/archiso) post-M3.
 - **Head btrfs** (CachyOS default `@,@home,@srv` on sda, 432 G free):
   `/srv/ouro/{repo,gen,shards}` subvolume tree; releases =
   `gen/<UTC>` + `current` symlink flip (atomic rollback);
@@ -1537,7 +1537,7 @@ getty line spawning `ouro-agent --stdio-tty`, then the §6 acceptance
 test (probes → Beast graph, bitnet-2.4B smoke, 9B Q6_K split,
 token-id parity, watts row).
 
-## 18.9 The node image: USB-booted OurobourOS (2026-09-02, third session)
+## 18.9 The node image: USB-booted OuroborOS (2026-09-02, third session)
 
 Route B cancelled; route A upgraded. Plan of record now lives in
 R2_BRINGUP.md §10: a NixOS node image (WP5) makes every cluster device

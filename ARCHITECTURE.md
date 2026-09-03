@@ -1,4 +1,4 @@
-# OurobourOS — Architecture
+# OuroborOS — Architecture
 
 The canonical blueprint. Governed by `CONSTITUTION.md`; every design here
 cites its article. Implementation order and status live in `PLAN.md`
@@ -125,7 +125,7 @@ its own cluster is a demo with a dependency.
 |---|---|
 | thermal drift on 10-yr silicon skews plans | heartbeat re-benchmark; plan TTL; churn -> re-compile |
 | fp-ordering greedy flips across backends | L3 on conditional streams; resync from checkpoints, not suspicion |
-| compositor/contention stealing stage CPU | headless OurobourOS partitions; scx pinned cores |
+| compositor/contention stealing stage CPU | headless OuroborOS partitions; scx pinned cores |
 | optimizer garbage-in (spec lies) | measured-only admission (Art. 6) |
 | shared btrfs pool fate | qgroup fence + `btrfs send` deltas to backup device |
 | pretending GbE is NVLink | cut cost is a hard term in the objective; TP-style chatter architecturally banned |

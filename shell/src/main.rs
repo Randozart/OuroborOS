@@ -20,7 +20,8 @@ fn banner() {
     println!();
     println!("  HISS — Hierarchical Interactive Shell System");
     println!("  OUROBOROS: One Unified Runtime Orchestrating");
-    println!("             Bunch Of Random Old Servers");
+    println!("             a Bunch Of Random Old Servers");
+    println!("             (the 'a' is silent)");
     println!();
     println!("  The cluster is one machine.");
     println!("  Type ? for cluster summary.");

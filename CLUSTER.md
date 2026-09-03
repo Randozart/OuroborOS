@@ -1,4 +1,4 @@
-# OurobourOS — Complete Specification
+# OuroborOS — Complete Specification
 
 **Version:** 0.1.0-draft
 **Date:** 2026-08-28
@@ -11,7 +11,7 @@
 
 ### The Name
 
-**OurobourOS** — from the Ouroboros, the ancient symbol of a serpent devouring its own tail.
+**OuroborOS** — from the Ouroboros, the ancient symbol of a serpent devouring its own tail.
 
 The snake eats itself and is reborn. Old CPUs are the food. Compute is the rebirth. The system describes itself in Beast, heals itself when nodes die, and never stops. It is self-referential, cyclical, and a little mythological.
 
@@ -38,7 +38,7 @@ The snake eats itself and is reborn. Old CPUs are the food. Compute is the rebir
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│                    OurobourOS Shell                          │
+│                    OuroborOS Shell                          │
 │  Propositional interface │ Context memory │ Dot notation     │
 │  "What is your proposition?"                                │
 └──────────────────────┬──────────────────────────────────────┘
@@ -363,7 +363,7 @@ Poetry mode disabled.
 ## 4. File Structure
 
 ```
-OurobourOS/
+OuroborOS/
 ├── CLUSTER.md                          # This specification
 ├── Cargo.toml                          # Workspace root
 │

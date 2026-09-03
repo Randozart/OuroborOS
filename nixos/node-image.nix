@@ -1,4 +1,4 @@
-# OurobourOS node image config (R2_BRINGUP.md §10 WP5).
+# OuroborOS node image config (R2_BRINGUP.md §10 WP5).
 #
 # Stateless cattle: squashfs root, identity derived from hardware each
 # boot, roles never persisted (Art. 1). getty autologin spawns
@@ -36,7 +36,8 @@ let
 \e[31;1m  >> $line\e[0m
 
   OUROBOROS: One Unified Runtime Orchestrating
-             Bunch Of Random Old Servers
+             a Bunch Of Random Old Servers
+             (the 'a' is silent)
 
   node $node_id · measured admission · secret: $secret_state
   enroll: $enroll_state
@@ -123,7 +124,7 @@ in
   imports = [ ];
 
   # live-ISO shape (dd-able USB; R2_BRINGUP.md §10)
-  image.fileName = lib.mkForce "ourobouros-node.iso";
+  image.fileName = lib.mkForce "ouroboros-node.iso";
   isoImage = {
     makeEfiBootable = true;
     makeUsbBootable = true;
@@ -150,7 +151,7 @@ in
   users.users.ouro = {
     isNormalUser = true;
     group = "ouro";
-    description = "OurobourOS node";
+    description = "OuroborOS node";
     shell = ouro-shim;
     # WP7 debug image only: the flash-time key (OURO partition) is the
     # production path; this baked key lets `ssh` in for journal debugging.
@@ -184,7 +185,7 @@ in
   ];
   # stamp the issue fresh at each boot after brand picks the tagline
   systemd.services.ouro-brand = {
-    description = "OurobourOS boot brand: random tagline + console palette";
+    description = "OuroborOS boot brand: random tagline + console palette";
     before = [ "getty@tty1.service" ];
     wantedBy = [ "multi-user.target" ];
     serviceConfig = {
@@ -195,7 +196,7 @@ in
   };
 
   systemd.services.ouro-probe = {
-    description = "OurobourOS derived identity + measured sleep capability";
+    description = "OuroborOS derived identity + measured sleep capability";
     before = [ "ouro-brand.service" ];
     wantedBy = [ "multi-user.target" ];
     serviceConfig = {
@@ -205,7 +206,7 @@ in
   };
 
   systemd.services.ouro-enroll = {
-    description = "OurobourOS enrollment from OURO-labeled partition";
+    description = "OuroborOS enrollment from OURO-labeled partition";
     before = [ "ouro-brand.service" "sshd.service" ];
     wantedBy = [ "multi-user.target" ];
     serviceConfig = {

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """WP7 QEMU prove-out (R2_BRINGUP.md §10).
 
-Boots the OurobourOS node image under QEMU (TCG), with an OURO-labeled
+Boots the OuroborOS node image under QEMU (TCG), with an OURO-labeled
 enrollment drive attached, and drives the getty-spawned agent over the
 serial line with signed wire traffic.
 
@@ -24,7 +24,7 @@ WORK = os.environ.get("WP7_WORK", "/tmp/opencode/qemu")
 ISO = os.environ.get(
     "WP7_ISO",
     os.path.expanduser(
-        "~/Desktop/Projects/OurobourOS/result/iso/nixos-26.11.20260829.e8be781-x86_64-linux.iso"
+        "~/Desktop/Projects/OuroborOS/result/iso/nixos-26.11.20260829.e8be781-x86_64-linux.iso"
     ),
 )
 SECRET_FILE = os.path.join(WORK, "secret.hex")

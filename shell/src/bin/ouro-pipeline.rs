@@ -58,7 +58,7 @@ fn main() -> Result<()> {
     }
 
     println!(
-        "OurobourOS pipeline: {} stages across {} nodes ({})",
+        "OuroborOS pipeline: {} stages across {} nodes ({})",
         nodes.len(),
         nodes.len(),
         plan.model

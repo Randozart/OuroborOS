@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# OurobourOS node-image flasher (R2_BRINGUP.md §10 WP6).
+# OuroborOS node-image flasher (R2_BRINGUP.md §10 WP6).
 #
 # Usage: tools/flash.sh <image.iso> <device> [enroll-dir]
 #   image.iso   nix build .#node-image result path (ISO, dd-able)

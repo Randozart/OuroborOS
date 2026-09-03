@@ -1,4 +1,4 @@
-# OurobourOS node agent — pure-Rust build, no bitnet-cpp.
+# OuroborOS node agent — pure-Rust build, no bitnet-cpp.
 #
 # The R2 role (stage_setup/step/token/sample) runs on ouro_cluster::infer,
 # which is pure Rust: the `bitnet` feature (C++ llama.cpp via bindgen,
@@ -28,7 +28,7 @@ rustPlatform.buildRustPackage {
   doCheck = false;
 
   meta = with lib; {
-    description = "OurobourOS node agent (getty-shim stdio mode)";
+    description = "OuroborOS node agent (getty-shim stdio mode)";
     license = with licenses; [ mit asl20 ];
     mainProgram = "ouro-agent";
   };

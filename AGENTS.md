@@ -1,8 +1,9 @@
-# OurobourOS — Agent Guidelines
+# OuroborOS — Agent Guidelines
 
 > **OUROBOROS**: **O**ne **U**nified **R**untime **O**rchestrating
-> **B**unch **O**f **R**andom **O**ld **S**ervers.
-> The machine that remakes itself. The tail feeds the head.
+> *a* **B**unch **O**f **R**andom **O**ld **S**ervers.
+> *(The 'a' is silent.)* The machine that remakes itself. The tail
+> feeds the head.
 
 **Docs**: [`docs/HANDBOOK.md`](docs/HANDBOOK.md) (usage) ·
 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) (internals) ·
@@ -20,7 +21,7 @@
 
 ### Workspace Structure
 ```
-OurobourOS/
+OuroborOS/
 ├── cluster/    — Core library (Beast, scheduler, probes, transport)
 ├── shell/      — HISS + control-plane daemons (ouro-ttyd, ouro-registry)
 ├── agent/      — Node daemon (task execution, telemetry)

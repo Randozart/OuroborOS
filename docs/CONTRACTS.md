@@ -1,6 +1,6 @@
 # Contract Registry — the Parity Ladder
 
-The trust spine of OurobourOS (CONSTITUTION.md Art. 10). Any hardware
+The trust spine of OuroborOS (CONSTITUTION.md Art. 10). Any hardware
 re-placement, backend swap, budget recompile, kernel rewrite, or node
 failure/rejoin re-passes the rungs below, bottom-up. **A contract that
 cannot be re-verified blocks the action it guards.**

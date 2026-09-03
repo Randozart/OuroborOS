@@ -1,11 +1,11 @@
-# OurobourOS Constitution
+# OuroborOS Constitution
 
 **The founding document. Everything else — PLAN.md, CLUSTER.md, AGENTS.md — instantiates these articles.**
 
 **Purpose of this document.** To prevent the single most likely way this project
 fails: building a cluster-inference system that quietly inherits the assumptions
 of general-purpose operating systems, then wondering why it is a general-purpose
-operating system wearing a costume. Every design decision in OurobourOS must be
+operating system wearing a costume. Every design decision in OuroborOS must be
 checkable against a named article. Any "can't" must cite physics or a fuse
 (Article 8). "Nobody does it that way" is not a limitation.
 
@@ -44,7 +44,7 @@ article says the machine's ports were never what they seemed.
 A general-purpose kernel is not neutral infrastructure. Every abstraction it
 provides encodes a decision made for someone else's workload:
 
-| Inherited default | Whose need it serves | OurobourOS stance |
+| Inherited default | Whose need it serves | OuroborOS stance |
 |---|---|---|
 | Time-sliced scheduler fairness | multiprogrammed desktops | stage hosts busy-poll pinned cores; workloads are long, cooperative, known |
 | Interrupt-driven I/O | power + responsiveness for unknown devices | hot paths use polled/DMA rings; interrupts are a measured cost, not a given |
@@ -61,7 +61,7 @@ defaults to attack.
 
 ## Article 3 — One Graph, One OS
 
-The central object of OurobourOS is the **cluster resource graph**. Not a
+The central object of OuroborOS is the **cluster resource graph**. Not a
 network of hosts; a single heterogeneous machine described once:
 
 ```
@@ -207,7 +207,7 @@ or **inverted** (made a feature).
 9. Processes are enemies to isolate. → accept inside, attack at edges:
    total trust within the owned cluster, contracts at the boundary.
 10. Boot means reaching a desktop. → invert: boot means joining the graph
-    (a slave's OurobourOS partition exists to register, not to present).
+    (a slave's OuroborOS partition exists to register, not to present).
 11. Failure is an exception. → invert: a node death is a graph edge loss;
     re-partition is the scheduler's ordinary Tuesday (§13 error recovery).
 12. "A distributed AI cluster is an application." → **inversion of

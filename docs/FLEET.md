@@ -26,7 +26,7 @@ direct upgrade — keep the USB adapter as failover.
 
 The AM5 platform swap is not a general "PC upgrade": it unblocks the
 `27B mmap full-Rust forward` TODO (PLAN §16) and gives the orchestrator
-headroom for shard packing. Same project as OurobourOS — treat it as such.
+headroom for shard packing. Same project as OuroborOS — treat it as such.
 
 Working parts list (street prices observed 2026-09-02; verify before buying):
 
@@ -107,7 +107,7 @@ Two corrections to "just dumb boxes":
 | SBC inference box (Pi 5 16GB / Orange Pi 5 / Jetson) | rejected | Pi-class = 2–4 t/s on 7B vs 3060's 40+; Jetson Super is the only real one (~€250 street) and still slower + 8GB |
 | NPU on desktop CPUs | rejected | Ryzen 7000/9000 none, 8000G weak, Arrow Lake thin software; local AI runs on VRAM, not NPU |
 | Unified memory in DIY | rejected | Apple/Strix-Halo only; not in the cards for tower hardware |
-| Custom kernel / "write an OS from scratch" | rejected at kernel level | NVIDIA GSP firmware handshake = decade-scale work; OurobourOS *is* the OS, CachyOS-minimal is substrate (see §6) |
+| Custom kernel / "write an OS from scratch" | rejected at kernel level | NVIDIA GSP firmware handshake = decade-scale work; OuroborOS *is* the OS, CachyOS-minimal is substrate (see §6) |
 | bol.com for parts | rejected except CPUs | markup data in §2 |
 
 ## 6. OS escalation ladder (when "custom OS" is wanted)
@@ -126,4 +126,4 @@ Two corrections to "just dumb boxes":
 - `[ ]` §4 checklist items fold into PLAN §16.2/S5/S6 as verification steps.
 - `[ ]` After head swap: re-run sysinfo (swap should be ~0), then 27B mmap task.
 - Evidence thread this session: sysinfo (free/lspci/lsblk) → bol price survey
-  → OurobourOS repo read → this file.
+  → OuroborOS repo read → this file.
