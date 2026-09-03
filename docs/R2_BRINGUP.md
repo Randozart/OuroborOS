@@ -457,3 +457,15 @@ Notes:
 - The debug SSH key is stripped from the image; tails accept only the
   keys flashed onto their OURO partition.
 - Head firewall: open 9500 (agent task channel) + 9501 (registry).
+
+- 2026-09-03: **FIRST LIGHT.** HP Pavilion (i5-7200U, 8GB) booted the
+  stick, enrolled, joined the bus: `n1 @ 192.168.1.114`, 112+ heartbeat
+  events, signed queries answered over SSH. Zero disk writes. Gauntlet
+  and fixes: flash.sh ×3 (validator, lsblk arithmetic, MBR readback),
+  Secure Boot, Windows Fast Startup + Update boot theft, **nomodeset**
+  (KMS panic boot loop on real HW), head registry simply not running
+  (=> tools/ouro launcher), tail's own NixOS firewall blocking 9500,
+  double-banner from agetty+agent collision with literal `\e` bytes in
+  the issue file. Full report: `docs/FIRST_LIGHT.md`. Batch queued:
+  single banner + real ESC (printf), tail firewall off, then 9500
+  opens and first distributed compute begins.
