@@ -22,7 +22,7 @@ ENROLL=${3:-./enroll}
 [ -f "$IMG" ] || die "image not found: $IMG"
 [ -b "$DEV" ] || die "not a block device: $DEV"
 [ -f "$ENROLL/secret" ] || die "missing $ENROLL/secret (32B hex HMAC secret)"
-grep -Eq '^[0-9a-fA-F]{64}$' "$(tr -d ' \n' < "$ENROLL/secret"; echo)" \
+[[ "$(tr -d ' \n\r' < "$ENROLL/secret")" =~ ^[0-9a-fA-F]{64}$ ]] \
   || die "$ENROLL/secret must be exactly 64 hex chars"
 
 echo "flash: overwriting $DEV with $IMG in 3s — Ctrl+C to abort"
