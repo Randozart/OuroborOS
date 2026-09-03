@@ -130,7 +130,7 @@ Two corrections to "just dumb boxes":
 
 ---
 
-## 5. Fleet wiring — same-shelf layout (decided 2026-09-03)
+## 8. Fleet wiring — same-shelf layout (decided 2026-09-03)
 
 The fleet lives on **one shelf** — that collapses the wiring decision
 tree: DAC cables everywhere (≤3m), no fiber, no across-room runs. The
