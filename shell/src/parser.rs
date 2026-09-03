@@ -127,6 +127,8 @@ pub enum Command {
     Register,
     /// `unregister n3.` — unregister a node
     Unregister { node: String },
+    /// `tasks.` — show task queue status
+    Tasks,
     /// `poetry on.` / `poetry off.`
     Poetry { enabled: bool },
     /// `cluster?` with assignment check
@@ -298,6 +300,9 @@ pub fn interpret(input: &str) -> Command {
             .trim_end_matches('.');
         let node = rest.split_whitespace().next().unwrap_or("").to_string();
         return Command::Unregister { node };
+    }
+    if trimmed == "tasks." || trimmed == "tasks" {
+        return Command::Tasks;
     }
     let tokens = lex(input);
     let stripped = strip_whitespace(tokens);

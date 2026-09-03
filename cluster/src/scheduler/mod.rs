@@ -1,4 +1,5 @@
 pub mod energy_budget;
+pub mod task_queue;
 pub mod workload_class;
 
 use anyhow::Result;
@@ -33,12 +34,13 @@ pub enum ScheduleOutcome {
 pub struct Scheduler {
     pub topology: ClusterTopology,
     pub budget: EnergyBudget,
+    pub queue: task_queue::TaskQueue,
 }
 
 impl Scheduler {
     pub fn new(topology: ClusterTopology) -> Self {
         let budget = EnergyBudget::new(topology.power_budget_watts);
-        Self { topology, budget }
+        Self { topology, budget, queue: task_queue::TaskQueue::new() }
     }
 
     /// Attempt to dispatch a task to the best suitable node.
@@ -55,18 +57,39 @@ impl Scheduler {
                         self.mark_working(&node_id);
                         Ok(ScheduleOutcome::Dispatched { node: node_id })
                     }
-                    BudgetCheck::Exceeded { .. } => Ok(ScheduleOutcome::Queued {
-                        reason: format!(
-                            "energy budget would be exceeded (current {}, requested {})",
-                            self.budget.current_watts, task.estimated_watts
-                        ),
-                    }),
+                    BudgetCheck::Exceeded { .. } => {
+                        self.queue.enqueue(task.clone());
+                        Ok(ScheduleOutcome::Queued {
+                            reason: format!(
+                                "energy budget exceeded — queued (queue depth: {})",
+                                self.queue.len()
+                            ),
+                        })
+                    }
                 }
             }
-            None => Ok(ScheduleOutcome::Queued {
-                reason: "no idle node supports this workload class".to_string(),
-            }),
+            None => {
+                self.queue.enqueue(task.clone());
+                Ok(ScheduleOutcome::Queued {
+                    reason: format!(
+                        "no suitable node — queued (queue depth: {})",
+                        self.queue.len()
+                    ),
+                })
+            }
         }
+    }
+
+    /// Try to dispatch queued tasks (call after a task completes or node joins).
+    pub fn drain_queue(&mut self) -> Vec<(String, ScheduleOutcome)> {
+        let mut results = Vec::new();
+        let tasks: Vec<_> = self.queue.drain();
+        for qt in tasks {
+            if let Ok(outcome) = self.schedule(&qt.task) {
+                results.push((qt.task.name, outcome));
+            }
+        }
+        results
     }
 
     /// Nodes that are idle and structurally capable of the workload.
@@ -257,12 +280,15 @@ impl Scheduler {
             estimated_seconds: 10,
         };
         let outcome = sched.schedule(&task).unwrap();
-        assert_eq!(
-            outcome,
-            ScheduleOutcome::Queued {
-                reason: "energy budget would be exceeded (current 0, requested 50)".to_string()
+        match outcome {
+            ScheduleOutcome::Queued { reason } => {
+                assert!(reason.contains("energy budget exceeded"));
+                assert!(reason.contains("queue depth: 1"));
             }
-        );
+            _ => panic!("expected Queued"),
+        }
+        // Task is now in the queue
+        assert_eq!(sched.queue.len(), 1);
     }
 
     #[test]
@@ -278,12 +304,14 @@ impl Scheduler {
             estimated_seconds: 10,
         };
         let outcome = sched.schedule(&task).unwrap();
-        assert_eq!(
-            outcome,
-            ScheduleOutcome::Queued {
-                reason: "no idle node supports this workload class".to_string()
+        match outcome {
+            ScheduleOutcome::Queued { reason } => {
+                assert!(reason.contains("no suitable node"));
+                assert!(reason.contains("queue depth: 1"));
             }
-        );
+            _ => panic!("expected Queued"),
+        }
+        assert_eq!(sched.queue.len(), 1);
     }
 
     #[test]
@@ -292,5 +320,27 @@ impl Scheduler {
         sched.budget.commit(100);
         sched.complete(100);
         assert_eq!(sched.budget.current_watts, 0);
+    }
+
+    #[test]
+    fn test_drain_queue_dispatches_when_possible() {
+        let mut sched = Scheduler::new(test_topology());
+        // Queue a task (no budget)
+        sched.budget.set_budget(0);
+        let task = Task {
+            name: "t1".to_string(),
+            class: WorkloadClass::SimdFriendly,
+            payload: String::new(),
+            estimated_watts: 10,
+            estimated_seconds: 5,
+        };
+        sched.schedule(&task).unwrap();
+        assert_eq!(sched.queue.len(), 1);
+        // Restore budget and drain
+        sched.budget.set_budget(500);
+        let results = sched.drain_queue();
+        assert_eq!(results.len(), 1);
+        assert!(matches!(&results[0].1, ScheduleOutcome::Dispatched { .. }));
+        assert!(sched.queue.is_empty());
     }
 }

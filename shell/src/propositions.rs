@@ -480,6 +480,21 @@ pub fn handle(
             }
         }
 
+        Command::Tasks => {
+            let entries = scheduler.queue.summary();
+            if entries.is_empty() {
+                return Ok("Task queue: empty.".to_string());
+            }
+            let mut out = format!("Task queue ({}):\n", entries.len());
+            for e in &entries {
+                out.push_str(&format!(
+                    "  {} [{}] age={}s retries={}/3 priority={}\n",
+                    e.name, e.class, e.age_secs, e.retries, e.priority,
+                ));
+            }
+            Ok(out)
+        }
+
         Command::Unknown(input) => Ok(fmt.unknown(&input)),
     }
 }
