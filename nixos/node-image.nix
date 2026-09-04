@@ -8,6 +8,13 @@
 let
   crimson = "DC143C";
 
+  # The serpent — the hand-retouched brand logo
+  # (docs/brand/ascii-logo-ramp-80-retouched.txt), served from the
+  # store so the boot screen shows the machine's face. 40 lines on an
+  # 80x25 console scrolls: the serpent plays as the intro and the
+  # final frame is tagline + measured state (that's the point).
+  ouroLogo = ../docs/brand/ascii-logo-ramp-80-retouched.txt;
+
   # Remap the 16-color console palette slot 1 (red) to crimson so the
   # bare TTY gets true crimson with plain `\e[31m` escapes; SSH
   # sessions get real truecolor.
@@ -35,13 +42,10 @@ let
     # would show ANSI as text (FIRST_LIGHT.md, blocker 10).
     {
       printf '\n'
-      printf '\e[31m   ▄▄▄▄                                        ▄▄▄▄      ▄▄▄▄▄\e[0m\n'
-      printf '\e[31m ▄█▀▀████▄                 █▄                ▄█▀▀████▄  ██▀▀▀▀█▄\e[0m\n'
-      printf '\e[31m ██    ██       ▄          ██          ▄     ██    ██   ▀██▄  ▄▀\e[0m\n'
-      printf '\e[31m ██    ██ ██ ██ ████▄▄███▄ ████▄ ▄███▄ ████▄ ██    ██     ▀██▄▄\e[0m\n'
-      printf '\e[31m ██    ██ ██ ██ ██   ██ ██ ██ ██ ██ ██ ██    ██    ██   ▄   ▀██▄\e[0m\n'
-      printf '\e[31m  ▀████▀ ▄▀██▀█▄█▀  ▄▀███▀▄████▀▄▀███▀▄█▀     ▀████▀    ▀██████▀\e[0m\n'
-      printf '\n'
+      # the serpent, crimson — a whole file, not printf gymnastics
+      printf '\e[31m'
+      cat ${ouroLogo}
+      printf '\e[0m\n'
       printf ' OUROBOROS: One Unified Runtime Orchestrating\n'
       printf '            a Bunch Of Random Old Servers\n'
       printf '\n'

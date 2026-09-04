@@ -22,9 +22,24 @@ const HISS_WORDMARK: &str = "\
   ███    ███   ███     ▄█    ███    ▄█    ███
   ███    █▀    █▀    ▄████████▀   ▄████████▀";
 
+/// The serpent — the hand-retouched brand logo
+/// (docs/brand/ascii-logo-ramp-80-retouched.txt), frozen at compile
+/// time so the shipped binary carries the machine's face.
+const OURO_LOGO: &str = include_str!("../../docs/brand/ascii-logo-ramp-80-retouched.txt");
+
 /// Print the HISS banner. Crimson matches the prompt brand; colour
-/// drops for NO_COLOR or non-TTY output.
-fn banner(color: bool) {
+/// drops for NO_COLOR or non-TTY output. On a real TTY the serpent
+/// rises first (OURO_NO_LOGO=1 suppresses it); piped mode keeps the
+/// compact wordmark so scripts and proves read clean output.
+fn banner(color: bool, tty: bool) {
+    if tty && std::env::var_os("OURO_NO_LOGO").is_none_or(|v| v.is_empty()) {
+        let logo = if color {
+            format!("\x1b[31m{OURO_LOGO}\x1b[0m")
+        } else {
+            OURO_LOGO.to_string()
+        };
+        print!("{logo}");
+    }
     let mark = if color {
         format!("\x1b[1;31m{HISS_WORDMARK}\x1b[0m")
     } else {
@@ -271,9 +286,9 @@ impl Repl {
 }
 
 fn main() -> Result<()> {
-    let color = std::io::stdout().is_terminal()
-        && std::env::var_os("NO_COLOR").is_none_or(|v| v.is_empty());
-    banner(color);
+    let tty = std::io::stdout().is_terminal();
+    let color = tty && std::env::var_os("NO_COLOR").is_none_or(|v| v.is_empty());
+    banner(color, tty);
     let args: Vec<String> = std::env::args().skip(1).collect();
     let nodes_arg = args
         .windows(2)
