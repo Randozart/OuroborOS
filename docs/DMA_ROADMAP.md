@@ -19,7 +19,7 @@ of used silicon.
 | **2. Storage peripheral** | NBD / iSCSI / nvme-tcp: tail SSDs exported as head block devices | ✅ Works on 1GbE today | A tail's SATA bay as a local disk |
 | **3. Memory tier** | NBD-swap / Infiniswap-class: tail RAM as the head's cold-page tier | ✅ Works, slow (~125MB/s on 1GbE — acceptable for *cold* pages) | ~100GB of extra RAM-space per tail |
 | **4. RDMA verbs** | **SoftRoCE** (`rdma_rxe`, in-kernel): registered memory regions, zero-copy, true verbs semantics over ordinary NICs | ✅ Runs on any NIC; CPU-taxed | `ibv_*` DMA reads/writes into tail RAM behind memory windows |
-| **5. Remote GPU** | rCUDA: head-side CUDA calls execute transparently on the tail's GPU | ⚠️ Works on 1GbE, latency-bound | The GTX 1080 as a CUDA device on the head |
+| **5. Remote GPU** | rCUDA: head-side CUDA calls execute transparently on the tail's GPU | ⚠️ Works on 1GbE, latency-bound | The GTX 1060 (HP) + GTX 1080 (laptop) as CUDA devices on the head — 14GB of remote VRAM |
 | **6. Physical DMA** | Used RDMA NICs — Mellanox ConnectX-3 class, **~$25/node** — RoCE at 10–40Gb/s, GPUDirect paths | 💰 Procurement | What HPC clusters actually run: DMA becomes *physical* |
 
 **The pricing note (Art. 6)**: 1GbE is an inherited default, not a fact.
@@ -82,7 +82,66 @@ device* — demonstrated with hardware already owned.
 
 ---
 
-## Procurement (when Tier 6 is scheduled)
+## Provisioning and out-of-band rungs (2026-09-04)
+
+Distilled from the "zero-touch provisioning" thread: the fleet workflow
+should end with *no sticks, no monitors, no fingers on power buttons*.
+Three rungs, honest versions.
+
+### WP-PXE — born from the wire (near)
+
+**NixOS netboot provisioning**: `config.system.build.netbootRamdisk`
++ dnsmasq (DHCP/TFTP) on the head. A tail powers on → PXE → iPXE
+script from the head → kernel + initramfs fetched into RAM → boots
+into the identical stateless node image.
+
+- Kills the last manual fleet step: no USB sticks, no BIOS key mashing
+  (PXE is a one-time boot-order entry per box), zero disk writes
+- Enroll partition semantics change: identity arrives over the wire
+  (head-link + signed admission) instead of the OURO partition — the
+  stick workflow stays for boxes too ancient for PXE
+- Same image, same gates; the QEMU prove grows a netboot variant
+
+### WP-SER — out-of-band power authority (near)
+
+**Serial power relay**: RTS or DTR pin → €0.50 optocoupler → the
+motherboard's 2-pin `PWR_SW` header. Every board on earth has it.
+
+- Short pulse (~100ms) = power on; hold (~4s) = hard cut; pulse again =
+  cold boot. Total out-of-band authority, no WoL dependency on S5 state
+- HISS grammar: `n4.power on | off | reset` — the propositions layer
+  gains a power verb; the serial link is the same USB-UART class we
+  already drive for consoles
+- **Doubles as GENESIS's kill switch**: the watchdog that outranks the
+  wyrm (GENESIS.md §IV). One relay, two constitutions served
+
+### TERNARRAY — the silicon becomes the model (far, after Tier 6)
+
+**FPGA ternary systolic array** — the corrected version of the hype:
+
+Real and worth keeping:
+- Ternary matmul needs **zero multipliers**: `{−1,0,+1}` weights are
+  mux/negate/zero feeding an adder tree — pure LUTs, no DSP slices
+- Block-scale distribution (`d · Σ wᵢ·aᵢ`) eliminates ~97% of FP
+  multiplies — one DSP per block at the tree root
+- Non-byte-aligned quants (3/5/6-bit) are *free*: a 5-bit bus is five
+  wires; no shifting, no masking
+- NF4-class non-linear dequant = one LUT6 per weight, ~0.2ns, zero
+  clock cycles
+
+The corrections (why this is a *long* rung):
+- HDMI-deserializer activation transport on cheap boards is brutal
+  serdes work — Artix-7/ECP5 do 1080p with effort, not casually; the
+  honest transport is the same RDMA plane as Tier 6
+- BRAM cannot hold 2B weights (~0.5GB packed); a DDR controller is
+  mandatory, which means a real dev board, not a €30 module
+- It is still a Von Neumann machine — but a *weight-stationary* one
+  with a bespoke ALU, which for ternary inference is the winning shape
+
+Sequencing: RDMA first (Tier 4–6 gives the fabric), then TERNARRAY as
+a Tier 7 capability class (`fpga-ternary`) riding it.
+
+---
 
 | Item | ~Cost | Notes |
 |------|-------|-------|
