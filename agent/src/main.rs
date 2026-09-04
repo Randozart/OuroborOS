@@ -49,6 +49,20 @@ async fn main() -> Result<()> {
     }
 
     if std::env::args().any(|a| a == "--stdio-tty") {
+        // One process, two mouths: the login wire on stdio AND the TCP
+        // task channel (9500). Found live: shim-only agents never bound
+        // 9500 — the head's execute got connection-refused while the
+        // bus link purred. Stdout is the wire here, so serve_tcp logs
+        // to stderr only.
+        let port: u16 = std::env::var("OURO_PORT")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(DEFAULT_PORT);
+        tokio::spawn(async move {
+            if let Err(e) = serve_tcp(secret, port).await {
+                eprintln!("task channel terminated: {}", e);
+            }
+        });
         let stdin = std::io::stdin();
         let stdout = std::io::stdout();
         serve_stdio(&secret, stdin.lock(), stdout.lock())?;
@@ -61,16 +75,15 @@ async fn main() -> Result<()> {
         .and_then(|s| s.parse().ok())
         .unwrap_or(DEFAULT_PORT);
 
-    let addr = SocketAddr::from(([0, 0, 0, 0], port));
-    let listener = TcpListener::bind(addr).await?;
-
-    println!("ouro-agent listening on {}", addr);
-    println!("  telemetry: collect on connect");
-    println!("  execute:   send JSON task, get JSON result");
-    println!("  heartbeat: every {}s", HEARTBEAT_INTERVAL.as_secs());
-
     let (shutdown_tx, _) = broadcast::channel::<()>(1);
     let shutdown_rx = shutdown_tx.clone();
+
+    // Task channel (daemon mode): the accept loop owns this task.
+    let tcp_handle = tokio::spawn(async move {
+        if let Err(e) = serve_tcp(secret, port).await {
+            eprintln!("task channel terminated: {}", e);
+        }
+    });
 
     // Heartbeat task
     let heartbeat_handle = tokio::spawn(async move {
@@ -102,35 +115,33 @@ async fn main() -> Result<()> {
         let _ = shutdown_handle.send(());
     });
 
-    // Accept connections
-    let mut shutdown_rx_main = shutdown_tx.subscribe();
+    // Wait for background tasks (the accept loop lives in tcp_handle)
+    let _ = tokio::join!(tcp_handle, heartbeat_handle, ctrl_c_handle);
+    println!("ouro-agent stopped.");
+    Ok(())
+}
+
+/// The TCP task channel: bind + accept loop, one authed wire per
+/// connection. Runs in daemon mode AND alongside the getty shim
+/// (--stdio-tty): login keeps its stdio wire, the head gets a task
+/// port. All logs go to stderr — in shim mode stdout IS the wire.
+async fn serve_tcp(secret: Secret, port: u16) -> Result<()> {
+    let addr = SocketAddr::from(([0, 0, 0, 0], port));
+    let listener = TcpListener::bind(addr).await?;
+    eprintln!("ouro-agent task channel on {}", addr);
     loop {
-        tokio::select! {
-            result = listener.accept() => {
-                match result {
-                    Ok((stream, peer)) => {
-                        println!("[connect] {}", peer);
-                        let mut rx = shutdown_tx.subscribe();
-                        tokio::spawn(async move {
-                            handle_connection(secret, stream, peer, &mut rx).await;
-                        });
-                    }
-                    Err(e) => {
-                        eprintln!("[error] accept: {}", e);
-                    }
-                }
+        match listener.accept().await {
+            Ok((stream, peer)) => {
+                eprintln!("[connect] {}", peer);
+                tokio::spawn(async move {
+                    handle_connection(secret, stream, peer).await;
+                });
             }
-            _ = shutdown_rx_main.recv() => {
-                println!("[agent] shutting down listener");
-                break;
+            Err(e) => {
+                eprintln!("[error] accept: {}", e);
             }
         }
     }
-
-    // Wait for background tasks
-    let _ = tokio::join!(heartbeat_handle, ctrl_c_handle);
-    println!("ouro-agent stopped.");
-    Ok(())
 }
 
 /// Handle a single TCP connection.
@@ -143,7 +154,6 @@ async fn handle_connection(
     secret: Secret,
     stream: tokio::net::TcpStream,
     peer: SocketAddr,
-    _rx: &mut broadcast::Receiver<()>,
 ) {
     let (reader, mut writer) = stream.into_split();
     let mut lines = BufReader::new(reader).lines();
@@ -165,7 +175,7 @@ async fn handle_connection(
         }
     }
 
-    println!("[disconnect] {}", peer);
+    eprintln!("[disconnect] {}", peer);
 }
 
 /// Verify + process one line, produce one signed response line.
@@ -246,6 +256,33 @@ fn process_message(msg: &str) -> String {
                     .unwrap_or_default();
                 out.push_str(&format!("\nnic {name} carrier={carrier} mac={mac}"));
             }
+        }
+        // OpenCL census: vendor registrations + render nodes — the
+        // compute path's own confession (found live: the loader saw
+        // zero ICDs because the agent env had no OCL_ICD_VENDORS and
+        // NixOS keeps ICDs under /run/opengl-driver).
+        out.push_str("\n--- opencl ---");
+        out.push_str(&format!(
+            "\nOCL_ICD_VENDORS={}",
+            std::env::var("OCL_ICD_VENDORS").unwrap_or_else(|_| "(unset)".into())
+        ));
+        for dir in ["/etc/OpenCL/vendors", "/run/opengl-driver/etc/OpenCL/vendors"] {
+            match std::fs::read_dir(dir) {
+                Ok(entries) => {
+                    for e in entries.flatten() {
+                        out.push_str(&format!("\nicd {}", e.path().display()));
+                    }
+                }
+                Err(_) => out.push_str(&format!("\nicd-dir {dir}: absent")),
+            }
+        }
+        match std::fs::read_dir("/dev/dri") {
+            Ok(entries) => {
+                for e in entries.flatten() {
+                    out.push_str(&format!("\ndri {}", e.file_name().to_string_lossy()));
+                }
+            }
+            Err(_) => out.push_str("\ndri /dev/dri: absent"),
         }
         let out = out.replace('\n', " | ");
         // tty line discipline truncates ~4KB canonical lines; keep the

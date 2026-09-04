@@ -327,6 +327,13 @@ in
   # and reports them over the bus (GPU_CLAIM.md, WP-G2).
   hardware.graphics.extraPackages = [ pkgs.intel-compute-runtime ];
 
+  # OpenCL loader discovery: the ocl-icd loader defaults to
+  # /etc/OpenCL/vendors, but NixOS installs ICD registrations under
+  # /run/opengl-driver/etc/OpenCL/vendors. The agent runs from the
+  # getty shim — no login profile — so the variable must live in the
+  # system environment (found live: Platform::list error 10, zero ICDs).
+  environment.variables.OCL_ICD_VENDORS = "/run/opengl-driver/etc/OpenCL/vendors";
+
   # NVIDIA: the HP Pavilion carries a GTX 1060 6GB (Pascal) — the
   # driver makes nvidia-smi (and the OpenCL ICD) exist, which is all
   # detect_gpus() and the agent's OpenCL path need (GPU_CLAIM.md
