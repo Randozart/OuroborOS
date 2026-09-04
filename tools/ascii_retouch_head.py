@@ -23,31 +23,29 @@ BASE = Path("docs/brand/ascii-logo-ramp-80.txt")
 OUT = Path("docs/brand/ascii-logo-ramp-80-retouched.txt")
 
 EDITS = [
-    # --- eye: negative-space core + ░ rim (source: white slit in skull)
+    # --- eye: a tilted SLIT, not a hole — 3 connected dark runs
+    #     (row1 col41 -> row2 cols39-40 = '/' lean, per the source
+    #     parallelogram); ░ rim left, ▓ stays as the bright right edge.
+    #     Row 3 untouched (v1's rim there read as a second smudge).
+    (1, 41, "█", " "),
     (2, 38, "█", "░"),
     (2, 39, "▒", " "),
     (2, 40, "▒", " "),
-    (2, 41, "▓", " "),
-    (2, 42, "█", "░"),
-    (3, 39, "█", "░"),
-    (3, 40, "█", "▒"),
-    (3, 41, "█", "░"),
-    # --- mouth: the bite slash — sparse dither, widening wedge below
-    (4, 41, "▒", "░"),
-    (4, 42, "▒", " "),
-    (4, 43, "▒", "░"),
-    (4, 44, "▒", " "),
+    # --- mouth: ONE continuous descending slit — snout rows stay solid
+    #     (v1 punched holes above the true slash). Core path:
+    #     row4 col41 -> row5 cols41-42 -> row6 cols45-46 -> the open
+    #     wedge / bite point. ░ shoulders keep it a line, not a crater.
+    (4, 41, "▒", " "),
+    (4, 42, "▒", "░"),
     (5, 40, "▒", "░"),
     (5, 41, "░", " "),
     (5, 42, "▒", " "),
     (5, 43, "▒", "░"),
-    (6, 45, "▓", "░"),
+    (6, 44, "▓", "░"),
+    (6, 45, "▓", " "),
     (6, 46, "▒", " "),
     (6, 47, "▒", "░"),
-    (6, 48, "░", " "),
-    (7, 40, "░", " "),
-    (7, 42, "▒", " "),
-    (7, 44, "▒", " "),
+    # row 7 wedge: converter already renders it open — untouched.
 ]
 
 
