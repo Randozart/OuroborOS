@@ -28,7 +28,8 @@ rustPlatform.buildRustPackage {
   buildAndTestSubdir = "agent";
   buildNoDefaultFeatures = true;
   buildFeatures = [ "gpu" ];
-  nativeBuildInputs = [ ocl-icd ];
+  # ocl-icd in buildInputs: the setup hook feeds -lOpenCL to the linker
+  buildInputs = [ ocl-icd ];
 
   # tests run in the sandbox without model files; the bitnet-gated ones
   # are compiled out with no-default-features
