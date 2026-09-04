@@ -11,9 +11,12 @@ use ouro_hiss::formatter::Formatter;
 use ouro_hiss::parser::interpret;
 use ouro_hiss::propositions;
 
-/// The HISS wordmark (docs/brand/hiss-ascii.txt), frozen at compile time.
-const HISS_WORDMARK: &str = "\
-   ▄█    █▄     ▄█     ▄████████    ▄████████
+/// The HISS wordmark (docs/brand/hiss-ascii.txt), frozen at compile
+/// time. NOTE: the first art row lives on the opening-quote line — a
+/// `\`-continuation here would strip its leading spaces (Rust skips
+/// whitespace after a line continuation), shifting the top of the
+/// wordmark left. Drift from the asset is a test failure.
+const HISS_WORDMARK: &str = "   ▄█    █▄     ▄█     ▄████████    ▄████████
   ███    ███   ███    ███    ███   ███    ███
   ███    ███   ███▌   ███    █▀    ███    █▀
  ▄███▄▄▄▄███▄▄ ███▌   ███          ███
@@ -108,13 +111,11 @@ fn compose_side_by_side(logo: &str, text: &[String], color: bool) -> String {
 /// Print the HISS banner. Interactive TTY: serpent left, text right on
 /// wide terminals (>=140 cols), stacked below that; OURO_NO_LOGO=1 or
 /// piped output keeps the compact wordmark so scripts read clean.
+/// The text column prints ONCE in every mode — the wordmark rows are
+/// colored in place (a separate colored copy used to double-print it).
 fn banner(color: bool, tty: bool) {
     let text = banner_text_lines();
-    let mark = if color {
-        format!("\x1b[1;31m{HISS_WORDMARK}\x1b[0m")
-    } else {
-        HISS_WORDMARK.to_string()
-    };
+    let wm = wordmark_rows();
     let mut lines: Vec<String> = Vec::new();
 
     if tty && std::env::var_os("OURO_NO_LOGO").is_none_or(|v| v.is_empty()) {
@@ -131,8 +132,13 @@ fn banner(color: bool, tty: bool) {
         };
         lines.push(logo);
     }
-    lines.push(mark);
-    lines.extend(text);
+    for (i, row) in text.iter().enumerate() {
+        if color && i < wm && !row.is_empty() {
+            lines.push(format!("\x1b[1;31m{row}\x1b[0m"));
+        } else {
+            lines.push(row.clone());
+        }
+    }
     println!("{}", lines.join("\n"));
     println!();
 }
@@ -603,5 +609,43 @@ mod banner_tests {
         let out = compose_side_by_side(OURO_LOGO, &tiny, false);
         assert_eq!(out.lines().count(), OURO_LOGO.lines().count());
         assert!(out.contains("one"));
+    }
+
+    #[test]
+    fn test_wordmark_matches_brand_asset() {
+        // transcription-drift gate: the const must equal the brand
+        // asset's content rows (trailing trim), so edits happen in one
+        // place — or fail loudly here
+        let asset: Vec<String> = include_str!("../../docs/brand/hiss-ascii.txt")
+            .lines()
+            .map(|l| l.trim_end().to_string())
+            .collect();
+        let content: Vec<&String> = asset.iter().filter(|l| !l.is_empty()).collect();
+        let ours: Vec<&str> = HISS_WORDMARK.lines().collect();
+        assert_eq!(ours.len(), content.len(), "row count drifted");
+        for (i, (a, b)) in ours.iter().zip(content.iter()).enumerate() {
+            assert_eq!(a, b, "wordmark row {i} drifted from docs/brand/hiss-ascii.txt");
+        }
+    }
+
+    #[test]
+    fn test_wordmark_top_keeps_leading_spaces() {
+        // regression: a `\`-continuation in the const stripped the
+        // first row's whitespace (Rust skips it after a line
+        // continuation) — the top of the wordmark shifted left
+        let first = banner_text_lines().first().unwrap().clone();
+        assert!(
+            first.starts_with("   ▄█"),
+            "top row lost its indent: {first:?}"
+        );
+    }
+
+    #[test]
+    fn test_text_block_has_exactly_one_wordmark() {
+        // regression: banner() used to push a colored copy AND the
+        // text block (which starts with the wordmark) — double print
+        let text = banner_text_lines();
+        let tops = text.iter().filter(|l| l.contains("▄█    █▄")).count();
+        assert_eq!(tops, 1, "wordmark must appear exactly once");
     }
 }
