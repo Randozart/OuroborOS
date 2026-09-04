@@ -6,10 +6,12 @@
 
 ## What happened
 
-An **HP Pavilion** (i5-7200U, 2C/4T, 8GB DDR4, eno1 ethernet) booted the
-OuroborOS node image from the flashed SanDisk stick, enrolled from the
-OURO partition, joined the head's registry bus across the LAN, and
-heartbeat-telemetred for the rest of the evening:
+An **HP Pavilion Power** (i5-7200U, 2C/4T, 8GB DDR4, eno1 ethernet,
+**Intel HD 620 iGPU + NVIDIA GTX 1060 6GB dGPU** — GPU_CLAIM.md WP-N
+claims both) booted the OuroborOS node image from the flashed SanDisk
+stick, enrolled from the OURO partition, joined the head's registry
+bus across the LAN, and heartbeat-telemetred for the rest of the
+evening:
 
 ```
 n1: nixos @ 192.168.1.114

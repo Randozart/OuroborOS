@@ -126,21 +126,64 @@ pub struct GpuPool {
     pub adapter_name: String,
 }
 
+/// Every (platform, device) pair OpenCL exposes, labeled
+/// "device [platform]" — the candidate list for W1 pinning.
+fn all_devices() -> Result<Vec<(ocl::Platform, ocl::Device, String)>> {
+    let mut out = Vec::new();
+    for p in ocl::Platform::list() {
+        let pname = p.name().unwrap_or_else(|_| "unknown".into());
+        for d in ocl::Device::list_all(p).unwrap_or_default() {
+            let dname = d.name().unwrap_or_else(|_| "unknown".into());
+            out.push((p, d, format!("{dname} [{pname}]")));
+        }
+    }
+    Ok(out)
+}
+
+/// Pure device selection over labels (testable without a GPU):
+/// explicit index wins, then name substring (case-insensitive), then
+/// first-found. No match = error listing every candidate, never a
+/// silent pick (ouro-wgpu W1 pattern).
+fn select_label(labels: &[String], index: Option<usize>, name: Option<&str>) -> Result<usize> {
+    if let Some(i) = index {
+        return labels.get(i).map(|_| i).ok_or_else(|| {
+            anyhow::anyhow!("OURO_GPU_INDEX={i} out of range ({} devices)", labels.len())
+        });
+    }
+    if let Some(want) = name {
+        let needle = want.to_lowercase();
+        return labels
+            .iter()
+            .position(|l| l.to_lowercase().contains(&needle))
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "OURO_GPU_NAME={want:?} matches none of [{}]",
+                    labels.join(", ")
+                )
+            });
+    }
+    Ok(0)
+}
+
 impl GpuPool {
-    /// Init on the default OpenCL platform/device; OURO_GPU_INDEX pins
-    /// a device when several exist. Errors cleanly when no ICD runtime
-    /// is installed (CPU-only tails) — callers degrade to CPU, not panic.
+    /// Init on the picked OpenCL platform/device — OURO_GPU_NAME pins a
+    /// device by substring (the tail chooses 1060 vs HD 620), or
+    /// OURO_GPU_INDEX as the explicit index; default is first-found.
+    /// Errors cleanly when no ICD runtime is installed (CPU-only tails)
+    /// — callers degrade to CPU, not panic.
     pub fn new() -> Result<Self> {
-        let platform = ocl::Platform::first().context("no OpenCL platform (ICD missing?)")?;
-        let device = if let Ok(idx) = std::env::var("OURO_GPU_INDEX") {
-            let i: usize = idx
-                .parse()
-                .with_context(|| format!("OURO_GPU_INDEX={idx:?} not a number"))?;
-            ocl::Device::by_idx_wrap(platform, i)
-                .with_context(|| format!("OURO_GPU_INDEX={i} out of range"))?
-        } else {
-            ocl::Device::first(platform)?
-        };
+        let devices = all_devices()?;
+        if devices.is_empty() {
+            bail!("no OpenCL devices (ICD missing or no compute driver)");
+        }
+        let labels: Vec<String> = devices.iter().map(|(_, _, l)| l.clone()).collect();
+        let index = select_label(
+            &labels,
+            std::env::var("OURO_GPU_INDEX").ok().and_then(|s| s.parse().ok()),
+            std::env::var("OURO_GPU_NAME").ok().as_deref(),
+        )?;
+        let (platform, device, label) = devices[index].clone();
+
         let pro_que = ProQue::builder()
             .src(KERNEL)
             .platform(platform)
@@ -148,12 +191,7 @@ impl GpuPool {
             .dims(1)
             .build()
             .context("OpenCL init failed")?;
-        let adapter_name = format!(
-            "{} [{}]",
-            device.name().unwrap_or_else(|_| "unknown".into()),
-            platform.name().unwrap_or_else(|_| "unknown".into()),
-        );
-        Ok(Self { pro_que, mats: HashMap::new(), adapter_name })
+        Ok(Self { pro_que, mats: HashMap::new(), adapter_name: label })
     }
 
     /// Repack 210-byte Q6_K blocks into 212-byte (53 u32) rows and
@@ -323,6 +361,40 @@ mod tests {
         let v = vec![1.0, 2.0, 3.0];
         assert!((cosine(&v, &v) - 1.0).abs() < 1e-12);
         assert_eq!(cosine(&v, &[-v[0], -v[1], -v[2]]), -1.0);
+    }
+
+    fn device_labels() -> Vec<String> {
+        vec![
+            "NVIDIA GeForce GTX 1060 6GB [NVIDIA CUDA]".into(),
+            "Intel(R) HD Graphics 620 [Intel(R) OpenCL HD Graphics]".into(),
+            "NVIDIA GeForce RTX 3060 [NVIDIA CUDA]".into(),
+        ]
+    }
+
+    #[test]
+    fn test_select_default_first() {
+        assert_eq!(select_label(&device_labels(), None, None).unwrap(), 0);
+    }
+
+    #[test]
+    fn test_select_by_name_substring_case_insensitive() {
+        // the two-GPU-tail case: pin either silicon deterministically
+        assert_eq!(select_label(&device_labels(), None, Some("intel")).unwrap(), 1);
+        assert_eq!(select_label(&device_labels(), None, Some("1060")).unwrap(), 0);
+        assert_eq!(select_label(&device_labels(), None, Some("rtx 30")).unwrap(), 2);
+    }
+
+    #[test]
+    fn test_select_by_index_wins() {
+        assert_eq!(select_label(&device_labels(), Some(2), Some("intel")).unwrap(), 2);
+    }
+
+    #[test]
+    fn test_select_errors_list_candidates() {
+        let err = select_label(&device_labels(), Some(9), None).unwrap_err().to_string();
+        assert!(err.contains("out of range") && err.contains("3 devices"));
+        let err = select_label(&device_labels(), None, Some("titan")).unwrap_err().to_string();
+        assert!(err.contains("matches none of") && err.contains("GTX 1060"));
     }
 
     #[test]

@@ -3,7 +3,7 @@
 # Stateless cattle: squashfs root, identity derived from hardware each
 # boot, roles never persisted (Art. 1). getty autologin spawns
 # `ouro-agent --stdio-tty` — a booted node with a login joins the graph.
-{ lib, pkgs, ouro-agent, ... }:
+{ lib, pkgs, config, ouro-agent, ... }:
 
 let
   crimson = "DC143C";
@@ -252,6 +252,22 @@ in
   # tails with Intel iGPUs. The agent detects GPUs via detect_gpus()
   # and reports them over the bus (GPU_CLAIM.md, WP-G2).
   hardware.graphics.extraPackages = [ pkgs.intel-compute-runtime ];
+
+  # NVIDIA: the HP Pavilion carries a GTX 1060 6GB (Pascal) — the
+  # driver makes nvidia-smi (and the OpenCL ICD) exist, which is all
+  # detect_gpus() and the agent's OpenCL path need (GPU_CLAIM.md
+  # WP-N2). Proprietary module: Pascal predates the open kernel
+  # module (Turing+). Headless compute — no modesetting, no X runs;
+  # nomodeset above stays (NVIDIA compute is KMS-free). No
+  # finegrained RTD3 on Pascal — the 1060 idles on standard PCI PM.
+  nixpkgs.config.allowUnfree = true; # the driver is unfreeRedistributable
+  services.xserver.videoDrivers = [ "nvidia" ]; # triggers the module; no X
+  hardware.nvidia = {
+    open = false;
+    modesetting.enable = false;
+    nvidiaSettings = false;
+    package = config.boot.kernelPackages.nvidiaPackages.production;
+  };
   services.getty = {
     autologinUser = "ouro";
     # NO -f issue here: the agent's isatty banner is the only banner
