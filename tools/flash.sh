@@ -28,6 +28,15 @@ ENROLL=${3:-./enroll}
 echo "flash: overwriting $DEV with $IMG in 3s — Ctrl+C to abort"
 sleep 3
 
+# 0. free the stick: desktop environments auto-mount inserted media and
+# sfdisk refuses a busy disk ("This disk is currently in use") — unmount
+# whatever hangs off the target first (script runs under sudo).
+while IFS= read -r mp; do
+    [ -n "$mp" ] || continue
+    echo "flash: unmounting $mp (auto-mounted media)"
+    umount "$mp" 2>/dev/null || true
+done < <(lsblk -no MOUNTPOINT "$DEV" 2>/dev/null)
+
 # 1. image
 dd if="$IMG" of="$DEV" bs=4M status=progress conv=fsync
 

@@ -161,9 +161,12 @@ fn handle_register(
     let Some(tel) = parse_telemetry(json) else {
         return "err bad-json".to_string();
     };
-    // Idempotent per IP: same box re-registering keeps its id and just
-    // refreshes the live profile + last_seen.
+    // Idempotent per IP: same box re-registering keeps its id, refreshes
+    // the live profile + last_seen, and reconciles hardware facts (the
+    // entry must never stay frozen at first boot — GPU_CLAIM verification
+    // depends on a reflashed tail updating its own record).
     if let Some(id) = reg.find_by_ip(peer_ip) {
+        reg.refresh_entry(&id, &tel.to_node_info(peer_ip));
         let events = reg.heartbeat(&id, tel.power_watts, tel.temp_c, tel.load_avg, tel.status());
         recovery.process_events(&events);
         recovery.report_success(&id);
@@ -187,6 +190,10 @@ fn handle_heartbeat(
         // Unknown node heartbeating: tell it to register.
         return "unknown".to_string();
     };
+    // Heartbeats carry the full telemetry too — reconcile hardware
+    // facts so a reflashed tail's new silicon lands within one beat,
+    // no reboot-of-the-bus required.
+    reg.refresh_entry(&id, &tel.to_node_info(peer_ip));
     let events = reg.heartbeat(&id, tel.power_watts, tel.temp_c, tel.load_avg, tel.status());
     recovery.process_events(&events);
     recovery.report_success(&id);

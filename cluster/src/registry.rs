@@ -151,6 +151,75 @@ impl Registry {
         (id, events)
     }
 
+    /// Reconcile entry facts against current telemetry. Hardware truth
+    /// (gpu/cpu/ram/simd) comes from the LATEST registration — a node
+    /// that reappears with new silicon updates its record instead of
+    /// keeping first-boot facts frozen forever (found live: the HP
+    /// re-registered with a 1060 and the bus kept saying none).
+    /// Emits an audit event + persists on change. Returns whether
+    /// anything changed (idempotent when telemetry is stable).
+    pub fn refresh_entry(&mut self, id: &str, info: &NodeInfo) -> bool {
+        let mut changed = false;
+        {
+            let Some(record) = self.nodes.get_mut(id) else {
+                return false;
+            };
+            let e = &mut record.entry;
+            let (gpu_present, gpu_model, gpu_vram) = info.gpus.first().map_or_else(
+                || (false, String::new(), 0),
+                |g| (true, g.model.clone(), g.vram_mib),
+            );
+            if e.has_gpu != gpu_present {
+                e.has_gpu = gpu_present;
+                changed = true;
+            }
+            if e.gpu_model != gpu_model {
+                e.gpu_model = gpu_model;
+                changed = true;
+            }
+            if e.gpu_vram_mib != gpu_vram {
+                e.gpu_vram_mib = gpu_vram;
+                changed = true;
+            }
+            if e.cpu_model != info.cpu.model {
+                e.cpu_model = info.cpu.model.clone();
+                changed = true;
+            }
+            if e.cores != info.cpu.cores {
+                e.cores = info.cpu.cores;
+                changed = true;
+            }
+            if e.threads != info.cpu.threads {
+                e.threads = info.cpu.threads;
+                changed = true;
+            }
+            if e.ram_mib != info.memory.total_mib {
+                e.ram_mib = info.memory.total_mib;
+                changed = true;
+            }
+            if e.has_avx2 != info.cpu.has_avx2 {
+                e.has_avx2 = info.cpu.has_avx2;
+                changed = true;
+            }
+            if e.has_avx != info.cpu.has_avx {
+                e.has_avx = info.cpu.has_avx;
+                changed = true;
+            }
+            if e.has_sse42 != info.cpu.has_sse42 {
+                e.has_sse42 = info.cpu.has_sse42;
+                changed = true;
+            }
+        }
+        if changed {
+            self.events.push(Event::NodeUpdated {
+                node_id: id.to_string(),
+                fields: vec!["hardware".into()],
+            });
+            let _ = self.save();
+        }
+        changed
+    }
+
     /// Update a node's live state from telemetry. Returns events.
     pub fn heartbeat(
         &mut self,
@@ -316,6 +385,38 @@ mod tests {
             status: crate::probe::NodeStatus::Idle,
             gpus: Vec::new(),
         }
+    }
+
+    #[test]
+    fn test_refresh_entry_reconciles_hardware() {
+        let mut reg = Registry::new();
+        let (id, _) = reg.register(&test_info("hp", "192.168.1.114"));
+        assert!(!reg.nodes[&id].entry.has_gpu);
+
+        // the tail reappears with a 1060 (reflashed image)
+        let mut info = test_info("hp", "192.168.1.114");
+        info.gpus = vec![crate::probe::gpu::GpuInfo {
+            vendor: "nvidia".into(),
+            model: "NVIDIA GeForce GTX 1060 6GB".into(),
+            vram_mib: 6144,
+            driver: "nvidia".into(),
+            compute_cap: String::new(),
+            vulkan_api: String::new(),
+        }];
+        info.cpu.cores = 2;
+        info.cpu.threads = 4;
+        assert!(reg.refresh_entry(&id, &info));
+        let e = &reg.nodes[&id].entry;
+        assert!(e.has_gpu);
+        assert_eq!(e.gpu_model, "NVIDIA GeForce GTX 1060 6GB");
+        assert_eq!(e.gpu_vram_mib, 6144);
+        // audit event emitted
+        assert!(matches!(
+            reg.events.last(),
+            Some(Event::NodeUpdated { fields, .. }) if fields.contains(&"hardware".to_string())
+        ));
+        // idempotent when telemetry is stable
+        assert!(!reg.refresh_entry(&id, &info));
     }
 
     #[test]

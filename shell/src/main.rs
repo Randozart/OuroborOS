@@ -27,32 +27,113 @@ const HISS_WORDMARK: &str = "\
 /// time so the shipped binary carries the machine's face.
 const OURO_LOGO: &str = include_str!("../../docs/brand/ascii-logo-ramp-80-retouched.txt");
 
-/// Print the HISS banner. Crimson matches the prompt brand; colour
-/// drops for NO_COLOR or non-TTY output. On a real TTY the serpent
-/// rises first (OURO_NO_LOGO=1 suppresses it); piped mode keeps the
-/// compact wordmark so scripts and proves read clean output.
-fn banner(color: bool, tty: bool) {
-    if tty && std::env::var_os("OURO_NO_LOGO").is_none_or(|v| v.is_empty()) {
-        let logo = if color {
-            format!("\x1b[31m{OURO_LOGO}\x1b[0m")
-        } else {
-            OURO_LOGO.to_string()
-        };
-        print!("{logo}");
+const LOGO_WIDTH: usize = 80;
+const SIDE_BY_SIDE_MIN_COLS: usize = 140;
+
+/// Terminal width of stdout, via TIOCGWINSZ (libc is already in the
+/// tree; no terminal-size crate needed for one ioctl).
+fn terminal_cols() -> Option<usize> {
+    #[repr(C)]
+    struct WinSize {
+        rows: u16,
+        cols: u16,
+        xpix: u16,
+        ypix: u16,
     }
+    let mut ws = WinSize { rows: 0, cols: 0, xpix: 0, ypix: 0 };
+    let rc = unsafe { libc::ioctl(1, libc::TIOCGWINSZ, &mut ws) };
+    (rc == 0 && ws.cols > 0).then_some(ws.cols as usize)
+}
+
+/// The text column: wordmark, name, backronym, the two hints.
+fn banner_text_lines() -> Vec<String> {
+    let mut v: Vec<String> = HISS_WORDMARK.lines().map(String::from).collect();
+    v.push(String::new());
+    v.push("  HISS — Hierarchical Interactive Shell System".into());
+    v.push("  OUROBOROS: One Unified Runtime Orchestrating".into());
+    v.push("             a Bunch Of Random Old Servers".into());
+    v.push(String::new());
+    v.push("  The cluster is one machine.".into());
+    v.push("  Type ? for the cluster summary, help for commands.".into());
+    v
+}
+
+fn wordmark_rows() -> usize {
+    HISS_WORDMARK.lines().count()
+}
+
+/// Logo left, text right — text vertically centered against the 40
+/// logo rows. Width math runs on PLAIN lines; color is applied per
+/// segment after composition (coloring first would break alignment).
+fn compose_side_by_side(logo: &str, text: &[String], color: bool) -> String {
+    let logo_lines: Vec<&str> = logo.lines().collect();
+    let rows = logo_lines.len();
+    let top = rows.saturating_sub(text.len()) / 2;
+    let wm = wordmark_rows();
+    let mut out = String::new();
+    for (r, l) in logo_lines.iter().enumerate() {
+        let padded = format!("{:<width$}", l, width = LOGO_WIDTH);
+        let t_ref = r.checked_sub(top).and_then(|i| text.get(i));
+        let mut line = String::new();
+        if color {
+            line.push_str("\x1b[31m");
+        }
+        line.push_str(&padded);
+        if color {
+            line.push_str("\x1b[0m");
+        }
+        match t_ref {
+            Some(t) if !t.is_empty() => {
+                let is_wordmark = r - top < wm;
+                if color && is_wordmark {
+                    line.push_str("  \x1b[1;31m");
+                } else {
+                    line.push_str("  ");
+                }
+                line.push_str(t);
+                if color && is_wordmark {
+                    line.push_str("\x1b[0m");
+                }
+            }
+            _ => {
+                line.truncate(line.trim_end().len());
+            }
+        }
+        out.push_str(&line);
+        out.push('\n');
+    }
+    out
+}
+
+/// Print the HISS banner. Interactive TTY: serpent left, text right on
+/// wide terminals (>=140 cols), stacked below that; OURO_NO_LOGO=1 or
+/// piped output keeps the compact wordmark so scripts read clean.
+fn banner(color: bool, tty: bool) {
+    let text = banner_text_lines();
     let mark = if color {
         format!("\x1b[1;31m{HISS_WORDMARK}\x1b[0m")
     } else {
         HISS_WORDMARK.to_string()
     };
-    println!("{mark}");
-    println!();
-    println!("  HISS — Hierarchical Interactive Shell System");
-    println!("  OUROBOROS: One Unified Runtime Orchestrating");
-    println!("             a Bunch Of Random Old Servers");
-    println!();
-    println!("  The cluster is one machine.");
-    println!("  Type ? for the cluster summary, help for commands.");
+    let mut lines: Vec<String> = Vec::new();
+
+    if tty && std::env::var_os("OURO_NO_LOGO").is_none_or(|v| v.is_empty()) {
+        let wide = terminal_cols().map(|c| c >= SIDE_BY_SIDE_MIN_COLS).unwrap_or(false);
+        if wide {
+            print!("{}", compose_side_by_side(OURO_LOGO, &text, color));
+            println!();
+            return;
+        }
+        let logo = if color {
+            format!("\x1b[31m{}\x1b[0m", OURO_LOGO.trim_end())
+        } else {
+            OURO_LOGO.trim_end().to_string()
+        };
+        lines.push(logo);
+    }
+    lines.push(mark);
+    lines.extend(text);
+    println!("{}", lines.join("\n"));
     println!();
 }
 
@@ -471,5 +552,56 @@ mod tests {
         let cmd = interpret("n1");
         let out = propositions::handle(cmd, &mut topo, &mut sched, &mut ctx, &mut fmt, &config, &mut recovery).unwrap();
         assert_eq!(out, "n1 selected.");
+    }
+}
+
+#[cfg(test)]
+mod banner_tests {
+    use super::*;
+
+    fn text_block() -> Vec<String> {
+        banner_text_lines()
+    }
+
+    #[test]
+    fn test_compose_row_count_and_gutter() {
+        let out = compose_side_by_side(OURO_LOGO, &text_block(), false);
+        let rows: Vec<&str> = out.lines().collect();
+        assert_eq!(rows.len(), OURO_LOGO.lines().count());
+        // the HISS info line lands after the 80-col cell + 2-space gutter
+        let line = rows
+            .iter()
+            .copied()
+            .find(|r| r.contains("HISS — Hierarchical"))
+            .unwrap();
+        assert!(line.len() > LOGO_WIDTH + 2);
+        assert_eq!(&line[LOGO_WIDTH..LOGO_WIDTH + 2], "  ");
+    }
+
+    #[test]
+    fn test_text_vertically_centered() {
+        let out = compose_side_by_side(OURO_LOGO, &text_block(), false);
+        let rows: Vec<&str> = out.lines().collect();
+        // first wordmark row (contains the ▄ of ▄█) sits at the pad offset
+        let first_text_row = rows.iter().position(|r| r.contains('▄')).unwrap();
+        let expected_top = (OURO_LOGO.lines().count() - text_block().len()) / 2;
+        assert_eq!(first_text_row, expected_top);
+    }
+
+    #[test]
+    fn test_color_applied_after_composition() {
+        let plain = compose_side_by_side(OURO_LOGO, &text_block(), false);
+        assert!(!plain.contains('\x1b'));
+        let colored = compose_side_by_side(OURO_LOGO, &text_block(), true);
+        assert!(colored.contains("\x1b[31m"));
+        assert!(colored.contains("\x1b[1;31m")); // wordmark rows
+    }
+
+    #[test]
+    fn test_short_text_block_centers_without_underflow() {
+        let tiny = vec!["one".to_string()];
+        let out = compose_side_by_side(OURO_LOGO, &tiny, false);
+        assert_eq!(out.lines().count(), OURO_LOGO.lines().count());
+        assert!(out.contains("one"));
     }
 }
