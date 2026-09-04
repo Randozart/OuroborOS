@@ -2,16 +2,22 @@ use anyhow::Result;
 use ouro_cluster::beast::topology::ClusterTopology;
 use ouro_cluster::scheduler::{ScheduleOutcome, Scheduler, Task};
 use ouro_cluster::scheduler::workload_class::WorkloadClass;
+use ouro_cluster::transport::auth;
 
 use crate::context::Context;
 use crate::formatter::{Formatter, NodeDisplay};
 use crate::parser::Command;
+use crate::registry_client::{self, RegistryNode, RegistryStatus};
 
 /// Configuration for shell command handling.
 pub struct ShellConfig {
     pub topology_file: String,
     pub node_addrs: Vec<(String, String)>,
     pub shard_map: String,
+    /// Registry daemon (head bus) address — the live graph source.
+    /// Queries prefer it and fall back to the static topology when
+    /// unreachable (OURO_REGISTRY env overrides).
+    pub registry_addr: String,
 }
 
 impl ShellConfig {
@@ -20,6 +26,7 @@ impl ShellConfig {
             topology_file: "cluster.beast".to_string(),
             node_addrs: Vec::new(),
             shard_map: "shards/shard_map.json".to_string(),
+            registry_addr: "127.0.0.1:9501".to_string(),
         }
     }
 }
@@ -76,21 +83,49 @@ pub fn handle(
     recovery: &mut ouro_cluster::error_recovery::ErrorRecovery,
 ) -> Result<String> {
     match cmd {
-        Command::ClusterSummary => {
-            let total = topology.node_count();
-            let power: u32 = topology.nodes.iter().map(|n| n.tdp_watts).sum();
-            let budget = topology.power_budget_watts;
-            Ok(with_gpu_census(fmt.cluster_summary(total, 0, power, budget, 0, 0), topology))
-        }
-
-        Command::ClusterQuery => {
-            let total = topology.node_count();
-            let power: u32 = topology.nodes.iter().map(|n| n.tdp_watts).sum();
-            let budget = topology.power_budget_watts;
-            Ok(with_gpu_census(fmt.cluster_summary(total, 0, power, budget, 0, 0), topology))
+        Command::ClusterSummary | Command::ClusterQuery => {
+            if let Some(live) = live_status(config) {
+                let online = live.nodes.iter().filter(|n| n.online).count();
+                let power: u32 = live
+                    .nodes
+                    .iter()
+                    .filter(|n| n.online)
+                    .map(|n| if n.power_watts > 0 { n.power_watts } else { n.tdp_watts })
+                    .sum();
+                let mut s = fmt.cluster_summary(
+                    live.nodes.len(),
+                    online,
+                    power,
+                    topology.power_budget_watts,
+                    0,
+                    0,
+                );
+                s = with_gpu_census_records(s, &live.nodes);
+                if topology.node_count() != live.nodes.len() {
+                    s.push_str(&format!(
+                        "\n  source: registry bus ({} live, topology static: {})",
+                        live.nodes.len(),
+                        topology.node_count()
+                    ));
+                }
+                Ok(s)
+            } else {
+                let total = topology.node_count();
+                let power: u32 = topology.nodes.iter().map(|n| n.tdp_watts).sum();
+                let budget = topology.power_budget_watts;
+                Ok(with_gpu_census(
+                    fmt.cluster_summary(total, 0, power, budget, 0, 0),
+                    topology,
+                ))
+            }
         }
 
         Command::NodeQuery { node } => {
+            if let Some(live) = live_status(config) {
+                if let Some(rec) = live.nodes.iter().find(|n| n.id == node) {
+                    return Ok(fmt.node_query(&record_to_display(rec)));
+                }
+            }
             let entry = topology
                 .get_node(&node)
                 .ok_or_else(|| anyhow::anyhow!("Node {} not found", node))?;
@@ -110,6 +145,12 @@ pub fn handle(
         }
 
         Command::PropertyQuery { node, property } => {
+            if let Some(live) = live_status(config) {
+                if let Some(rec) = live.nodes.iter().find(|n| n.id == node) {
+                    let value = resolve_record_property(rec, &property, ctx);
+                    return Ok(fmt.property_query(&node, &property, &value));
+                }
+            }
             let entry = topology
                 .get_node(&node)
                 .ok_or_else(|| anyhow::anyhow!("Node {} not found", node))?;
@@ -119,6 +160,12 @@ pub fn handle(
 
         Command::ContextPropertyQuery { property } => {
             if let Some(node_id) = ctx.current_node().map(|s| s.to_string()) {
+                if let Some(live) = live_status(config) {
+                    if let Some(rec) = live.nodes.iter().find(|n| n.id == node_id) {
+                        let value = resolve_record_property(rec, &property, ctx);
+                        return Ok(fmt.property_query(&node_id, &property, &value));
+                    }
+                }
                 let entry = topology
                     .get_node(&node_id)
                     .ok_or_else(|| anyhow::anyhow!("Node {} not found", node_id))?;
@@ -130,10 +177,19 @@ pub fn handle(
         }
 
         Command::BulkQuery { filter } => {
-            let nodes: Vec<NodeDisplay> = topology
-                .nodes
-                .iter()
-                .map(|n| NodeDisplay {
+            let mut nodes: Vec<NodeDisplay> = Vec::new();
+            let mut seen: Vec<String> = Vec::new();
+            if let Some(live) = live_status(config) {
+                for rec in &live.nodes {
+                    nodes.push(record_to_display(rec));
+                    seen.push(rec.id.clone());
+                }
+            }
+            for n in &topology.nodes {
+                if seen.iter().any(|id| id == &n.id) {
+                    continue;
+                }
+                nodes.push(NodeDisplay {
                     id: n.id.clone(),
                     cpu_model: n.cpu_model.clone(),
                     ram_mib: n.ram_mib,
@@ -144,8 +200,8 @@ pub fn handle(
                     power_watts: n.tdp_watts,
                     temp_c: 0,
                     gpu: entry_gpu(topology, &n.id),
-                })
-                .collect();
+                });
+            }
             Ok(fmt.bulk_query(&filter, &nodes))
         }
 
@@ -729,6 +785,135 @@ fn entry_gpu(topology: &ClusterTopology, id: &str) -> String {
         .unwrap_or_default()
 }
 
+/// Live registry census with a 10s negative cache: a down daemon
+/// costs one fast localhost refusal per 10s, not per command. No
+/// secret in the env -> no fetch at all (piped/test modes stay pure).
+fn live_status(config: &ShellConfig) -> Option<RegistryStatus> {
+    static DOWN_UNTIL: std::sync::Mutex<Option<std::time::Instant>> =
+        std::sync::Mutex::new(None);
+    if let Ok(guard) = DOWN_UNTIL.lock() {
+        if let Some(t) = *guard {
+            if std::time::Instant::now() < t {
+                return None;
+            }
+        }
+    }
+    let addr = registry_client::resolve_addr(&config.registry_addr);
+    let status = auth::secret_from_env()
+        .ok()
+        .and_then(|secret| registry_client::fetch(&addr, &secret).ok());
+    if status.is_none() {
+        if let Ok(mut guard) = DOWN_UNTIL.lock() {
+            *guard = Some(std::time::Instant::now() + std::time::Duration::from_secs(10));
+        }
+    }
+    status
+}
+
+/// Effective live watts: telemetry when flowing, TDP as floor of truth.
+fn record_watts(n: &RegistryNode) -> u32 {
+    if n.power_watts > 0 { n.power_watts } else { n.tdp_watts }
+}
+
+fn record_gpu(n: &RegistryNode) -> String {
+    if n.has_gpu {
+        format!("{} ({}MiB)", n.gpu_model, n.gpu_vram_mib)
+    } else {
+        String::new()
+    }
+}
+
+fn record_to_display(n: &RegistryNode) -> NodeDisplay {
+    NodeDisplay {
+        id: n.id.clone(),
+        cpu_model: n.cpu_model.clone(),
+        ram_mib: n.ram_mib,
+        has_avx2: n.has_avx2,
+        has_avx: n.has_avx,
+        has_sse42: n.has_sse42,
+        status: n.status.to_uppercase(),
+        power_watts: record_watts(n),
+        temp_c: n.temp_c,
+        gpu: record_gpu(n),
+    }
+}
+
+/// GPU census line from live records instead of the static topology.
+fn with_gpu_census_records(mut s: String, nodes: &[RegistryNode]) -> String {
+    let gpus: Vec<String> = nodes
+        .iter()
+        .filter(|n| n.has_gpu)
+        .map(|n| {
+            format!(
+                "{}:{}MiB",
+                n.gpu_model.replace("NVIDIA GeForce ", ""),
+                n.gpu_vram_mib
+            )
+        })
+        .collect();
+    if !gpus.is_empty() {
+        s.push_str(&format!(
+            "\n  GPUs:   {} (vram: {})",
+            gpus.len(),
+            gpus.join(", ")
+        ));
+    }
+    s
+}
+
+/// Resolve a property from a live registry record: same names as the
+/// static resolver, plus the live-only facts (thermal, load, state,
+/// hostname, ip). Agent live-cache still wins (ctx).
+fn resolve_record_property(n: &RegistryNode, property: &str, ctx: &Context) -> String {
+    if let Some(live) = ctx.get_property(&n.id, property) {
+        return format!("{} (live)", live);
+    }
+    match property {
+        "power" | "p" => format!("{}W", record_watts(n)),
+        "thermal" | "temp" | "t" => format!("{}C", n.temp_c),
+        "load" | "l" => format!("{:.2}", n.load_avg),
+        "status" => n.status.clone(),
+        "state" => {
+            if n.online {
+                "online".to_string()
+            } else {
+                "offline".to_string()
+            }
+        }
+        "hostname" | "host" => n.hostname.clone(),
+        "ip" | "addr" => n.ip.clone(),
+        "ram" | "r" => format!("{}MiB", n.ram_mib),
+        "cpu" | "c" => n.cpu_model.clone(),
+        "cores" => format!("{}", n.cores),
+        "threads" => format!("{}", n.threads),
+        "simd" | "s" => {
+            let mut parts = Vec::new();
+            if n.has_avx2 {
+                parts.push("AVX2");
+            }
+            if n.has_avx {
+                parts.push("AVX");
+            }
+            if n.has_sse42 {
+                parts.push("SSE4.2");
+            }
+            if parts.is_empty() {
+                "none".to_string()
+            } else {
+                parts.join(", ")
+            }
+        }
+        "gpu" => {
+            if n.has_gpu {
+                format!("{} ({}MiB)", n.gpu_model, n.gpu_vram_mib)
+            } else {
+                "none".to_string()
+            }
+        }
+        _ => format!("unknown property: {}", property),
+    }
+}
+
 /// Resolve a property: live agent cache first, static topology as fallback.
 fn resolve_node_property(node: &ouro_cluster::beast::topology::NodeEntry, property: &str, ctx: &Context) -> String {
     if let Some(live) = ctx.get_property(&node.id, property) {
@@ -945,5 +1130,81 @@ mod tests {
         assert_eq!(node.gpu_model, "RTX 3060");
         assert_eq!(node.gpu_driver, "580.178.04");
         assert_eq!(node.gpu_vram_mib, 12288);
+    }
+}
+
+#[cfg(test)]
+mod registry_live_tests {
+    use super::*;
+
+    fn hp_record() -> RegistryNode {
+        serde_json::from_value(serde_json::json!({
+            "id": "n1",
+            "hostname": "pavilion",
+            "ip": "192.168.1.114",
+            "cpu_model": "Intel(R) Core(TM) i5-7200U",
+            "cores": 2, "threads": 4, "ram_mib": 7829,
+            "has_avx2": true, "has_avx": true, "has_sse42": true,
+            "tdp_watts": 35, "has_gpu": true,
+            "gpu_model": "NVIDIA GeForce GTX 1060 6GB",
+            "gpu_vram_mib": 6144,
+            "power_watts": 35, "temp_c": 46, "load_avg": 0.99,
+            "status": "Idle", "online": true,
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn test_record_to_display_live_fields() {
+        let d = record_to_display(&hp_record());
+        assert_eq!(d.id, "n1");
+        assert_eq!(d.status, "IDLE");
+        assert_eq!(d.power_watts, 35);
+        assert_eq!(d.temp_c, 46);
+        assert!(d.gpu.contains("1060"));
+    }
+
+    #[test]
+    fn test_record_watts_falls_back_to_tdp() {
+        let mut n = hp_record();
+        n.power_watts = 0;
+        assert_eq!(record_watts(&n), 35);
+        n.power_watts = 28;
+        assert_eq!(record_watts(&n), 28);
+    }
+
+    #[test]
+    fn test_resolve_record_property_live_values() {
+        let ctx = Context::new();
+        let n = hp_record();
+        assert_eq!(resolve_record_property(&n, "power", &ctx), "35W");
+        assert_eq!(resolve_record_property(&n, "thermal", &ctx), "46C");
+        assert_eq!(resolve_record_property(&n, "load", &ctx), "0.99");
+        assert_eq!(resolve_record_property(&n, "status", &ctx), "Idle");
+        assert_eq!(resolve_record_property(&n, "state", &ctx), "online");
+        assert_eq!(resolve_record_property(&n, "ip", &ctx), "192.168.1.114");
+        assert!(resolve_record_property(&n, "gpu", &ctx).contains("1060"));
+        assert!(resolve_record_property(&n, "simd", &ctx).contains("AVX"));
+    }
+
+    #[test]
+    fn test_resolve_record_property_ctx_cache_wins() {
+        let mut ctx = Context::new();
+        let mut props = std::collections::HashMap::new();
+        props.insert("power".to_string(), "12W".to_string());
+        ctx.cache_properties("n1", props);
+        assert_eq!(
+            resolve_record_property(&hp_record(), "power", &ctx),
+            "12W (live)"
+        );
+    }
+
+    #[test]
+    fn test_gpu_census_from_records() {
+        let s = with_gpu_census_records(String::new(), &[hp_record()]);
+        assert!(s.contains("GPUs:   1"));
+        assert!(s.contains("GTX 1060 6GB:6144MiB"));
+        let none = with_gpu_census_records(String::new(), &[]);
+        assert!(none.is_empty());
     }
 }

@@ -113,7 +113,12 @@ impl Registry {
     /// Load from disk, or start empty.
     pub fn load(path: &Path) -> Self {
         if let Ok(data) = std::fs::read_to_string(path) {
-            if let Ok(reg) = serde_json::from_str(&data) {
+            if let Ok(mut reg) = serde_json::from_str::<Registry>(&data) {
+                // heartbeat_threshold is #[serde(skip)]: a cold load would
+                // carry Duration::default() (0s) and mark every node stale
+                // the instant the daemon restarts. Restore the working
+                // window explicitly.
+                reg.heartbeat_threshold = Duration::from_secs(30);
                 return reg;
             }
         }

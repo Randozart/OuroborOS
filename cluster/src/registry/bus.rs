@@ -106,8 +106,46 @@ pub fn handle_bus_message(
         "ping" => "pong".to_string(),
         "register" => handle_register(reg, recovery, peer_ip, rest),
         "heartbeat" => handle_heartbeat(reg, recovery, peer_ip, rest),
+        "status" => handle_status(reg),
         other => format!("err unknown-verb {}", other),
     }
+}
+
+/// Live census for the head's shell — the one-source-of-truth read
+/// (Registry↔HISS unification). One JSON line: every record's entry
+/// and live state plus online flag; the shell merges this over its
+/// own topology, so `cluster?`/`n1?`/`n1.gpu` reflect what the bus
+/// actually sees.
+fn handle_status(reg: &Registry) -> String {
+    let nodes: Vec<serde_json::Value> = reg
+        .nodes
+        .values()
+        .map(|r| {
+            serde_json::json!({
+                "id": r.entry.id,
+                "hostname": r.entry.hostname,
+                "ip": r.entry.ip,
+                "cpu_model": r.entry.cpu_model,
+                "cores": r.entry.cores,
+                "threads": r.entry.threads,
+                "ram_mib": r.entry.ram_mib,
+                "tdp_watts": r.entry.tdp_watts,
+                "has_gpu": r.entry.has_gpu,
+                "gpu_model": r.entry.gpu_model,
+                "gpu_vram_mib": r.entry.gpu_vram_mib,
+                "has_avx2": r.entry.has_avx2,
+                "has_avx": r.entry.has_avx,
+                "has_sse42": r.entry.has_sse42,
+                "power_watts": r.state.power_watts,
+                "temp_c": r.state.thermal_c,
+                "load_avg": r.state.load_avg,
+                "status": format!("{:?}", r.state.status),
+                "online": r.is_alive(reg.heartbeat_threshold),
+                "last_seen": r.last_seen,
+            })
+        })
+        .collect();
+    serde_json::json!({ "nodes": nodes, "event_count": reg.events.len() }).to_string()
 }
 
 fn parse_telemetry(json: &str) -> Option<BusTelemetry> {
