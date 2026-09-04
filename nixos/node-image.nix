@@ -37,25 +37,86 @@ let
     [ -s /run/ouro/secret ] && secret_state=ok
     enroll_state="$(cat /run/ouro/enroll-status 2>/dev/null || echo no-enroll-run)"
     nics="$(cat /run/ouro/nics 2>/dev/null || echo unknown)"
-    # printf interprets \e -> real ESC bytes. A heredoc would bake the
-    # literal two characters into the file, and the agent's raw print
-    # would show ANSI as text (FIRST_LIGHT.md, blocker 10).
+    # The right/below text column: OUROBOROS wordmark + backronym +
+    # taglines + measured state, built PLAIN (no ESC) so width math is
+    # honest. Segment colors are applied at print time by row index.
+    textcol=$(mktemp)
     {
+      printf '%s\n' \
+        '   ▄▄▄▄                                        ▄▄▄▄      ▄▄▄▄▄' \
+        ' ▄█▀▀████▄                 █▄                ▄█▀▀████▄  ██▀▀▀▀█▄' \
+        ' ██    ██       ▄          ██          ▄     ██    ██   ▀██▄  ▄▀' \
+        ' ██    ██ ██ ██ ████▄▄███▄ ████▄ ▄███▄ ████▄ ██    ██     ▀██▄▄' \
+        ' ██    ██ ██ ██ ██   ██ ██ ██ ██ ██ ██ ██    ██    ██   ▄   ▀██▄' \
+        '  ▀████▀ ▄▀██▀█▄█▀  ▄▀███▀▄████▀▄▀███▀▄█▀     ▀████▀    ▀██████▀'
       printf '\n'
-      # the serpent, crimson — a whole file, not printf gymnastics
-      printf '\e[31m'
-      cat ${ouroLogo}
-      printf '\e[0m\n'
       printf ' OUROBOROS: One Unified Runtime Orchestrating\n'
       printf '            a Bunch Of Random Old Servers\n'
       printf '\n'
-      printf '\e[31m        the machine that remakes itself.\e[0m\n'
+      printf '        the machine that remakes itself.\n'
       printf '\n'
-      printf '\e[31;1m  >> %s\e[0m\n' "$line"
+      printf '  >> %s\n' "$line"
       printf '\n'
       printf '  node %s · measured admission · secret: %s\n' "$node_id" "$secret_state"
       printf '  enroll: %s\n' "$enroll_state"
       printf '  nics: %s\n' "$nics"
+    } > "$textcol"
+    mapfile -t tcol < "$textcol"
+    ntxt=''${#tcol[@]}
+    # segment color by row index (0-based): wordmark rows bold crimson,
+    # taglines crimson, the rest plain. Emits only the OPEN escape;
+    # close is always $'\e[0m'.
+    tseg() {
+      case "$1" in
+        0|1|2|3|4|5) printf '\e[1;31m' ;;
+        10)          printf '\e[31m' ;;
+        12)          printf '\e[31;1m' ;;
+        *)           : ;;
+      esac
+    }
+    tpaint() { # row, line -> painted line (color if the row has one)
+      local seg
+      seg=$(tseg "$1")
+      if [ -n "$seg" ]; then
+        printf '%s%s\e[0m\n' "$seg" "$2"
+      else
+        printf '%s\n' "$2"
+      fi
+    }
+
+    # console width decides the layout: >=140 cols -> side-by-side
+    # (logo left, text right); narrower -> stacked (serpent, then text).
+    if cols=$(stty size < /dev/console 2>/dev/null | awk '{print $2}'); then
+      :; else cols=0; fi
+    nlogo=$(wc -l < ${ouroLogo})
+    {
+      printf '\n'
+      if [ "''${cols:-0}" -ge 140 ] 2>/dev/null; then
+        top=$(( (nlogo - ntxt) / 2 ))
+        r=1
+        while read -r lrow; do
+          # pad by CHAR count — ramp glyphs are 3-byte UTF-8, %-80s
+          # would pad to bytes and the text column would go ragged
+          pad=$(( 80 - ''${#lrow} ))
+          [ "$pad" -lt 0 ] && pad=0
+          logo_cell=$(printf '%s%*s' "$lrow" "$pad")
+          ti=$(( r - 1 - top ))
+          if [ "$ti" -ge 0 ] && [ "$ti" -lt "$ntxt" ]; then
+            printf '\e[31m%s\e[0m  %s\n' "$logo_cell" "$(tpaint "$ti" "''${tcol[$ti]}")"
+          else
+            printf '\e[31m%s\e[0m\n' "$logo_cell"
+          fi
+          r=$(( r + 1 ))
+        done < ${ouroLogo}
+      else
+        # stacked: serpent, then the text column (wordmark reintroduced)
+        printf '\e[31m'
+        cat ${ouroLogo}
+        printf '\e[0m\n'
+        for ti in "''${!tcol[@]}"; do
+          tpaint "$ti" "''${tcol[$ti]}"
+        done
+      fi
       printf '\n'
     } > /run/ouro/issue
   '';
@@ -125,10 +186,19 @@ let
     else
       status "no-secret-file-on-partition"
     fi
-    if [ -s "$mnt/authorized_keys" ]; then
+    # authorized_keys (+ optional debug_authorized_keys) — built fresh
+    # every boot so the file is idempotent and the optional debug key
+    # (opt-in: only if the stick carries enroll/debug_authorized_keys)
+    # never accumulates across reboots. Wire key first, debug after.
+    if [ -s "$mnt/authorized_keys" ] || [ -s "$mnt/debug_authorized_keys" ]; then
       "${pkgs.coreutils}/bin/install" -d -m 700 -o ouro -g ouro /home/ouro/.ssh
-      "${pkgs.coreutils}/bin/install" -m 600 -o ouro -g ouro \
-        "$mnt/authorized_keys" /home/ouro/.ssh/authorized_keys
+      : > /home/ouro/.ssh/authorized_keys
+      [ -s "$mnt/authorized_keys" ] && \
+        cat "$mnt/authorized_keys" >> /home/ouro/.ssh/authorized_keys
+      [ -s "$mnt/debug_authorized_keys" ] && \
+        cat "$mnt/debug_authorized_keys" >> /home/ouro/.ssh/authorized_keys
+      "${pkgs.coreutils}/bin/chmod" 600 /home/ouro/.ssh/authorized_keys
+      "${pkgs.coreutils}/bin/chown" ouro:ouro /home/ouro/.ssh/authorized_keys
       status keys-installed
     fi
     if [ -s "$mnt/head" ]; then
@@ -270,7 +340,7 @@ in
     open = false;
     modesetting.enable = false;
     nvidiaSettings = false;
-    package = config.boot.kernelPackages.nvidiaPackages.production;
+    package = config.boot.kernelPackages.nvidiaPackages.legacy_580;
   };
   services.getty = {
     autologinUser = "ouro";
@@ -279,6 +349,11 @@ in
     # 10). greetingLine stays empty so nothing prints before the shim.
     greetingLine = "";
   };
+
+  # Shelf tails live lid-closed: closing the lid must park the wyrm,
+  # not suspend it (a laptop tail is an appliance with a hinge).
+  services.logind.lidSwitch = "ignore";
+  services.logind.lidSwitchExternalPower = "ignore";
 
   # raw-serial path (runbook §3 WP3: "SSH pty (or raw serial)"):
   # autologin on ttyS0 runs the same shim — a node with no monitor joins

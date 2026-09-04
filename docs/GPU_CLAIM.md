@@ -76,10 +76,11 @@ After G1–G5:
 ## The HP Pavilion upgrade (WP-N)
 
 **Hardware correction (2026-09-04)**: the HP is a Pavilion Power-class
-15" — i5-7200U + **Intel HD 620 (iGPU) and NVIDIA GTX 1060 6GB
-(dGPU, Pascal)**. It was never an iGPU-only tail. Fleet after this WP:
-**26GB pooled VRAM across three CUDA-class dGPUs** — RTX 3060 12GB
-(head), GTX 1060 6GB (HP), GTX 1080 8GB (laptop) — plus the HD 620 as
+15" — i5-7200U + **Intel HD 620 (iGPU) and NVIDIA GTX 960 (Maxwell,
+dGPU)**. It was never an iGPU-only tail. Fleet after this WP:
+**22GB pooled VRAM across three CUDA-class dGPUs** (960 = 2GB, measured
+at admission once the driver lands) — RTX 3060 12GB
+(head), GTX 960 2GB (HP), GTX 1080 8GB (laptop) — plus the HD 620 as
 a bonus fourth compute device.
 
 ### N1 — `OURO_GPU_NAME` pinning (`agent/src/gpu.rs`, ~15 lines + test)
@@ -99,27 +100,26 @@ deterministically on the same box.
 ### N2 — NVIDIA driver in the image (`node-image.nix`, image-only)
 
 The image has no NVIDIA driver, and `detect_gpus()` keys on
-`nvidia-smi` — the 1060 sits silent until this lands. Zero new code:
+`nvidia-smi` — the 960 sits silent until this lands. Zero new code:
 
 ```nix
 services.xserver.videoDrivers = [ "nvidia" ];  # triggers the module; no X runs
 hardware.nvidia = {
-  open = false;                    # Pascal needs the proprietary module
+  open = false;                    # Maxwell/Pascal need the proprietary module
   modesetting.enable = false;      # headless compute
-  powerManagement.enable = true;   # coarse Optimus sleep (no finegrained on Pascal)
+  powerManagement.enable = true;   # coarse Optimus sleep (no finegrained on Maxwell/Pascal)
   nvidiaSettings = false;
-  package = config.boot.kernelPackages.nvidiaPackages.production;
+  package = config.boot.kernelPackages.nvidiaPackages.legacy_580;
 };
 ```
 
 - `nomodeset` stays — NVIDIA compute is KMS-free; proven pattern
 - Driver registers the OpenCL ICD → our proven OpenCL path (cos 1.0 on
-  the head's 3060, same Pascal driver family) runs on the 1060
-  **unmodified**
+  the head's 3060) runs on the 960 **unmodified**
+- **legacy_580 is the pin**: 595+ dropped Maxwell/Pascal (Turing+ only)
+  — the 960 (HP) and the 1080 (laptop) need 580, the last branch for
+  both. QEMU finds no device either way → prove unaffected
 - ISO grows ~400–600MB; stick is 16GB — fine
-- QEMU: module finds no device in the VM, `detect_gpus()` already
-  handles absent/broken nvidia-smi → prove unaffected
-- Needs `config` in the module args if not already imported
 
 ### N3 — Doc corrections
 
@@ -129,9 +129,9 @@ section).
 ### Verification sequence (after the next reflash)
 
 1. HP boots → single crimson banner → registers with
-   `has_gpu: true, gpu_model: "NVIDIA GeForce GTX 1060 6GB"`
+   `has_gpu: true, gpu_model: "NVIDIA GeForce GTX 960 (Maxwell)"`
    (telemetry → bus → registry — all WP-G1 plumbing, no new code)
-2. `gpu_selftest` over the wire → 1060 proves parity on-node
+2. `gpu_selftest` over the wire → 960 proves parity on-node
 3. `OURO_GPU_NAME=Intel` second run → HD 620 proves itself —
    **two GPUs, one tail, one code path**
 4. Laptop boots the same stick later → third dGPU joins the graph
