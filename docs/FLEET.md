@@ -198,3 +198,50 @@ wattage (see Open decisions).
   RDMA tail appears (default: yes, staged)
 - [ ] MTU 9000 burn-in on the fabric before the parity ladder re-runs
   over it (Art. 10 gate)
+
+### Open decisions
+- [ ] Smart plugs (Tapo/Tasmota, ~$8/plug) for **wall-truth watts** —
+  closes the Art. 4 loop: `budget` fed by physics instead of RAPL
+  estimates. One per shelf-group to start
+- [ ] Staged spend approved: gigabit now, SFP+ switch only if a 3rd
+  RDMA tail appears (default: yes, staged)
+- [ ] MTU 9000 burn-in on the fabric before the parity ladder re-runs
+  over it (Art. 10 gate)
+
+---
+
+## 9. The Extensible PC (principle, 2026-09-04)
+
+> *"My hope here is an infinitely extensible PC."*
+
+It cannot be a box. Every box has a lane budget — a consumer CPU
+offers ~16–24 PCIe lanes, a tower 3–4 slots, an M.2 pair. Soldered
+ports, combo cards, premium copper: all multiplex that finite budget,
+and multiplexed means shared, and shared means slower. A box can win
+that fight maybe twice. Then it is full.
+
+The fleet has no such cap. Extensibility comes from **adding nodes**,
+each bringing its own lanes, VRAM, and bandwidth:
+
+| The old PC | The wyrm |
+|---|---|
+| Motherboard | the shelf (this document, §8) |
+| PCIe bus | the LAN — then the RDMA fabric |
+| Expansion card | a whole tail |
+| Plugging in a GPU | `head-link: registered as n4` |
+| Free PCI slot | a hallway with an unused desktop |
+
+**The law, stated plainly**: the machine has no chassis. Its bus is
+the LAN; its expansion slot is a doorway. Per-box spending is honest
+only where it anchors the fabric — head takes ConnectX-3s, tails with
+slots take M.2 upgrades, laptops ride copper. Every purchase either
+serves the graph (Art. 3: the cluster is one machine) or serves the
+finite illusion of the bigger box. Combo cards with display GPU + LAN
+on one bracket are the finite illusion wearing a bargain sticker: a
+display dongle for headless tails (Art. 1: no purpose but use) and a
+duplicate 1GbE jack, both splitting one PCIe x1 upstream.
+
+The DMA ladder (DMA_ROADMAP.md) is the practical form of this
+principle: at Tier 6, DMA reads a tail's RAM the way a chipset reads
+an SSD — the room becomes the backplane, and the old PC was the
+expansion card all along.
