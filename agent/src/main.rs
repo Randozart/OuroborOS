@@ -1,4 +1,6 @@
 mod executor;
+#[cfg(feature = "gpu")]
+mod gpu;
 mod head_link;
 mod stage;
 mod telemetry;

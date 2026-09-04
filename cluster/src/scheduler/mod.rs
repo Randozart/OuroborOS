@@ -112,6 +112,7 @@ impl Scheduler {
             WorkloadClass::SimdFriendly => node.has_avx2 || node.has_avx,
             WorkloadClass::SmallBatch => node.has_sse42,
             WorkloadClass::LlmInference => node.has_avx2 || node.has_avx,
+            WorkloadClass::GpuCompute => node.has_gpu,
             WorkloadClass::Unknown => true,
         }
     }
@@ -342,5 +343,36 @@ impl Scheduler {
         assert_eq!(results.len(), 1);
         assert!(matches!(&results[0].1, ScheduleOutcome::Dispatched { .. }));
         assert!(sched.queue.is_empty());
+    }
+
+    #[test]
+    fn test_gpu_compute_only_dispatches_to_gpu_nodes() {
+        let mut cpu_node = make_node("n1", true, 35);
+        cpu_node.has_gpu = false;
+        let mut gpu_node = make_node("n2", false, 35);
+        gpu_node.has_gpu = true;
+        gpu_node.gpu_model = "Intel HD 620".into();
+        gpu_node.gpu_vram_mib = 0;
+
+        let topo = ClusterTopology {
+            nodes: vec![cpu_node, gpu_node],
+            power_budget_watts: 500,
+            ..ClusterTopology::new()
+        };
+        let mut sched = Scheduler::new(topo);
+        let task = Task {
+            name: "gpu_matvec".to_string(),
+            class: WorkloadClass::GpuCompute,
+            payload: String::new(),
+            estimated_watts: 35,
+            estimated_seconds: 10,
+        };
+        let outcome = sched.schedule(&task).unwrap();
+        match outcome {
+            ScheduleOutcome::Dispatched { node } => {
+                assert_eq!(node, "n2", "GpuCompute must dispatch to the GPU node");
+            }
+            _ => panic!("expected dispatch to GPU node"),
+        }
     }
 }

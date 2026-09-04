@@ -18,6 +18,8 @@ pub enum WorkloadClass {
     SmallBatch,
     /// Ternary LLM matvec — AVX2 LUT kernels beat legacy GPUs.
     LlmInference,
+    /// GPU compute — dense parallelism dispatched to a tail's GPU.
+    GpuCompute,
     /// Not yet classified.
     Unknown,
 }
@@ -42,6 +44,8 @@ impl WorkloadClass {
             || lower.contains("generate")
         {
             WorkloadClass::LlmInference
+        } else if lower.contains("gpu") || lower.contains("cuda") || lower.contains("opencl") {
+            WorkloadClass::GpuCompute
         } else {
             WorkloadClass::Unknown
         }
@@ -56,13 +60,14 @@ impl WorkloadClass {
             WorkloadClass::Irregular => "IRREGULAR",
             WorkloadClass::SmallBatch => "SMALL_BATCH",
             WorkloadClass::LlmInference => "LLM_INFERENCE",
+            WorkloadClass::GpuCompute => "GPU_COMPUTE",
             WorkloadClass::Unknown => "UNKNOWN",
         }
     }
 
     /// Whether GPUs lose to CPUs for this class (our thesis).
     pub fn cpu_advantage(&self) -> bool {
-        !matches!(self, WorkloadClass::SimdFriendly | WorkloadClass::Unknown)
+        !matches!(self, WorkloadClass::SimdFriendly | WorkloadClass::GpuCompute | WorkloadClass::Unknown)
     }
 }
 
@@ -105,6 +110,7 @@ mod tests {
         assert!(WorkloadClass::BranchHeavy.cpu_advantage());
         assert!(WorkloadClass::Recursive.cpu_advantage());
         assert!(!WorkloadClass::SimdFriendly.cpu_advantage());
+        assert!(!WorkloadClass::GpuCompute.cpu_advantage());
     }
 }
 
@@ -118,5 +124,14 @@ mod llm_tests {
         assert_eq!(WorkloadClass::from_name("llm_prompt"), WorkloadClass::LlmInference);
         assert_eq!(WorkloadClass::LlmInference.label(), "LLM_INFERENCE");
         assert!(WorkloadClass::LlmInference.cpu_advantage());
+    }
+
+    #[test]
+    fn test_classify_gpu_compute() {
+        assert_eq!(WorkloadClass::from_name("gpu_matvec"), WorkloadClass::GpuCompute);
+        assert_eq!(WorkloadClass::from_name("cuda_forward"), WorkloadClass::GpuCompute);
+        assert_eq!(WorkloadClass::from_name("opencl_kernel"), WorkloadClass::GpuCompute);
+        assert_eq!(WorkloadClass::GpuCompute.label(), "GPU_COMPUTE");
+        assert!(!WorkloadClass::GpuCompute.cpu_advantage());
     }
 }

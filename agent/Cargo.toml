@@ -4,12 +4,14 @@ version.workspace = true
 edition.workspace = true
 
 [features]
-default = ["bitnet"]
+default = ["bitnet", "gpu"]
 bitnet = ["dep:bitnet-rs"]
+gpu = ["dep:ocl"]
 
 [dependencies]
 ouro-cluster = { path = "../cluster" }
 bitnet-rs = { path = "../bitnet-rs", optional = true }
+ocl = { version = "0.19", optional = true }
 anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true

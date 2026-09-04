@@ -240,12 +240,18 @@ in
   users.users.ouro = {
     isNormalUser = true;
     group = "ouro";
+    extraGroups = [ "video" "render" ];
     description = "OuroborOS node";
     shell = ouro-shim;
     # No baked keys — SSH access arrives via the OURO partition's
     # authorized_keys at enroll time. Whoever holds the stick holds
     # the node (R2_BRINGUP.md §8).
   };
+
+  # GPU compute: Intel NEO runtime (OpenCL 3.0 + Level Zero) for
+  # tails with Intel iGPUs. The agent detects GPUs via detect_gpus()
+  # and reports them over the bus (GPU_CLAIM.md, WP-G2).
+  hardware.graphics.extraPackages = [ pkgs.intel-compute-runtime ];
   services.getty = {
     autologinUser = "ouro";
     # NO -f issue here: the agent's isatty banner is the only banner
@@ -336,7 +342,9 @@ in
     ];
   };
 
-  environment.systemPackages = [ ouro-agent ouro-brand ouro-probe ouro-enroll ouro-shim pkgs.iproute2 ];
+  # ocl-icd: the OpenCL loader the agent dlopens at runtime; the
+  # intel-compute-runtime ICD above registers the actual driver
+  environment.systemPackages = [ ouro-agent ouro-brand ouro-probe ouro-enroll ouro-shim pkgs.iproute2 pkgs.ocl-icd ];
 
   # login(1)-friendly: register the custom shell
   environment.etc."shells".text = lib.mkAfter ''

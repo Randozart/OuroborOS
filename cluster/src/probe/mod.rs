@@ -17,6 +17,8 @@ pub struct NodeInfo {
     pub energy: EnergyInfo,
     pub network: Option<NetworkInfo>,
     pub status: NodeStatus,
+    #[serde(default)]
+    pub gpus: Vec<gpu::GpuInfo>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -66,6 +68,7 @@ pub fn probe_node(hostname: &str, ip: &str) -> Result<NodeInfo> {
     let memory = memory::probe_remote(ip)?;
     let energy = energy::probe_remote(ip)?;
     let network = network::probe_remote(ip).ok();
+    let gpus = gpu::detect_gpus();
 
     Ok(NodeInfo {
         hostname: hostname.to_string(),
@@ -75,6 +78,7 @@ pub fn probe_node(hostname: &str, ip: &str) -> Result<NodeInfo> {
         energy,
         network,
         status: NodeStatus::Idle,
+        gpus,
     })
 }
 
@@ -88,6 +92,7 @@ pub fn probe_local() -> Result<NodeInfo> {
     let memory = memory::probe_local()?;
     let energy = energy::probe_local()?;
     let network = network::probe_agent("127.0.0.1:9500").ok();
+    let gpus = gpu::detect_gpus();
 
     Ok(NodeInfo {
         hostname,
@@ -97,5 +102,6 @@ pub fn probe_local() -> Result<NodeInfo> {
         energy,
         network,
         status: NodeStatus::Idle,
+        gpus,
     })
 }

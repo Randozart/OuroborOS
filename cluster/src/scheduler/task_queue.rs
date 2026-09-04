@@ -228,7 +228,7 @@ mod tests {
     #[test]
     fn test_retry_limit() {
         let mut q = TaskQueue::new();
-        let mut task = make_task("t1", WorkloadClass::SimdFriendly);
+        let task = make_task("t1", WorkloadClass::SimdFriendly);
         q.enqueue(task);
         // Simulate 4 retries (max_retries=3)
         assert!(q.retry("t1"));

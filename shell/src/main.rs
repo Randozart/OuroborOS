@@ -394,7 +394,7 @@ mod tests {
         let mut rng = Rng::new();
         for tails in [0usize, 1, 5, 40] {
             let p = hiss_prompt(&mut rng, tails, false);
-            let s_count = p.chars().filter(|c| c.to_ascii_lowercase() == 's').count();
+            let s_count = p.chars().filter(|c| c.eq_ignore_ascii_case(&'s')).count();
             assert_eq!(s_count, 2 + tails, "tails={tails}");
         }
     }

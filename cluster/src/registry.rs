@@ -33,6 +33,10 @@ pub struct NodeRecord {
 impl NodeRecord {
     pub fn from_probe(info: &NodeInfo, id: &str) -> Self {
         let now = epoch_secs();
+        let (has_gpu, gpu_model, gpu_vram_mib, gpu_driver) = info.gpus.first().map_or_else(
+            || (false, String::new(), 0, String::new()),
+            |g| (true, g.model.clone(), g.vram_mib, g.driver.clone()),
+        );
         let entry = NodeEntry {
             id: id.to_string(),
             hostname: info.hostname.clone(),
@@ -45,10 +49,10 @@ impl NodeRecord {
             has_sse42: info.cpu.has_sse42,
             ram_mib: info.memory.total_mib,
             tdp_watts: info.energy.current_watts.max(15),
-            has_gpu: false,
-            gpu_model: String::new(),
-            gpu_vram_mib: 0,
-            gpu_driver: String::new(),
+            has_gpu,
+            gpu_model,
+            gpu_vram_mib,
+            gpu_driver,
         };
         Self {
             entry,
@@ -305,6 +309,7 @@ mod tests {
             },
             network: None,
             status: crate::probe::NodeStatus::Idle,
+            gpus: Vec::new(),
         }
     }
 

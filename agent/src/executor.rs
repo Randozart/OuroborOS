@@ -66,6 +66,11 @@ pub fn execute(task: &Task) -> Result<TaskResult> {
                 Err(e) => (TaskStatus::Failed, format!("stage error: {}", e)),
             }
         }
+        #[cfg(feature = "gpu")]
+        "gpu_selftest" => match run_gpu_selftest() {
+            Ok(out) => (TaskStatus::Success, out),
+            Err(e) => (TaskStatus::Failed, format!("gpu error: {}", e)),
+        },
         _ => (
             TaskStatus::Failed,
             format!("unknown task: {}", task.name),
@@ -122,6 +127,48 @@ fn run_detok(payload: &str) -> Result<String> {
 }
 
 /// Simple benchmark: sum integers up to N.
+/// Run the Q6_K parity selftest on THIS node's GPU: deterministic
+/// matrix through the OpenCL kernel vs the CPU reference, cos gate.
+/// This is the on-node proof that a tail's GPU computes truthfully
+/// (GPU_CLAIM.md WP-G4) — and the first distributed GPU compute.
+#[cfg(feature = "gpu")]
+fn run_gpu_selftest() -> Result<String> {
+    use crate::gpu::{cosine, deterministic_payload, deterministic_x, GpuPool};
+    use ouro_cluster::infer::{matvec_q, QuantKind};
+    use std::time::Instant;
+
+    let mut pool = GpuPool::new()?;
+    let (out_len, in_len) = (16usize, 1024usize);
+    let payload = deterministic_payload(out_len, in_len);
+    pool.upload_q6k("selftest", &payload, out_len, in_len)?;
+    let x = deterministic_x(in_len);
+
+    let t0 = Instant::now();
+    let gpu = pool.matvec("selftest", &x)?;
+    let gpu_ms = t0.elapsed().as_secs_f64() * 1e3;
+
+    let t1 = Instant::now();
+    let cpu = matvec_q(&payload, QuantKind::Q6K, out_len, in_len, &x);
+    let cpu_ms = t1.elapsed().as_secs_f64() * 1e3;
+
+    let cos = cosine(&gpu, &cpu);
+    let pass = cos > 0.9999;
+    let json = serde_json::json!({
+        "adapter": pool.adapter_name,
+        "out_len": out_len,
+        "in_len": in_len,
+        "cos": (cos * 1e8).round() / 1e8,
+        "gate": 0.9999,
+        "pass": pass,
+        "gpu_ms": (gpu_ms * 1000.0).round() / 1000.0,
+        "cpu_ms": (cpu_ms * 1000.0).round() / 1000.0,
+    });
+    if !pass {
+        anyhow::bail!("parity gate failed: cos = {cos}");
+    }
+    Ok(json.to_string())
+}
+
 fn run_bench_sum(payload: &str) -> String {
     let n: u64 = payload.trim().parse().unwrap_or(1_000_000);
     let sum: u64 = (0..n).sum();

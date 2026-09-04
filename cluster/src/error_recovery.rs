@@ -183,6 +183,7 @@ mod tests {
             energy: EnergyInfo { current_watts: 35, rapl_available: false, power_limit_watts: None },
             network: None,
             status: crate::probe::NodeStatus::Idle,
+            gpus: Vec::new(),
         }
     }
 

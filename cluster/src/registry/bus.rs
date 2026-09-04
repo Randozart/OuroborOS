@@ -42,6 +42,8 @@ pub struct BusTelemetry {
     pub temp_c: u32,
     #[serde(default)]
     pub load_avg: f64,
+    #[serde(default)]
+    pub gpus: Vec<crate::probe::gpu::GpuInfo>,
 }
 
 impl BusTelemetry {
@@ -73,6 +75,7 @@ impl BusTelemetry {
             },
             network: None,
             status: NodeStatus::Idle,
+            gpus: self.gpus.clone(),
         }
     }
 

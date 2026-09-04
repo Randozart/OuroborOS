@@ -4,11 +4,16 @@
 # which is pure Rust: the `bitnet` feature (C++ llama.cpp via bindgen,
 # musl-hostile) is not needed on image nodes. Single static binary.
 #
+# The `gpu` feature (GPU_CLAIM.md WP-G3) compiles the OpenCL Q6_K
+# compute path into the agent; ocl-icd supplies libOpenCL.so at link
+# time, and the image carries the loader + intel-compute-runtime ICD
+# at runtime (node-image.nix).
+#
 # NOTE (WP7 gate): cargoLock uses the workspace lockfile; the optional
 # bitnet-rs/ouro-wgpu members still appear in it and must resolve in the
 # vendored deps. If vendoring fights the workspace layout, pin a minimal
 # lockfile for the image build instead of the workspace one.
-{ lib, rustPlatform, src ? ../., cargoLockFile ? ../Cargo.lock }:
+{ lib, rustPlatform, ocl-icd, src ? ../., cargoLockFile ? ../Cargo.lock }:
 
 rustPlatform.buildRustPackage {
   pname = "ouro-agent";
@@ -22,6 +27,8 @@ rustPlatform.buildRustPackage {
 
   buildAndTestSubdir = "agent";
   buildNoDefaultFeatures = true;
+  buildFeatures = [ "gpu" ];
+  nativeBuildInputs = [ ocl-icd ];
 
   # tests run in the sandbox without model files; the bitnet-gated ones
   # are compiled out with no-default-features
