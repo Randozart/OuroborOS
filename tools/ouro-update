@@ -75,17 +75,29 @@ def recv_exact(sock, n):
 
 
 def recv_frame(sock, secret):
-    header = recv_exact(sock, 17)
-    if header[:4] != MAGIC:
-        raise ConnectionError("bad frame magic")
-    flags = header[4]
-    seq = struct.unpack(">Q", header[5:13])[0]
-    ln = struct.unpack(">I", header[13:17])[0]
-    tag = recv_exact(sock, 32)
-    payload = recv_exact(sock, ln)
-    if tag != frame_tag(secret, seq, payload):
-        raise ConnectionError("frame auth failed")
-    return flags, seq, payload
+    try:
+        header = recv_exact(sock, 17)
+        if header[:4] != MAGIC:
+            raise ConnectionError("bad frame magic")
+        flags = header[4]
+        seq = struct.unpack(">Q", header[5:13])[0]
+        ln = struct.unpack(">I", header[13:17])[0]
+        tag = recv_exact(sock, 32)
+        payload = recv_exact(sock, ln)
+        if tag != frame_tag(secret, seq, payload):
+            raise ConnectionError("frame auth failed")
+        return flags, seq, payload
+    except ConnectionError as e:
+        # the server may have bailed to line mode with an err receipt —
+        # surface it instead of a bare framing failure
+        try:
+            sock.settimeout(5)
+            extra = sock.recv(65536)
+            if extra:
+                raise ConnectionError(f"{e}; server line: {extra[:300].decode(errors='replace')!r}")
+        except (OSError, ConnectionError):
+            pass
+        raise
 
 
 def push(host, port, secret, wire_json, artifact_path, phase=lambda m: None):
@@ -139,7 +151,12 @@ def push(host, port, secret, wire_json, artifact_path, phase=lambda m: None):
         want = line_tag(secret, int(parts[0]), parts[2].encode())
         if parts[1] != want:
             raise ConnectionError("receipt signature mismatch")
-        return json.loads(parts[2])
+        try:
+            return json.loads(parts[2])
+        except json.JSONDecodeError:
+            # a plain `err update: ...` line is a verdict, not JSON —
+            # surface it honestly
+            return {"status": "Rejected", "output": parts[2]}
     finally:
         sock.close()
 

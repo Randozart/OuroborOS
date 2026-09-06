@@ -110,9 +110,18 @@ def build_spare_drive(path, registry_port, iso_size, fat_start=None):
         f.seek(total - 1)
         f.write(b"\0")
     mbr = bytearray(512)
-    # one partition entry: FAT32 LBA, starting past the ISO's end
-    mbr[446:462] = bytes([0x00, 0xFE, 0xFF, 0xFF, 0x0C, 0xFE, 0xFF, 0xFF])
-    mbr[454:462] = struct.pack("<II", fat_start, fat_len // sector)
+    # one partition entry: FAT32 LBA, starting past the ISO's end.
+    # NOTE: the status..CHS field list is 8 bytes — the slice must be
+    # padded to the full 16 or the bytearray SHRINKS and every later
+    # offset shifts left (found live: the 0x55AA magic landed at 504
+    # and the kernel saw no partition table at all).
+    mbr[446:462] = bytes([
+        0x00, 0xFE, 0xFF, 0xFF, 0x0C, 0xFE, 0xFF, 0xFF,  # status, CHS, type, CHS
+        0x00, 0x00, 0x00, 0x00,                          # LBA start (below)
+        0x00, 0x00, 0x00, 0x00,                          # sector count (below)
+    ])
+    mbr[454:458] = struct.pack("<I", fat_start)
+    mbr[458:462] = struct.pack("<I", fat_len // sector)
     mbr[510:512] = b"\x55\xAA"
     with open(path, "r+b") as f:
         f.write(mbr)
@@ -220,7 +229,8 @@ def main():
             out = r.stdout + r.stderr
             for _ in range(6):
                 serial.pump(2.0)
-            refusal = ("err update" in out or "err update" in serial.text())
+            refusal = ("err update" in out or "err update" in serial.text()
+                       or "[update] failed" in serial.text())
             overrun = "overrun" in out or "overrun" in serial.text()
             assert r.returncode != 0 and refusal, (
                 f"the guard MUST refuse — rc={r.returncode}\n"

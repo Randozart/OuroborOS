@@ -331,7 +331,7 @@ in
   users.users.ouro = {
     isNormalUser = true;
     group = "ouro";
-    extraGroups = [ "video" "render" ];
+    extraGroups = [ "video" "render" "disk" ];
     description = "OuroborOS node";
     shell = ouro-shim;
     # No baked keys — SSH access arrives via the OURO partition's
