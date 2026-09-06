@@ -271,9 +271,7 @@ fn update_verb(secret: &Secret, line: &str) -> Option<(ouro_cluster::update::Art
             return None;
         }
     };
-    let Some(rest) = body.strip_prefix("update begin ") else {
-        return None;
-    };
+    let rest = body.strip_prefix("update begin ")?;
     let value: serde_json::Value = match serde_json::from_str(rest) {
         Ok(v) => v,
         Err(e) => {
