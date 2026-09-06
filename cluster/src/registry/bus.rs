@@ -161,18 +161,29 @@ fn handle_register(
     let Some(tel) = parse_telemetry(json) else {
         return "err bad-json".to_string();
     };
-    // Idempotent per IP: same box re-registering keeps its id, refreshes
-    // the live profile + last_seen, and reconciles hardware facts (the
-    // entry must never stay frozen at first boot — GPU_CLAIM verification
-    // depends on a reflashed tail updating its own record).
+    let info = tel.to_node_info(peer_ip);
+    // Fast path: same IP = definitely same node — refresh + heartbeat.
     if let Some(id) = reg.find_by_ip(peer_ip) {
-        reg.refresh_entry(&id, &tel.to_node_info(peer_ip));
+        reg.refresh_entry(&id, &info);
         let events = reg.heartbeat(&id, tel.power_watts, tel.temp_c, tel.load_avg, tel.status());
         recovery.process_events(&events);
         recovery.report_success(&id);
         return format!("registered {}", id);
     }
-    let (id, events) = reg.register(&tel.to_node_info(peer_ip));
+    // Fallback: IP changed (reflash, DHCP) but hostname is stable —
+    // reuse the old stale slot so the node keeps its identity.
+    if let Some(id) = reg.find_stale_by_hostname(&info.hostname) {
+        reg.refresh_entry(&id, &info);
+        if let Some(record) = reg.nodes.get_mut(&id) {
+            record.entry.ip = peer_ip.to_string();
+        }
+        let events = reg.heartbeat(&id, tel.power_watts, tel.temp_c, tel.load_avg, tel.status());
+        recovery.process_events(&events);
+        recovery.report_success(&id);
+        return format!("registered {}", id);
+    }
+    // Brand-new node.
+    let (id, events) = reg.register(&info);
     recovery.process_events(&events);
     format!("registered {}", id)
 }

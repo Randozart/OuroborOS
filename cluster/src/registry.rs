@@ -289,6 +289,16 @@ impl Registry {
             .map(|r| r.entry.id.clone())
     }
 
+    /// Find a stale (not alive) node by hostname. Fallback for reflash:
+    /// IP changes, hostname doesn't — reuses the old slot so the node
+    /// keeps its identity instead of creating a ghost duplicate.
+    pub fn find_stale_by_hostname(&self, hostname: &str) -> Option<String> {
+        self.nodes
+            .iter()
+            .find(|(_, r)| r.entry.hostname == hostname && !r.is_alive(self.heartbeat_threshold))
+            .map(|(id, _)| id.clone())
+    }
+
     /// Get all alive nodes (last seen within threshold).
     pub fn alive_nodes(&self) -> Vec<&NodeRecord> {
         self.nodes
@@ -512,5 +522,57 @@ mod tests {
         reg.register(&info);
         assert_eq!(reg.find_by_ip("192.168.1.10"), Some("n1".to_string()));
         assert_eq!(reg.find_by_ip("10.9.9.9"), None);
+    }
+
+    #[test]
+    fn test_find_stale_by_hostname() {
+        let mut reg = Registry::new().with_heartbeat(Duration::from_secs(1));
+        let info = test_info("hp", "192.168.1.10");
+        reg.register(&info);
+        // alive node — should NOT match
+        assert_eq!(reg.find_stale_by_hostname("hp"), None);
+        // simulate 2s passing → node goes stale
+        let stale_at = epoch_secs() + 2;
+        reg.nodes.get_mut("n1").unwrap().last_seen = stale_at - 10;
+        assert_eq!(reg.find_stale_by_hostname("hp"), Some("n1".to_string()));
+        // different hostname — no match
+        assert_eq!(reg.find_stale_by_hostname("other"), None);
+    }
+
+    #[test]
+    fn test_reflash_preserves_identity() {
+        let mut reg = Registry::new().with_heartbeat(Duration::from_secs(1));
+        // HP registers at .114
+        let info1 = test_info("hp", "192.168.1.114");
+        reg.register(&info1);
+        assert_eq!(reg.len(), 1);
+        // HP reflash → DHCP changes IP to .113, old entry goes stale
+        reg.nodes.get_mut("n1").unwrap().last_seen = epoch_secs() - 10;
+        // new register from .113 with same hostname
+        let mut info2 = test_info("hp", "192.168.1.113");
+        info2.gpus = vec![crate::probe::gpu::GpuInfo {
+            vendor: "nvidia".into(),
+            model: "NVIDIA GeForce 940MX".into(),
+            vram_mib: 2048,
+            driver: "580.178.04".into(),
+            compute_cap: String::new(),
+            vulkan_api: String::new(),
+        }];
+        // simulate the bus handler fallback path
+        let id = reg
+            .find_by_ip("192.168.1.113")
+            .or_else(|| reg.find_stale_by_hostname(&info2.hostname))
+            .unwrap();
+        reg.refresh_entry(&id, &info2);
+        if let Some(record) = reg.nodes.get_mut(&id) {
+            record.entry.ip = "192.168.1.113".to_string();
+        }
+        // still exactly one entry, same ID, updated IP + GPU
+        assert_eq!(reg.len(), 1);
+        let e = &reg.nodes[&id].entry;
+        assert_eq!(id, "n1");
+        assert_eq!(e.ip, "192.168.1.113");
+        assert!(e.has_gpu);
+        assert_eq!(e.gpu_model, "NVIDIA GeForce 940MX");
     }
 }
