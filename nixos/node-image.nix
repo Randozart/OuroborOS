@@ -3,7 +3,7 @@
 # Stateless cattle: squashfs root, identity derived from hardware each
 # boot, roles never persisted (Art. 1). getty autologin spawns
 # `ouro-agent --stdio-tty` — a booted node with a login joins the graph.
-{ lib, pkgs, config, ouro-agent, rev ? "unknown", ... }:
+{ lib, pkgs, config, ouro-agent, rev ? "unknown", updatePubkey ? "", ... }:
 
 let
   crimson = "DC143C";
@@ -208,7 +208,17 @@ let
     else
       status "no-head-file"
     fi
+    # WP-U4: leave the anchor mounted for the update module (boot
+    # counter, agent-live persistence, image staging). vfat has no
+    # permissions of its own — uid/gid/umask give the tree to ouro so
+    # the agent (a user process) can install and count.
     "${pkgs.util-linux}/bin/umount" "$mnt" || true
+    mkdir -p /mnt/ouro
+    if "${pkgs.util-linux}/bin/mount" -o rw,uid=$("${pkgs.coreutils}/bin/id" -u ouro),gid=$("${pkgs.coreutils}/bin/id" -g ouro),umask=077 "$dev" /mnt/ouro 2>/run/ouro/anchor.err; then
+      status "anchor-mounted (/mnt/ouro)"
+    else
+      status "anchor-mount-failed: $(cat /run/ouro/anchor.err 2>/dev/null | tail -c 120)"
+    fi
     status complete
   '';
 
@@ -354,6 +364,26 @@ in
   # §observability). The agent binary carries its own stamp via
   # OURO_BUILD_REV; this is the image's.
   environment.etc."ouro/image-rev".text = "${rev}\n";
+
+  # WP-U4: the update trust anchor, baked at build from the committed
+  # public key. The flake gate refuses to build without a well-formed
+  # key; the seed never leaves the head.
+  environment.etc."ouro/update.pub".text = updatePubkey + "\n";
+
+  # WP-U4: clean reboot for update installs — the agent is the
+  # autologin user, not root, so polkit must vouch for it.
+  security.polkit = {
+    enable = true;
+    extraConfig = ''
+      polkit.addRule(function(action, subject) {
+        if (subject.user == "ouro" &&
+            (action.id == "org.freedesktop.login1.reboot" ||
+             action.id == "org.freedesktop.login1.power-off")) {
+          return polkit.Result.YES;
+        }
+      });
+    '';
+  };
 
   # NVIDIA: the HP Pavilion carries a 940MX (Maxwell) — legacy_580
   # ships nvidia.ko plus the OpenCL ICD (nvidia.icd rewritten with a

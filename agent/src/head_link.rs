@@ -80,6 +80,9 @@ pub async fn run(secret: Secret, head: String, period: Duration) -> Result<()> {
             Ok(resp) if resp.starts_with("registered") => {
                 let id = resp.split_whitespace().nth(1).unwrap_or("?").to_string();
                 eprintln!("head-link: registered as {} @ {}", id, head);
+                // The bus accepted us: a pushed live agent has proven
+                // itself — zero its boot counter (WP-U4 rollback law).
+                crate::update::reset_boot_counter();
             }
             Ok(resp) => {
                 eprintln!("head-link: register refused: {} — retry", resp);

@@ -38,6 +38,17 @@
         # and with the image (/etc/ouro/image-rev). Drift is visible.
         rev = self.shortRev or self.dirtyShortRev or "unknown";
       };
+
+      # WP-U4: the update trust anchor. The seed never leaves the head;
+      # the public key is committed and baked into every image. A
+      # missing or malformed key must fail the build, not ship silent.
+      updatePubkey =
+        let
+          raw = builtins.readFile ../keys/update.signing.pub;
+          stripped = builtins.replaceStrings [ "\n" "\r" " " ] [ "" "" "" ] raw;
+        in
+        assert builtins.stringLength stripped == 64;
+        stripped;
     in
     {
       nixosConfigurations.ouro-node = nixpkgs.lib.nixosSystem {
@@ -45,6 +56,7 @@
         specialArgs = {
           inherit ouro-agent;
           rev = self.shortRev or self.dirtyShortRev or "unknown";
+          inherit updatePubkey;
         };
         modules = [
           (nixpkgs + "/nixos/modules/installer/cd-dvd/iso-image.nix")

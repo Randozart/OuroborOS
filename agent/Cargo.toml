@@ -18,3 +18,5 @@ serde_json.workspace = true
 tokio = { version = "1", features = ["full"] }
 hostname = "0.4"
 libc.workspace = true
+sha2.workspace = true
+ed25519-dalek.workspace = true

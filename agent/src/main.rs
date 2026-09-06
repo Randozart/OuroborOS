@@ -4,6 +4,7 @@ mod gpu;
 mod head_link;
 mod stage;
 mod telemetry;
+mod update;
 
 use std::net::SocketAddr;
 use std::time::Duration;
@@ -19,6 +20,11 @@ use tokio::time::interval;
 const DEFAULT_PORT: u16 = 9500;
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(5);
 
+/// WP-U4 rail: an update never yanks a running task (UPDATE_ROADMAP
+/// §rails). Set while a task executes; `update begin` is refused with
+/// `err busy` while it holds.
+static TASK_BUSY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 /// Agent daemon entry point.
 ///
 /// Default mode: TCP daemon for the head node, HMAC-authenticated
@@ -31,6 +37,21 @@ const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(5);
 /// install: any booted Linux with a login joins the graph.
 #[tokio::main]
 async fn main() -> Result<()> {
+    // WP-U4 handoff: a pushed agent takes over before anything else,
+    // guarded by the boot counter (three boots without proving itself
+    // on the bus → discarded; the baked-in binary is the permanent
+    // fallback slot).
+    if let Some(live) = update::boot_check() {
+        eprintln!("update: handing off to {}", live.display());
+        let args: Vec<String> = std::env::args().skip(1).collect();
+        use std::os::unix::process::CommandExt;
+        // exec replaces the process on success; the return value is
+        // the error itself, not a Result — reaching the eprintln IS
+        // the failure path.
+        let err = std::process::Command::new(&live).args(&args).exec();
+        eprintln!("update: exec failed ({err}) — falling back to baked-in");
+    }
+
     let secret = auth::secret_from_env()?;
 
     // --head <addr>: push-based registration + telemetry heartbeat to
@@ -152,30 +173,77 @@ async fn serve_tcp(secret: Secret, port: u16) -> Result<()> {
 /// connection closed (no oracle).
 async fn handle_connection(
     secret: Secret,
-    stream: tokio::net::TcpStream,
+    mut stream: tokio::net::TcpStream,
     peer: SocketAddr,
 ) {
-    let (reader, mut writer) = stream.into_split();
-    let mut lines = BufReader::new(reader).lines();
-
-    while let Ok(Some(line)) = lines.next_line().await {
-        match authed_process(&secret, &line) {
-            Some(response) => {
-                if writer.write_all(response.as_bytes()).await.is_err() {
+    // Request-response, one line each way: the stream is borrowed for
+    // the line phase and consumed (into_std) when an update takes over
+    // — no split halves, so the whole socket can cross into the
+    // blocking frame world.
+    let mut line = String::new();
+    loop {
+        line.clear();
+        let n = BufReader::new(&mut stream).read_line(&mut line).await.unwrap_or(0);
+        if n == 0 {
+            break;
+        }
+        let line = line.trim_end_matches(['\n', '\r']).to_string();
+        // Update verbs switch the socket to frame mode — the whole
+        // stream (WP-U4; TCP face only: the tty line discipline cannot
+        // carry frames).
+        if let Some((expect, wire)) = update_verb(&secret, &line) {
+            if TASK_BUSY.load(std::sync::atomic::Ordering::Relaxed) {
+                let _ = stream.write_all(b"err busy\n").await;
+                continue;
+            }
+            let stdio_sock = match stream.into_std() {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("[update] into_std: {e}");
                     break;
                 }
-                if writer.write_all(b"\n").await.is_err() {
+            };
+            eprintln!("[update] {} begin", expect.as_str());
+            match tokio::task::spawn_blocking(move || {
+                update::handle_update(secret, stdio_sock, expect, wire)
+            })
+            .await
+            {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => eprintln!("[update] failed: {e:#}"),
+                Err(e) => eprintln!("[update] task panic: {e}"),
+            }
+            break; // receipt was written on the socket; exec or reboot follows
+        }
+        match authed_process(&secret, &line) {
+            Some(response) => {
+                if stream.write_all(response.as_bytes()).await.is_err() {
+                    break;
+                }
+                if stream.write_all(b"\n").await.is_err() {
                     break;
                 }
             }
             None => {
-                let _ = writer.write_all(b"err auth\n").await;
+                let _ = stream.write_all(b"err auth\n").await;
                 break;
             }
         }
     }
 
     eprintln!("[disconnect] {}", peer);
+}
+
+/// Detect `update begin <signed-manifest>` on the wire: authenticated
+/// (the line must carry a valid tag) and the manifest's artifact kind
+/// is parsed loosely here — the strict verification happens in
+/// [`update::handle_update`] against the image-baked pubkey.
+fn update_verb(secret: &Secret, line: &str) -> Option<(ouro_cluster::update::Artifact, String)> {
+    let (_seq, body) = auth::open_line(secret, line).ok()?;
+    let rest = body.strip_prefix("update begin ")?;
+    let value: serde_json::Value = serde_json::from_str(rest).ok()?;
+    let kind = ouro_cluster::update::Artifact::parse(value.get("artifact")?.as_str()?).ok()?;
+    Some((kind, rest.to_string()))
 }
 
 /// Verify + process one line, produce one signed response line.
@@ -306,10 +374,15 @@ fn process_message(msg: &str) -> String {
     // Task execution
     else {
         match serde_json::from_str::<executor::Task>(trimmed) {
-            Ok(task) => match executor::execute(&task) {
-                Ok(result) => serde_json::to_string(&result).unwrap_or_else(|_| "{}".into()),
-                Err(e) => format!(r#"{{"error":"{}"}}"#, e),
-            },
+            Ok(task) => {
+                TASK_BUSY.store(true, std::sync::atomic::Ordering::Relaxed);
+                let result = executor::execute(&task);
+                TASK_BUSY.store(false, std::sync::atomic::Ordering::Relaxed);
+                match result {
+                    Ok(result) => serde_json::to_string(&result).unwrap_or_else(|_| "{}".into()),
+                    Err(e) => format!(r#"{{"error":"{}"}}"#, e),
+                }
+            }
             Err(e) => format!(r#"{{"error":"invalid task: {}"}}"#, e),
         }
     }
