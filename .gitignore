@@ -16,5 +16,6 @@ result-bin
 result-man
 enroll/
 
-# WP-UPDATE signing keys — private key never leaves the head
-keys/
+# WP-UPDATE signing key — the SEED never leaves the head and is never
+# committed; the PUBLIC key is committed (it gets baked into images)
+keys/update.signing.key
