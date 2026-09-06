@@ -91,16 +91,18 @@ def build_fat_image(path, size_mb, registry_port):
     subprocess.run(["mcopy", "-i", path, "-o", head, "::head"], check=True)
 
 
-def build_spare_drive(path, registry_port, iso_size):
-    """2GB drive, MBR with one FAT partition starting BEYOND the ISO's
-    end — the self-reflash guard must pass and the raw write must stop
-    before the FAT. Rootless: MBR entry written by hand, FAT built with
-    mtools then dd'd in at the byte offset."""
+def build_spare_drive(path, registry_port, iso_size, fat_start=None):
+    """2GB drive, MBR with one FAT partition. Default: the FAT starts
+    BEYOND the ISO's end (guard must pass; the raw write must stop
+    before the FAT). With an explicit fat_start BELOW the ISO's end the
+    guard must REFUSE — scenario A proves exactly that rail, after a
+    full successful staging (no ENOSPC shortcut). Rootless: MBR entry
+    written by hand, FAT built with mtools then dd'd in at the offset."""
     sector = 512
-    fat_start = iso_size // sector + 4096  # well clear of the ISO's end
+    if fat_start is None:
+        fat_start = iso_size // sector + 4096
     total = 2 * 1024 * 1024 * 1024
     fat_len = total - fat_start * sector
-    assert fat_len > iso_size + 128 * 1024 * 1024, "spare too small for staging"
     fat_img = path + ".fat"
     build_fat_image(fat_img, fat_len // (1024 * 1024), registry_port)
 
@@ -129,7 +131,7 @@ def spawn_registry(port, state_path):
     )
 
 
-def wait_agent(port, timeout=BOOT_TIMEOUT, what="agent"):
+def wait_agent(port, timeout=BOOT_TIMEOUT, what="agent", serial=None):
     deadline = time.time() + timeout
     while time.time() < deadline:
         try:
@@ -137,8 +139,12 @@ def wait_agent(port, timeout=BOOT_TIMEOUT, what="agent"):
                 return
         except OSError:
             pass
-        time.sleep(3)
-    raise AssertionError(f"{what} task channel never came up on {port}")
+        if serial is not None:
+            serial.pump(2.0)
+        else:
+            time.sleep(3)
+    tail = serial.text()[-1800:] if serial is not None else "(no serial attached)"
+    raise AssertionError(f"{what} task channel never came up on {port}\nserial tail:\n{tail}")
 
 
 def push_image(port, iso_path):
@@ -150,11 +156,16 @@ def push_image(port, iso_path):
 
 
 class Serial:
-    """pty attached to the VM's serial console; a passive observer."""
+    """pty attached to the VM's serial console; a passive observer.
+    qemu gets the SLAVE path (a real terminal), we read the MASTER —
+    ttyname(master) is /dev/ptmx (the multiplexer), not a terminal
+    (found live: the VM's boot output went into the void and the agent
+    seemed never to come up)."""
 
     def __init__(self, tag):
-        self.fd, self.master = pty.openpty()
-        self.tty = os.ttyname(self.fd)
+        self.master, self.slave = pty.openpty()
+        self.fd = self.master
+        self.tty = os.ttyname(self.slave)
         self.tag = tag
         self.buf = b""
 
@@ -192,19 +203,30 @@ def main():
     registry = spawn_registry(reg_port, state_path)
     try:
         # ---------- Scenario A: the guard ----------
+        # 2GB drive, FAT at 600MB — BELOW the ISO's end: the full
+        # staging transfer must succeed, then the start-sector guard
+        # must refuse the raw write. The anchor is never touched.
         print("[u6] A: the guard refuses to eat the anchor", flush=True)
-        fat8 = os.path.join(WORK, "enroll8.img")
-        build_fat_image(fat8, 8, reg_port)
+        guard_drive = os.path.join(WORK, "guard.img")
+        iso_size = os.path.getsize(ISO)
+        build_spare_drive(guard_drive, reg_port, iso_size,
+                          fat_start=(600 * 1024 * 1024) // 512)
         serial = Serial("A")
         fwd = free_port()
-        qemu = boot_vmu("A", serial, [fat8], fwd)
+        qemu = boot_vmu("A", serial, [guard_drive], fwd)
         try:
-            wait_agent(fwd, what="A agent")
+            wait_agent(fwd, what="A agent", serial=serial)
             r = push_image(fwd, ISO)
             out = r.stdout + r.stderr
-            assert r.returncode != 0 and "err update" in out, (
-                f"the guard MUST refuse — got rc={r.returncode}: {out[-600:]}")
-            print("[u6] A PASS  refused before any byte was written", flush=True)
+            for _ in range(6):
+                serial.pump(2.0)
+            refusal = ("err update" in out or "err update" in serial.text())
+            overrun = "overrun" in out or "overrun" in serial.text()
+            assert r.returncode != 0 and refusal, (
+                f"the guard MUST refuse — rc={r.returncode}\n"
+                f"tool: {out[-600:]}\nserial: {serial.text()[-800:]}")
+            print(f"[u6] A PASS  guard refused the write (overrun detected: {overrun})",
+                  flush=True)
         finally:
             qemu.terminate()
             try:
@@ -223,7 +245,7 @@ def main():
         fwd = free_port()
         qemu = boot_vmu("B", serial, [spare], fwd)
         try:
-            wait_agent(fwd, what="B agent")
+            wait_agent(fwd, what="B agent", serial=serial)
             t0 = time.time()
             r = push_image(fwd, ISO)
             out = r.stdout + r.stderr
