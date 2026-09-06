@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use anyhow::Result;
 use ouro_cluster::transport::auth::{self, Secret};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::signal;
 use tokio::sync::broadcast;
@@ -176,18 +176,34 @@ async fn handle_connection(
     mut stream: tokio::net::TcpStream,
     peer: SocketAddr,
 ) {
-    // Request-response, one line each way: the stream is borrowed for
-    // the line phase and consumed (into_std) when an update takes over
-    // — no split halves, so the whole socket can cross into the
-    // blocking frame world.
-    let mut line = String::new();
+    // Request-response, one line each way — read EXACTLY one line,
+    // never a byte more: the client may coalesce the line with the
+    // frame payload that follows an `update begin`, and a buffering
+    // read would swallow those frame bytes with the BufReader's buffer
+    // (found live: the selftest's frames vanished; a lucky manual run
+    // won the race). The stream is consumed (into_std) when an update
+    // takes over — the whole socket crosses into the blocking world.
+    let mut line_buf: Vec<u8> = Vec::new();
+    let mut one = [0u8; 1];
     loop {
-        line.clear();
-        let n = BufReader::new(&mut stream).read_line(&mut line).await.unwrap_or(0);
-        if n == 0 {
-            break;
+        line_buf.clear();
+        loop {
+            match stream.read_exact(&mut one).await {
+                Ok(_) => {}
+                Err(_) => return,
+            }
+            if one[0] == b'\n' {
+                break;
+            }
+            if one[0] != b'\r' {
+                line_buf.push(one[0]);
+            }
+            if line_buf.len() > 64 * 1024 {
+                eprintln!("[line] too long — closing");
+                return;
+            }
         }
-        let line = line.trim_end_matches(['\n', '\r']).to_string();
+        let line = String::from_utf8_lossy(&line_buf).to_string();
         // Update verbs switch the socket to frame mode — the whole
         // stream (WP-U4; TCP face only: the tty line discipline cannot
         // carry frames).
@@ -203,6 +219,13 @@ async fn handle_connection(
                     break;
                 }
             };
+            // tokio lives in nonblocking mode; the frame pumps are
+            // blocking reads (spawn_blocking) — flip explicitly or every
+            // read returns EAGAIN (found live: os error 11).
+            if let Err(e) = stdio_sock.set_nonblocking(false) {
+                eprintln!("[update] set_nonblocking: {e}");
+                break;
+            }
             eprintln!("[update] {} begin", expect.as_str());
             match tokio::task::spawn_blocking(move || {
                 update::handle_update(secret, stdio_sock, expect, wire)
@@ -239,10 +262,38 @@ async fn handle_connection(
 /// is parsed loosely here — the strict verification happens in
 /// [`update::handle_update`] against the image-baked pubkey.
 fn update_verb(secret: &Secret, line: &str) -> Option<(ouro_cluster::update::Artifact, String)> {
-    let (_seq, body) = auth::open_line(secret, line).ok()?;
-    let rest = body.strip_prefix("update begin ")?;
-    let value: serde_json::Value = serde_json::from_str(rest).ok()?;
-    let kind = ouro_cluster::update::Artifact::parse(value.get("artifact")?.as_str()?).ok()?;
+    let (_seq, body) = match auth::open_line(secret, line) {
+        Ok(x) => x,
+        Err(e) => {
+            if line.starts_with("update ") {
+                eprintln!("[update] line auth failed: {e}");
+            }
+            return None;
+        }
+    };
+    let Some(rest) = body.strip_prefix("update begin ") else {
+        return None;
+    };
+    let value: serde_json::Value = match serde_json::from_str(rest) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("[update] manifest json parse: {e}");
+            return None;
+        }
+    };
+    let kind = match value.get("artifact").and_then(|v| v.as_str()) {
+        Some(k) => match ouro_cluster::update::Artifact::parse(k) {
+            Ok(k) => k,
+            Err(e) => {
+                eprintln!("[update] artifact kind: {e}");
+                return None;
+            }
+        },
+        None => {
+            eprintln!("[update] manifest missing artifact kind");
+            return None;
+        }
+    };
     Some((kind, rest.to_string()))
 }
 

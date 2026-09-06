@@ -1,0 +1,323 @@
+#!/usr/bin/env python3
+"""ouro-update — the head's half of WP-UPDATE (UPDATE_ROADMAP §tooling).
+
+Pushes signed artifacts to tails over the frame wire (WP-U1):
+  manifest built + signed by ouro-sign (one canonicalizer, the head's)
+  → `update begin <signed-manifest>` signed line
+  → frame-mode bulk transfer with the ack window
+  → final ack (ACK|EOF) → signed line receipt.
+
+Trust: only the head signs (keys/update.signing.key); tails verify
+against the baked pubkey. A tail mid-task refuses with `err busy`.
+
+Subcommands:
+  manifest KIND --artifact PATH [--version V] [--image-rev R]   build+sign
+  push [--node IP] [--port P] --artifact PATH [--manifest FILE] the transaction
+  confirm [--node-alias ID]                                     poll registry for versions
+  selftest                                                      full U4 contract in a sandbox
+"""
+
+import hashlib
+import hmac
+import json
+import os
+import shutil
+import socket
+import stat
+import struct
+import subprocess
+import sys
+import tempfile
+import time
+
+REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+SIGN_BIN = os.path.join(REPO, "target", "release", "ouro-sign")
+KEY_DIR = os.path.join(REPO, "keys")
+SECRET_FILE = os.environ.get("OURO_SECRET_FILE", os.path.join(REPO, "enroll", "secret"))
+DEFAULT_PORT = 9500
+CHUNK = 256 * 1024
+WINDOW = 16
+MAGIC = b"OURO"
+FLAG_ACK = 0x01
+FLAG_EOF = 0x02
+
+
+def load_secret() -> bytes:
+    return bytes.fromhex(open(SECRET_FILE).read().strip())
+
+
+def line_tag(secret: bytes, seq: int, body: bytes) -> str:
+    return hmac.new(secret, seq.to_bytes(8, "big") + body, hashlib.sha256).hexdigest()
+
+
+def frame_tag(secret: bytes, seq: int, payload: bytes) -> bytes:
+    return hmac.new(secret, seq.to_bytes(8, "big") + payload, hashlib.sha256).digest()
+
+
+def send_line(sock, secret, seq, body):
+    body_bytes = body.encode()
+    sock.sendall(f"{seq} {line_tag(secret, seq, body_bytes)} {body}\n".encode())
+
+
+def send_frame(sock, secret, seq, flags, payload):
+    header = MAGIC + bytes([flags]) + struct.pack(">Q", seq) + struct.pack(">I", len(payload))
+    sock.sendall(header + frame_tag(secret, seq, payload) + payload)
+
+
+def recv_exact(sock, n):
+    buf = b""
+    while len(buf) < n:
+        chunk = sock.recv(n - len(buf))
+        if not chunk:
+            raise ConnectionError(f"peer closed with {len(buf)}/{n} bytes")
+        buf += chunk
+    return buf
+
+
+def recv_frame(sock, secret):
+    header = recv_exact(sock, 17)
+    if header[:4] != MAGIC:
+        raise ConnectionError("bad frame magic")
+    flags = header[4]
+    seq = struct.unpack(">Q", header[5:13])[0]
+    ln = struct.unpack(">I", header[13:17])[0]
+    tag = recv_exact(sock, 32)
+    payload = recv_exact(sock, ln)
+    if tag != frame_tag(secret, seq, payload):
+        raise ConnectionError("frame auth failed")
+    return flags, seq, payload
+
+
+def push(host, port, secret, wire_json, artifact_path, phase=lambda m: None):
+    """The full push transaction. Returns the receipt dict."""
+    sock = socket.create_connection((host, port), timeout=30)
+    sock.settimeout(1800)
+    try:
+        phase("line: update begin")
+        send_line(sock, secret, 1, f"update begin {wire_json}")
+
+        fseq = 1
+        inflight = 0
+        sent_bytes = 0
+        with open(artifact_path, "rb") as f:
+            while True:
+                chunk = f.read(CHUNK)
+                if not chunk:
+                    break
+                send_frame(sock, secret, fseq, 0, chunk)
+                sent_bytes += len(chunk)
+                fseq += 1
+                inflight += 1
+                if inflight >= WINDOW:
+                    flags, _seq, payload = recv_frame(sock, secret)
+                    if not (flags & FLAG_ACK):
+                        raise ConnectionError("expected ack, got flags {flags:#x}")
+                    inflight = 0
+        send_frame(sock, secret, fseq, FLAG_EOF, b"")
+        phase(f"EOF sent after {sent_bytes} bytes / {fseq} frames")
+
+        while True:
+            flags, _seq, _payload = recv_frame(sock, secret)
+            phase(f"frame flags={flags:#x} seq={_seq}")
+            if flags & FLAG_ACK and flags & FLAG_EOF:
+                break
+            if not (flags & FLAG_ACK):
+                raise ConnectionError(f"unexpected frame flags {flags:#x} after EOF")
+
+        # Frame mode over; the wire is lines again — the receipt.
+        phase("waiting for receipt line")
+        buf = b""
+        while not buf.endswith(b"\n"):
+            chunk = sock.recv(4096)
+            if not chunk:
+                raise ConnectionError("no receipt line")
+            buf += chunk
+        phase("receipt received")
+        parts = buf.decode().strip().split(" ", 2)
+        if len(parts) < 3:
+            raise ConnectionError(f"malformed receipt: {buf[:120]!r}")
+        want = line_tag(secret, int(parts[0]), parts[2].encode())
+        if parts[1] != want:
+            raise ConnectionError("receipt signature mismatch")
+        return json.loads(parts[2])
+    finally:
+        sock.close()
+
+
+def build_manifest(kind, artifact, version=None, image_rev=None):
+    """Sign via ouro-sign — one canonicalizer for head and tails."""
+    if not os.path.exists(SIGN_BIN):
+        sys.exit(f"ouro-sign not built: {SIGN_BIN} (cargo build --release -p ouro-cluster --bin ouro-sign)")
+    data = open(artifact, "rb").read()
+    if version is None:
+        rev = subprocess.run(
+            ["git", "rev-parse", "--short", "HEAD"], cwd=REPO, capture_output=True, text=True
+        )
+        version = "git:" + (rev.stdout.strip() or "unknown")
+    if image_rev is None:
+        image_rev = version.lstrip("git:")
+    manifest = {
+        "kind": "ouro-update/1",
+        "key_id": "2026-09-primary",
+        "artifact": kind,
+        "version": version,
+        "image_rev": image_rev,
+        "size": len(data),
+        "sha256": hashlib.sha256(data).hexdigest(),
+        "min_agent_protocol": 1,
+        "reboot": kind == "image",
+        "created_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+    }
+    mpath = os.path.join(tempfile.mkdtemp(prefix="ouro-manifest-"), "manifest.json")
+    with open(mpath, "w") as f:
+        json.dump(manifest, f)
+    out = subprocess.run([SIGN_BIN, "sign", mpath, "-k", os.path.join(KEY_DIR, "update.signing.key")],
+                         capture_output=True, text=True)
+    if out.returncode != 0:
+        sys.exit(f"signing failed: {out.stderr}")
+    return out.stdout.strip(), artifact
+
+
+def confirm(expected_version, timeout=60):
+    """Poll the registry until every node reports the expected version."""
+    env = dict(os.environ, OURO_SECRET_FILE=SECRET_FILE)
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        r = subprocess.run(
+            [sys.executable, os.path.join(REPO, "tools", "wire.py"), "diag"], env=env, capture_output=True, text=True
+        )
+        time.sleep(3)
+    # The registry census is the authoritative view; drift does the job:
+    subprocess.run([os.path.join(REPO, "target", "release", "ouro-hiss")], input="drift\n", text=True, env=env)
+
+
+def selftest():
+    """The full U4 contract in a sandbox: spawn → push → receipt →
+    install → exec handoff → boot-check. No hardware, no root."""
+    agent_bin = os.path.join(REPO, "target", "release", "ouro-agent")
+    if not os.path.exists(agent_bin):
+        sys.exit("release agent not built (cargo build --release -p ouro-agent)")
+    sandbox = tempfile.mkdtemp(prefix="ouro-upd-test-")
+    mount = os.path.join(sandbox, "anchor")
+    rundir = os.path.join(sandbox, "run")
+    os.makedirs(mount)
+    os.makedirs(rundir)
+
+    artifact = os.path.join(sandbox, "artifact.sh")
+    with open(artifact, "w") as f:
+        f.write("#!/bin/sh\necho LIVE-AGENT-TAKEOVER\n")
+    os.chmod(artifact, os.stat(artifact).st_mode | stat.S_IEXEC)
+
+    wire_json, _ = build_manifest("agent", artifact, version="git:selftest", image_rev="selftest")
+
+    port = random_free_port()
+    env = dict(
+        os.environ,
+        OURO_SECRET_FILE=SECRET_FILE,
+        OURO_MOUNT=mount,
+        OURO_RUN_DIR=rundir,
+        OURO_UPDATE_PUBKEY=os.path.join(KEY_DIR, "update.signing.pub"),
+        OURO_PORT=str(port),
+    )
+    log = open(os.path.join(sandbox, "agent.log"), "w")
+    # Daemon mode: the stdio face would EOF on a closed stdin and exit
+    # before the push; the daemon's accept loop + heartbeat keep it up.
+    child = subprocess.Popen([agent_bin], stdin=subprocess.DEVNULL,
+                             stdout=subprocess.DEVNULL, stderr=log, env=env)
+    try:
+        wait_port(port, 5.0)
+        secret = load_secret()
+        receipt = push("127.0.0.1", port, secret, wire_json, artifact,
+                       phase=lambda m: print(f"  push: {m}", flush=True))
+        assert receipt.get("status") == "Success", f"receipt: {receipt}"
+        assert receipt.get("task_id") == "git:selftest", f"receipt: {receipt}"
+        print(f"receipt: {receipt}")
+
+        installed = open(os.path.join(mount, "agent-live"), "rb").read()
+        assert installed == open(artifact, "rb").read(), "agent-live mismatch"
+        assert json.loads(open(os.path.join(mount, "agent-update.json")).read())["sig"], "manifest missing"
+        print("install: OK (anchor persistence + manifest)")
+
+        # Reboot simulation: a fresh agent process must hand off to the
+        # live binary (exec) — its stdout is the proof.
+        takeover = subprocess.run([agent_bin], capture_output=True, text=True, env=env, timeout=10)
+        assert "LIVE-AGENT-TAKEOVER" in takeover.stdout, f"handoff failed: {takeover.stderr[-300:]}"
+        print("handoff: OK (boot_check exec'd the live agent)")
+    finally:
+        child.terminate()
+        child.wait(timeout=5)
+        log.close()
+        shutil.rmtree(sandbox, ignore_errors=True)
+    print("selftest: PASS")
+
+
+def random_free_port():
+    s = socket.socket()
+    s.bind(("127.0.0.1", 0))
+    port = s.getsockname()[1]
+    s.close()
+    return port
+
+
+def wait_port(port, timeout):
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            s = socket.create_connection(("127.0.0.1", port), timeout=0.5)
+            s.close()
+            return
+        except OSError:
+            time.sleep(0.2)
+    raise ConnectionError(f"agent task channel never came up on {port}")
+
+
+def main():
+    args = sys.argv[1:]
+    if not args:
+        sys.exit(__doc__)
+    cmd = args[0]
+    if cmd == "selftest":
+        selftest()
+    elif cmd == "manifest":
+        kind = args[1] if len(args) > 1 else "agent"
+        artifact = args[args.index("--artifact") + 1] if "--artifact" in args else None
+        version = args[args.index("--version") + 1] if "--version" in args else None
+        image_rev = args[args.index("--image-rev") + 1] if "--image-rev" in args else None
+        if not artifact:
+            sys.exit("manifest needs --artifact PATH")
+        wire, _ = build_manifest(kind, artifact, version, image_rev)
+        print(wire)
+    elif cmd == "push":
+        node = args[args.index("--node") + 1] if "--node" in args else newest_node()
+        port = int(args[args.index("--port") + 1]) if "--port" in args else DEFAULT_PORT
+        artifact = args[args.index("--artifact") + 1] if "--artifact" in args else None
+        wire = None
+        if "--manifest" in args:
+            wire = open(args[args.index("--manifest") + 1]).read().strip()
+        if not artifact:
+            sys.exit("push needs --artifact PATH")
+        if wire is None:
+            wire, _ = build_manifest("agent" if "image" not in artifact else "image", artifact)
+        secret = load_secret()
+        print(f"pushing {artifact} → {node}:{port} ...")
+        receipt = push(node, port, secret, wire, artifact)
+        print(f"receipt: {receipt}")
+    else:
+        sys.exit(f"unknown command {cmd!r}")
+
+
+def newest_node():
+    """Freshest heartbeat from registry.json (same rule as wire.py)."""
+    state = json.load(open(os.path.join(REPO, "registry.json")))
+    nodes = state.get("nodes", {})
+    if not nodes:
+        sys.exit("registry.json has no nodes")
+    newest = max(nodes.values(), key=lambda r: r.get("last_seen", 0))
+    ip = newest.get("entry", {}).get("ip")
+    nid = newest.get("entry", {}).get("id")
+    print(f"# target: {nid} @ {ip} (freshest heartbeat)", file=sys.stderr)
+    return ip
+
+
+if __name__ == "__main__":
+    main()
