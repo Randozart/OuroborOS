@@ -165,6 +165,8 @@ fn demo_topology() -> ClusterTopology {
         gpu_model: String::new(),
         gpu_vram_mib: 0,
         gpu_driver: String::new(),
+        agent_version: String::new(),
+        image_rev: String::new(),
     });
 
     topo.nodes.push(NodeEntry {
@@ -183,6 +185,8 @@ fn demo_topology() -> ClusterTopology {
         gpu_model: String::new(),
         gpu_vram_mib: 0,
         gpu_driver: String::new(),
+        agent_version: String::new(),
+        image_rev: String::new(),
     });
 
     topo.nodes.push(NodeEntry {
@@ -201,6 +205,8 @@ fn demo_topology() -> ClusterTopology {
         gpu_model: String::new(),
         gpu_vram_mib: 0,
         gpu_driver: String::new(),
+        agent_version: String::new(),
+        image_rev: String::new(),
     });
 
     topo.power_budget_watts = 500;
@@ -324,6 +330,49 @@ struct Repl {
     node_addrs: Vec<(String, String)>,
 }
 
+/// WP-U3 `drift [rev]`: which tails don't run the expected versions.
+/// The expected rev defaults to this checkout's git rev — the head is
+/// the only builder (WP-UPDATE), so the repo IS the intended state.
+/// Reads the live registry census; unreachable daemon degrades to an
+/// honest message, never a hang.
+fn run_drift(config: &propositions::ShellConfig, expected: Option<&str>) {
+    let expected = expected
+        .map(str::to_string)
+        .unwrap_or_else(|| {
+            std::process::Command::new("git")
+                .args(["rev-parse", "--short", "HEAD"])
+                .output()
+                .ok()
+                .filter(|o| o.status.success())
+                .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+                .unwrap_or_else(|| "unknown".to_string())
+        });
+    let addr = ouro_hiss::registry_client::resolve_addr(&config.registry_addr);
+    let status = ouro_cluster::transport::auth::secret_from_env().ok().and_then(|secret| ouro_hiss::registry_client::fetch(&addr, &secret).ok());
+    let Some(status) = status else {
+        println!("drift: registry unreachable at {addr}");
+        return;
+    };
+    println!("drift: expecting agent {expected}");
+    let mut stale = 0;
+    for n in &status.nodes {
+        let current = n.agent_version == expected;
+        if !current {
+            stale += 1;
+        }
+        let mark = if current { "current" } else { "OLD" };
+        let agent = if n.agent_version.is_empty() { "-" } else { &n.agent_version };
+        let image = if n.image_rev.is_empty() { "-" } else { &n.image_rev };
+        let online = if n.online { "" } else { " (offline)" };
+        println!("  [{mark:7}] {id}: agent={agent} image={image}{online}", id = n.id);
+    }
+    if stale == 0 {
+        println!("  all tails current");
+    } else {
+        println!("  {stale} tail(s) behind — ouro-update agent/image when WP-U5 lands");
+    }
+}
+
 impl Repl {
     /// Execute one input line. Returns false when the shell should exit.
     fn execute(&mut self, input: &str) -> bool {
@@ -353,6 +402,11 @@ impl Repl {
                     }
                 }
             }
+            return true;
+        }
+
+        if let ouro_hiss::parser::Command::Drift { expected } = &cmd {
+            run_drift(&self.config, expected.as_deref());
             return true;
         }
 

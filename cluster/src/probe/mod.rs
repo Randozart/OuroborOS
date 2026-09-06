@@ -19,6 +19,10 @@ pub struct NodeInfo {
     pub status: NodeStatus,
     #[serde(default)]
     pub gpus: Vec<gpu::GpuInfo>,
+    #[serde(default)]
+    pub agent_version: String,
+    #[serde(default)]
+    pub image_rev: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -79,6 +83,8 @@ pub fn probe_node(hostname: &str, ip: &str) -> Result<NodeInfo> {
         network,
         status: NodeStatus::Idle,
         gpus,
+        agent_version: String::new(),
+        image_rev: String::new(),
     })
 }
 
@@ -103,5 +109,7 @@ pub fn probe_local() -> Result<NodeInfo> {
         network,
         status: NodeStatus::Idle,
         gpus,
+        agent_version: String::new(),
+        image_rev: String::new(),
     })
 }

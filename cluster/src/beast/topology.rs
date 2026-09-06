@@ -25,6 +25,10 @@ pub struct NodeEntry {
     pub gpu_vram_mib: u64,
     #[serde(default)]
     pub gpu_driver: String,
+    #[serde(default)]
+    pub agent_version: String,
+    #[serde(default)]
+    pub image_rev: String,
 }
 
 
@@ -90,6 +94,8 @@ impl ClusterTopology {
             gpu_model: String::new(),
             gpu_vram_mib: 0,
             gpu_driver: String::new(),
+            agent_version: info.agent_version.clone(),
+            image_rev: info.image_rev.clone(),
         };
         self.nodes.push(entry.clone());
         entry

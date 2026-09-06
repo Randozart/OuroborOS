@@ -53,6 +53,8 @@ impl NodeRecord {
             gpu_model,
             gpu_vram_mib,
             gpu_driver,
+            agent_version: info.agent_version.clone(),
+            image_rev: info.image_rev.clone(),
         };
         Self {
             entry,
@@ -159,7 +161,8 @@ impl Registry {
     /// Emits an audit event + persists on change. Returns whether
     /// anything changed (idempotent when telemetry is stable).
     pub fn refresh_entry(&mut self, id: &str, info: &NodeInfo) -> bool {
-        let mut changed = false;
+        let mut hardware_changed = false;
+        let mut version_changed = false;
         {
             let Some(record) = self.nodes.get_mut(id) else {
                 return false;
@@ -171,49 +174,68 @@ impl Registry {
             );
             if e.has_gpu != gpu_present {
                 e.has_gpu = gpu_present;
-                changed = true;
+                hardware_changed = true;
             }
             if e.gpu_model != gpu_model {
                 e.gpu_model = gpu_model;
-                changed = true;
+                hardware_changed = true;
             }
             if e.gpu_vram_mib != gpu_vram {
                 e.gpu_vram_mib = gpu_vram;
-                changed = true;
+                hardware_changed = true;
             }
             if e.cpu_model != info.cpu.model {
                 e.cpu_model = info.cpu.model.clone();
-                changed = true;
+                hardware_changed = true;
             }
             if e.cores != info.cpu.cores {
                 e.cores = info.cpu.cores;
-                changed = true;
+                hardware_changed = true;
             }
             if e.threads != info.cpu.threads {
                 e.threads = info.cpu.threads;
-                changed = true;
+                hardware_changed = true;
             }
             if e.ram_mib != info.memory.total_mib {
                 e.ram_mib = info.memory.total_mib;
-                changed = true;
+                hardware_changed = true;
             }
             if e.has_avx2 != info.cpu.has_avx2 {
                 e.has_avx2 = info.cpu.has_avx2;
-                changed = true;
+                hardware_changed = true;
             }
             if e.has_avx != info.cpu.has_avx {
                 e.has_avx = info.cpu.has_avx;
-                changed = true;
+                hardware_changed = true;
             }
             if e.has_sse42 != info.cpu.has_sse42 {
                 e.has_sse42 = info.cpu.has_sse42;
-                changed = true;
+                hardware_changed = true;
+            }
+            // Versions: the tail reports what it runs (WP-U3). A tail
+            // that comes back new — hot-swap or self-reflash — updates
+            // its own record within one heartbeat; `drift` reads this.
+            if e.agent_version != info.agent_version {
+                e.agent_version = info.agent_version.clone();
+                version_changed = true;
+            }
+            if e.image_rev != info.image_rev {
+                e.image_rev = info.image_rev.clone();
+                version_changed = true;
             }
         }
+        let changed = hardware_changed || version_changed;
         if changed {
+            let mut fields = Vec::new();
+            if hardware_changed {
+                fields.push("hardware".to_string());
+            }
+            if version_changed {
+                fields.push("version".to_string());
+            }
             self.events.push(Event::NodeUpdated {
                 node_id: id.to_string(),
-                fields: vec!["hardware".into()],
+                fields,
             });
             let _ = self.save();
         }
@@ -394,6 +416,8 @@ mod tests {
             network: None,
             status: crate::probe::NodeStatus::Idle,
             gpus: Vec::new(),
+            agent_version: String::new(),
+            image_rev: String::new(),
         }
     }
 
@@ -426,6 +450,28 @@ mod tests {
             Some(Event::NodeUpdated { fields, .. }) if fields.contains(&"hardware".to_string())
         ));
         // idempotent when telemetry is stable
+        assert!(!reg.refresh_entry(&id, &info));
+    }
+
+    #[test]
+    fn test_refresh_entry_reconciles_versions() {
+        let mut reg = Registry::new();
+        let (id, _) = reg.register(&test_info("hp", "192.168.1.114"));
+        assert_eq!(reg.nodes[&id].entry.agent_version, "");
+
+        // the tail comes back running a stamped agent (hot-swap or
+        // self-reflash) — its record follows within one heartbeat
+        let mut info = test_info("hp", "192.168.1.114");
+        info.agent_version = "abc1234".into();
+        info.image_rev = "abc1234".into();
+        assert!(reg.refresh_entry(&id, &info));
+        assert_eq!(reg.nodes[&id].entry.agent_version, "abc1234");
+        assert_eq!(reg.nodes[&id].entry.image_rev, "abc1234");
+        assert!(matches!(
+            reg.events.last(),
+            Some(Event::NodeUpdated { fields, .. }) if fields.contains(&"version".to_string())
+        ));
+        // idempotent when stable
         assert!(!reg.refresh_entry(&id, &info));
     }
 

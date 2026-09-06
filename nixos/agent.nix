@@ -13,13 +13,17 @@
 # bitnet-rs/ouro-wgpu members still appear in it and must resolve in the
 # vendored deps. If vendoring fights the workspace layout, pin a minimal
 # lockfile for the image build instead of the workspace one.
-{ lib, rustPlatform, ocl-icd, src ? ../., cargoLockFile ? ../Cargo.lock }:
+{ lib, rustPlatform, ocl-icd, src ? ../., cargoLockFile ? ../Cargo.lock, rev ? "unknown" }:
 
 rustPlatform.buildRustPackage {
   pname = "ouro-agent";
   version = "0.1.0";
 
   inherit src;
+
+  # WP-U3: the agent reports what it runs. option_env! picks this up
+  # at compile time; a plain cargo build without the var reports "dev".
+  OURO_BUILD_REV = rev;
 
   cargoLock = {
     lockFile = cargoLockFile;

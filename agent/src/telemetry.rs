@@ -21,6 +21,24 @@ pub struct Telemetry {
     pub load_avg: f64,
     #[serde(default, skip_serializing_if="Vec::is_empty")]
     pub gpus: Vec<ouro_cluster::probe::gpu::GpuInfo>,
+    #[serde(default, skip_serializing_if="String::is_empty")]
+    pub agent_version: String,
+    #[serde(default, skip_serializing_if="String::is_empty")]
+    pub image_rev: String,
+}
+
+/// Compile-time build stamp. Nix sets OURO_BUILD_REV from the flake
+/// rev; plain cargo builds report "dev" honestly (WP-U3).
+pub fn agent_version() -> &'static str {
+    option_env!("OURO_BUILD_REV").unwrap_or("dev")
+}
+
+/// The image revision this tail booted (stamped at build into
+/// /etc/ouro/image-rev). Unknown on non-image dev machines.
+fn image_rev() -> String {
+    fs::read_to_string("/etc/ouro/image-rev")
+        .map(|s| s.trim().to_string())
+        .unwrap_or_else(|_| "unknown".to_string())
 }
 
 /// GPU inventory, cached (nvidia-smi spawns a process).
@@ -55,6 +73,8 @@ pub fn collect() -> Result<Telemetry> {
         temp_c: temp,
         load_avg: load,
         gpus: cached_gpus().clone(),
+        agent_version: agent_version().to_string(),
+        image_rev: image_rev(),
     })
 }
 

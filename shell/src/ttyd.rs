@@ -163,6 +163,8 @@ impl TtySession {
             gpu_model: String::new(),
             gpu_vram_mib: 0,
             gpu_driver: String::new(),
+            agent_version: String::new(),
+            image_rev: String::new(),
         });
         let scheduler = Scheduler::new(topology.clone());
         let mut config = propositions::ShellConfig::new();

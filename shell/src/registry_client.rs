@@ -47,6 +47,10 @@ pub struct RegistryNode {
     #[serde(default)]
     pub has_sse42: bool,
     #[serde(default)]
+    pub agent_version: String,
+    #[serde(default)]
+    pub image_rev: String,
+    #[serde(default)]
     pub power_watts: u32,
     #[serde(default)]
     pub temp_c: u32,
@@ -126,6 +130,8 @@ mod tests {
                 "tdp_watts": 35, "has_gpu": true,
                 "gpu_model": "NVIDIA GeForce GTX 1060 6GB",
                 "gpu_vram_mib": 6144,
+                "agent_version": "git:abc1234",
+                "image_rev": "abc1234",
                 "power_watts": 35, "temp_c": 46, "load_avg": 0.99,
                 "status": "Idle", "online": true, "last_seen": 1,
             }],
@@ -143,6 +149,8 @@ mod tests {
         assert!(n.has_gpu);
         assert_eq!(n.gpu_model, "NVIDIA GeForce GTX 1060 6GB");
         assert!(n.online);
+        assert_eq!(n.agent_version, "git:abc1234");
+        assert_eq!(n.image_rev, "abc1234");
         assert_eq!(st.event_count, 112);
     }
 

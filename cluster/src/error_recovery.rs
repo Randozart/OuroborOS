@@ -184,6 +184,8 @@ mod tests {
             network: None,
             status: crate::probe::NodeStatus::Idle,
             gpus: Vec::new(),
+            agent_version: String::new(),
+            image_rev: String::new(),
         }
     }
 

@@ -46,6 +46,10 @@ pub struct AgentTelemetry {
     pub load_avg: f64,
     #[serde(default)]
     pub gpus: Vec<GpuMini>,
+    #[serde(default)]
+    pub agent_version: String,
+    #[serde(default)]
+    pub image_rev: String,
 }
 
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]

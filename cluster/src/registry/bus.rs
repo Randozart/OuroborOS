@@ -44,6 +44,10 @@ pub struct BusTelemetry {
     pub load_avg: f64,
     #[serde(default)]
     pub gpus: Vec<crate::probe::gpu::GpuInfo>,
+    #[serde(default)]
+    pub agent_version: String,
+    #[serde(default)]
+    pub image_rev: String,
 }
 
 impl BusTelemetry {
@@ -76,6 +80,8 @@ impl BusTelemetry {
             network: None,
             status: NodeStatus::Idle,
             gpus: self.gpus.clone(),
+            agent_version: self.agent_version.clone(),
+            image_rev: self.image_rev.clone(),
         }
     }
 
@@ -136,6 +142,8 @@ fn handle_status(reg: &Registry) -> String {
                 "has_avx2": r.entry.has_avx2,
                 "has_avx": r.entry.has_avx,
                 "has_sse42": r.entry.has_sse42,
+                "agent_version": r.entry.agent_version,
+                "image_rev": r.entry.image_rev,
                 "power_watts": r.state.power_watts,
                 "temp_c": r.state.thermal_c,
                 "load_avg": r.state.load_avg,

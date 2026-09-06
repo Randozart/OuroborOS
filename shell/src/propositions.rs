@@ -58,6 +58,7 @@ fleet
   register                probe this box, add it to the topology
   unregister n3           remove a node
   discover [cidr] [port]  one-shot LAN sweep for live agents
+  drift [rev]             which tails don't run the expected versions
   probe                   list topology nodes
   save  load             topology to/from JSON
 
@@ -83,6 +84,12 @@ pub fn handle(
     recovery: &mut ouro_cluster::error_recovery::ErrorRecovery,
 ) -> Result<String> {
     match cmd {
+        Command::Drift { .. } => {
+            // The interactive shell intercepts drift before dispatch
+            // (Repl::execute); non-Repl callers (ttyd web sessions)
+            // get an honest referral rather than a silent no-op.
+            Ok("drift: run it from the interactive shell (ouro-hiss)".to_string())
+        }
         Command::ClusterSummary | Command::ClusterQuery => {
             if let Some(live) = live_status(config) {
                 let online = live.nodes.iter().filter(|n| n.online).count();
@@ -760,6 +767,8 @@ fn telemetry_to_node(addr: &str, tel: &crate::agent_client::AgentTelemetry, id: 
         gpu_model: tel.gpus.first().map(|g| g.model.clone()).unwrap_or_default(),
         gpu_vram_mib: tel.gpus.first().map(|g| g.vram_mib).unwrap_or(0),
         gpu_driver: tel.gpus.first().map(|g| g.driver.clone()).unwrap_or_default(),
+        agent_version: tel.agent_version.clone(),
+        image_rev: tel.image_rev.clone(),
     }
 }
 
@@ -982,6 +991,8 @@ mod tests {
             gpu_model: String::new(),
             gpu_vram_mib: 0,
             gpu_driver: String::new(),
+            agent_version: String::new(),
+            image_rev: String::new(),
         });
         topo
     }
@@ -1049,6 +1060,8 @@ mod tests {
             gpu_model: String::new(),
             gpu_vram_mib: 0,
             gpu_driver: String::new(),
+    agent_version: String::new(),
+    image_rev: String::new(),
         };
         assert_eq!(resolve_node_property(&node, "power", &ctx), "12W (live)");
     }
@@ -1091,6 +1104,8 @@ mod tests {
             gpu_model: String::new(),
             gpu_vram_mib: 0,
             gpu_driver: String::new(),
+    agent_version: String::new(),
+    image_rev: String::new(),
         };
         let ctx = Context::new();
         assert_eq!(resolve_node_property(&node, "power", &ctx), "35W");
@@ -1119,6 +1134,8 @@ mod tests {
                 vram_mib: 12288,
                 driver: "580.178.04".into(),
             }],
+            agent_version: "git:test".into(),
+            image_rev: "test".into(),
         };
         let node = telemetry_to_node("192.168.1.50:9500", &tel, "n1".into());
         assert_eq!(node.hostname, "test-node");

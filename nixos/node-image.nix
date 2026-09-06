@@ -3,7 +3,7 @@
 # Stateless cattle: squashfs root, identity derived from hardware each
 # boot, roles never persisted (Art. 1). getty autologin spawns
 # `ouro-agent --stdio-tty` — a booted node with a login joins the graph.
-{ lib, pkgs, config, ouro-agent, ... }:
+{ lib, pkgs, config, ouro-agent, rev ? "unknown", ... }:
 
 let
   crimson = "DC143C";
@@ -348,6 +348,12 @@ in
   # never source /etc/profile (found live: diag reported (unset) with
   # only this setting present).
   environment.variables.OCL_ICD_VENDORS = "/run/opengl-driver/etc/OpenCL/vendors";
+
+  # WP-U3: what the tail runs, stamped at build. Telemetry reports it,
+  # refresh_entry reconciles it, `drift` compares it (UPDATE_ROADMAP
+  # §observability). The agent binary carries its own stamp via
+  # OURO_BUILD_REV; this is the image's.
+  environment.etc."ouro/image-rev".text = "${rev}\n";
 
   # NVIDIA: the HP Pavilion carries a 940MX (Maxwell) — legacy_580
   # ships nvidia.ko plus the OpenCL ICD (nvidia.icd rewritten with a

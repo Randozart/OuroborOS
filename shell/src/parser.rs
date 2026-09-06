@@ -131,6 +131,8 @@ pub enum Command {
     Unregister { node: String },
     /// `tasks.` — show task queue status
     Tasks,
+    /// `drift [rev]` — which tails don't run the expected versions
+    Drift { expected: Option<String> },
     /// `recover.` — trigger error recovery sweep
     Recover,
     /// `poetry on.` / `poetry off.`
@@ -350,6 +352,15 @@ pub fn interpret(input: &str) -> Command {
     if trimmed == "recover." || trimmed == "recover" {
         return Command::Recover;
     }
+    if trimmed == "drift." || trimmed == "drift" {
+        return Command::Drift { expected: None };
+    }
+    if let Some(rest) = trimmed.strip_prefix("drift ") {
+        let expected = rest.trim().trim_end_matches('.');
+        return Command::Drift {
+            expected: Some(expected.to_string()),
+        };
+    }
     let tokens = lex(input);
     let stripped = strip_whitespace(tokens);
     parse(&stripped)
@@ -483,6 +494,10 @@ mod tests {
         assert!(matches!(interpret("load"), Command::Load));
         assert!(matches!(interpret("register"), Command::Register));
         assert!(matches!(interpret("tasks"), Command::Tasks));
+        assert!(matches!(interpret("drift"), Command::Drift { expected: None }));
+        assert!(
+            matches!(interpret("drift abc1234."), Command::Drift { expected: Some(e) } if e == "abc1234")
+        );
         assert!(matches!(interpret("recover"), Command::Recover));
         assert!(matches!(interpret("help"), Command::Help));
     }

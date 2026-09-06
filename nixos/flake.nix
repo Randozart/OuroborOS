@@ -34,12 +34,18 @@
       ouro-agent = pkgs.callPackage ./agent.nix {
         src = ../.;
         cargoLockFile = ../Cargo.lock;
+        # WP-U3: the build stamp travels with the binary (OURO_BUILD_REV)
+        # and with the image (/etc/ouro/image-rev). Drift is visible.
+        rev = self.shortRev or self.dirtyShortRev or "unknown";
       };
     in
     {
       nixosConfigurations.ouro-node = nixpkgs.lib.nixosSystem {
         inherit system;
-        specialArgs = { inherit ouro-agent; };
+        specialArgs = {
+          inherit ouro-agent;
+          rev = self.shortRev or self.dirtyShortRev or "unknown";
+        };
         modules = [
           (nixpkgs + "/nixos/modules/installer/cd-dvd/iso-image.nix")
           ./node-image.nix
