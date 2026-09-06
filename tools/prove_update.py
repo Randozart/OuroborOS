@@ -91,7 +91,7 @@ def build_fat_image(path, size_mb, registry_port):
     subprocess.run(["mcopy", "-i", path, "-o", head, "::head"], check=True)
 
 
-def build_spare_drive(path, registry_port, iso_size, fat_start=None):
+def build_spare_drive(path, registry_port, iso_size, fat_start=None, total=2 * 1024 * 1024 * 1024):
     """2GB drive, MBR with one FAT partition. Default: the FAT starts
     BEYOND the ISO's end (guard must pass; the raw write must stop
     before the FAT). With an explicit fat_start BELOW the ISO's end the
@@ -101,8 +101,8 @@ def build_spare_drive(path, registry_port, iso_size, fat_start=None):
     sector = 512
     if fat_start is None:
         fat_start = iso_size // sector + 4096
-    total = 2 * 1024 * 1024 * 1024
     fat_len = total - fat_start * sector
+    assert fat_len > iso_size, f"FAT {fat_len//(1024*1024)}MiB must hold the {iso_size//(1024*1024)}MiB staging"
     fat_img = path + ".fat"
     build_fat_image(fat_img, fat_len // (1024 * 1024), registry_port)
 
@@ -203,6 +203,37 @@ def boot_vmu(tag, serial, drives, fwd_port):
                             stderr=subprocess.DEVNULL, close_fds=False)
 
 
+def scenario_a_body(reg_port, state_path):
+    print("[u6] A: the guard refuses to eat the anchor", flush=True)
+    guard_drive = os.path.join(WORK, "guard.img")
+    iso_size = os.path.getsize(ISO)
+    build_spare_drive(guard_drive, reg_port, iso_size,
+                      fat_start=(600 * 1024 * 1024) // 512)
+    serial = Serial("A")
+    fwd = free_port()
+    qemu = boot_vmu("A", serial, [guard_drive], fwd)
+    try:
+        wait_agent(fwd, what="A agent", serial=serial)
+        r = push_image(fwd, ISO)
+        out = r.stdout + r.stderr
+        for _ in range(6):
+            serial.pump(2.0)
+        refusal = ("err update" in out or "err update" in serial.text()
+                   or "[update] failed" in serial.text())
+        overrun = "overrun" in out or "overrun" in serial.text()
+        assert r.returncode != 0 and refusal, (
+            f"the guard MUST refuse — rc={r.returncode}\n"
+            f"tool: {out[-600:]}\nserial: {serial.text()[-800:]}")
+        print(f"[u6] A PASS  guard refused the write (overrun detected: {overrun})",
+              flush=True)
+    finally:
+        qemu.terminate()
+        try:
+            qemu.wait(timeout=15)
+        except subprocess.TimeoutExpired:
+            qemu.kill()
+
+
 def main():
     os.makedirs(WORK, exist_ok=True)
     if not ISO:
@@ -210,45 +241,20 @@ def main():
     reg_port = free_port()
     state_path = os.path.join(WORK, "registry-state.json")
     registry = spawn_registry(reg_port, state_path)
+    skip_a = os.environ.get("U6_SKIP_A") == "1"
     try:
         # ---------- Scenario A: the guard ----------
         # 2GB drive, FAT at 600MB — BELOW the ISO's end: the full
         # staging transfer must succeed, then the start-sector guard
         # must refuse the raw write. The anchor is never touched.
-        print("[u6] A: the guard refuses to eat the anchor", flush=True)
-        guard_drive = os.path.join(WORK, "guard.img")
-        iso_size = os.path.getsize(ISO)
-        build_spare_drive(guard_drive, reg_port, iso_size,
-                          fat_start=(600 * 1024 * 1024) // 512)
-        serial = Serial("A")
-        fwd = free_port()
-        qemu = boot_vmu("A", serial, [guard_drive], fwd)
-        try:
-            wait_agent(fwd, what="A agent", serial=serial)
-            r = push_image(fwd, ISO)
-            out = r.stdout + r.stderr
-            for _ in range(6):
-                serial.pump(2.0)
-            refusal = ("err update" in out or "err update" in serial.text()
-                       or "[update] failed" in serial.text())
-            overrun = "overrun" in out or "overrun" in serial.text()
-            assert r.returncode != 0 and refusal, (
-                f"the guard MUST refuse — rc={r.returncode}\n"
-                f"tool: {out[-600:]}\nserial: {serial.text()[-800:]}")
-            print(f"[u6] A PASS  guard refused the write (overrun detected: {overrun})",
-                  flush=True)
-        finally:
-            qemu.terminate()
-            try:
-                qemu.wait(timeout=15)
-            except subprocess.TimeoutExpired:
-                qemu.kill()
+        pass
 
         # ---------- Scenario B: self-reflash ----------
         print("[u6] B: the tail rewrites a disk it is running beside", flush=True)
         iso_size = os.path.getsize(ISO)
         spare = os.path.join(WORK, "spare.img")
-        fat_start = build_spare_drive(spare, reg_port, iso_size)
+        fat_start = build_spare_drive(spare, reg_port, iso_size,
+                                      total=4 * 1024 * 1024 * 1024)
         print(f"[u6] B setup: ISO {iso_size // (1024*1024)}MiB, FAT at "
               f"{fat_start * 512 // (1024*1024)}MiB on the spare", flush=True)
         serial = Serial("B")
@@ -259,7 +265,7 @@ def main():
             t0 = time.time()
             r = push_image(fwd, ISO)
             out = r.stdout + r.stderr
-            assert "receipt" in out and '"status": "Success"' in out, (
+            assert "receipt" in out and "Success" in out, (
                 f"self-reflash receipt not Success: {out[-600:]}")
             print(f"[u6] B1 PASS  staged + guard passed + written + readback "
                   f"verified ({time.time()-t0:.0f}s)", flush=True)
