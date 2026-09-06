@@ -218,6 +218,13 @@ let
     #!/usr/bin/env bash
     export OURO_SECRET_FILE=/run/ouro/secret
     export OURO_TAGLINE="$(cat /run/ouro/tagline 2>/dev/null || true)"
+    # OpenCL loader needs this to find NixOS ICD registrations. The
+    # system environment should carry it (environment.variables below),
+    # but the getty shim path skips login profiles — set it explicitly
+    # so the agent's OpenCL census and GpuPool init work (found live:
+    # diag reported (unset), GPU selftest segfaulted in the OCL loader
+    # with zero ICDs found).
+    export OCL_ICD_VENDORS=/run/opengl-driver/etc/OpenCL/vendors
     # Bus join: the enroll partition's `head` file names the registry.
     if [ -s /run/ouro/head ]; then
       exec ${ouro-agent}/bin/ouro-agent --stdio-tty \
@@ -325,22 +332,31 @@ in
   # GPU compute: Intel NEO runtime (OpenCL 3.0 + Level Zero) for
   # tails with Intel iGPUs. The agent detects GPUs via detect_gpus()
   # and reports them over the bus (GPU_CLAIM.md, WP-G2).
+  # enable=true is load-bearing: the option defaults to FALSE and gates
+  # the whole /run/opengl-driver tree — with it off, extraPackages are
+  # silently dropped and no ICD registration exists (found live: the
+  # 940MX tail had no /run/opengl-driver at all, zero OpenCL platforms,
+  # and gpu_selftest died inside the loader).
+  hardware.graphics.enable = true;
   hardware.graphics.extraPackages = [ pkgs.intel-compute-runtime ];
 
   # OpenCL loader discovery: the ocl-icd loader defaults to
   # /etc/OpenCL/vendors, but NixOS installs ICD registrations under
-  # /run/opengl-driver/etc/OpenCL/vendors. The agent runs from the
-  # getty shim — no login profile — so the variable must live in the
-  # system environment (found live: Platform::list error 10, zero ICDs).
+  # /run/opengl-driver/etc/OpenCL/vendors. Belt-and-braces for anything
+  # that reads the system environment — the agent itself gets the
+  # variable from the ouro-shim export above, because getty/SSH logins
+  # never source /etc/profile (found live: diag reported (unset) with
+  # only this setting present).
   environment.variables.OCL_ICD_VENDORS = "/run/opengl-driver/etc/OpenCL/vendors";
 
-  # NVIDIA: the HP Pavilion carries a GTX 1060 6GB (Pascal) — the
-  # driver makes nvidia-smi (and the OpenCL ICD) exist, which is all
-  # detect_gpus() and the agent's OpenCL path need (GPU_CLAIM.md
-  # WP-N2). Proprietary module: Pascal predates the open kernel
-  # module (Turing+). Headless compute — no modesetting, no X runs;
-  # nomodeset above stays (NVIDIA compute is KMS-free). No
-  # finegrained RTD3 on Pascal — the 1060 idles on standard PCI PM.
+  # NVIDIA: the HP Pavilion carries a 940MX (Maxwell) — legacy_580
+  # ships nvidia.ko plus the OpenCL ICD (nvidia.icd rewritten with a
+  # store path to libnvidia-opencl, provisioned into /run/opengl-driver
+  # through hardware.graphics). Headless compute — no display server,
+  # no X. nomodeset stays: it halts the kernel's DRM KMS takeover (the
+  # i915 boot loop), not proprietary modules — nvidia.ko loads and its
+  # udev rules create /dev/nvidia* for the compute path; nvidia-drm is
+  # off anyway (modesetting.enable=false).
   nixpkgs.config.allowUnfree = true; # the driver is unfreeRedistributable
   services.xserver.videoDrivers = [ "nvidia" ]; # triggers the module; no X
   hardware.nvidia = {

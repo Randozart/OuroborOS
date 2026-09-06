@@ -127,10 +127,16 @@ pub struct GpuPool {
 }
 
 /// Every (platform, device) pair OpenCL exposes, labeled
-/// "device [platform]" — the candidate list for W1 pinning.
+/// "device [platform]" — the candidate list for W1 pinning. Zero ICDs
+/// (a CPU-only tail) is a normal condition, not a crash: the
+/// error-returning core API resolves the platform list because
+/// ocl::Platform::list() `.expect()`s on CL_PLATFORM_NOT_FOUND_KHR and
+/// would panic the connection task (found live: gpu_selftest answered
+/// 0 bytes — connection dropped, agent otherwise alive).
 fn all_devices() -> Result<Vec<(ocl::Platform, ocl::Device, String)>> {
+    let ids = ocl::core::get_platform_ids().unwrap_or_default();
     let mut out = Vec::new();
-    for p in ocl::Platform::list() {
+    for p in ocl::Platform::list_from_core(ids) {
         let pname = p.name().unwrap_or_else(|_| "unknown".into());
         for d in ocl::Device::list_all(p).unwrap_or_default() {
             let dname = d.name().unwrap_or_else(|_| "unknown".into());
@@ -361,6 +367,36 @@ mod tests {
         let v = vec![1.0, 2.0, 3.0];
         assert!((cosine(&v, &v) - 1.0).abs() < 1e-12);
         assert_eq!(cosine(&v, &[-v[0], -v[1], -v[2]]), -1.0);
+    }
+
+    /// Zero ICDs must be a clean `Err`, never a task panic. The
+    /// ocl-icd loader caches its vendor dir on first use, so the
+    /// condition is established in a fresh child process (this same
+    /// binary re-invoked with OCL_ICD_VENDORS pointed at nothing) —
+    /// regression gate for the live 0-byte gpu_selftest crash.
+    #[test]
+    fn test_zero_icds_error_not_panic() {
+        if std::env::var("OURO_ZERO_ICD_CHILD").is_ok() {
+            assert!(
+                GpuPool::new().is_err(),
+                "GpuPool::new must error cleanly with zero ICDs"
+            );
+            return;
+        }
+        let exe = std::env::current_exe().expect("test binary path");
+        let out = std::process::Command::new(exe)
+            .args(["--exact", "gpu::tests::test_zero_icds_error_not_panic"])
+            .env("OURO_ZERO_ICD_CHILD", "1")
+            .env("OCL_ICD_VENDORS", "/nonexistent-icd-dir")
+            .output()
+            .expect("spawn child test process");
+        assert!(
+            out.status.success(),
+            "child with zero ICDs panicked/exited {}: {}{}",
+            out.status,
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
     }
 
     fn device_labels() -> Vec<String> {
