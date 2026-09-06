@@ -1,4 +1,5 @@
 pub mod auth;
+pub mod frames;
 pub mod ssh;
 pub mod tcp;
 
