@@ -158,6 +158,47 @@ pub fn with_artifact(mut manifest: Manifest, bytes: &[u8], created_utc: &str) ->
     manifest
 }
 
+/// Streamed digest of a file: (size, hex sha256). The image artifact
+/// is ~700MB — it is never fully loaded into RAM.
+pub fn sha256_file(path: &std::path::Path) -> Result<(u64, String)> {
+    use std::io::Read;
+    let mut file = std::fs::File::open(path)
+        .with_context(|| format!("open {}", path.display()))?;
+    let mut hasher = Sha256::new();
+    let mut total = 0u64;
+    let mut buf = vec![0u8; 256 * 1024];
+    loop {
+        let n = file.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+        total += n as u64;
+    }
+    Ok((total, hex(&hasher.finalize())))
+}
+
+/// Artifact-level checks against a file on disk (protocol, size,
+/// streamed sha256). Kind gating is the caller's job — it knows what
+/// it asked for. Signature verification is a precondition.
+pub fn check_artifact_file(manifest: &Manifest, path: &std::path::Path) -> Result<()> {
+    if manifest.min_agent_protocol > PROTOCOL {
+        bail!(
+            "manifest needs protocol {} > ours {}",
+            manifest.min_agent_protocol,
+            PROTOCOL
+        );
+    }
+    let (size, digest) = sha256_file(path)?;
+    if manifest.size != size {
+        bail!("manifest size {} != received {size}", manifest.size);
+    }
+    if manifest.sha256 != digest {
+        bail!("artifact sha256 mismatch (manifest {} != actual {digest})", manifest.sha256);
+    }
+    Ok(())
+}
+
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }

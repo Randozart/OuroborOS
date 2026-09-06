@@ -1075,12 +1075,14 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "bitnet-rs",
+ "ed25519-dalek",
  "hostname",
  "libc",
  "ocl",
  "ouro-cluster",
  "serde",
  "serde_json",
+ "sha2",
  "tokio",
 ]
 
