@@ -143,8 +143,8 @@ versions per node; the `drift` verb lists nodes behind head's build.
 
 | Rung | Deliverable |
 |---|---|
-| **WP-U1** | Frame wire: `cluster/src/transport/frames.rs` + codec/pump/window tests |
-| **WP-U2** | Signing: `ouro-sign` bin, ed25519-dalek, canonical JSON, manifest verify |
+| **WP-U1** ✅ | Frame wire: `cluster/src/transport/frames.rs` + codec/pump/window tests — final-ack law proven live (break-on-first-ack RST'd the peer mid-receipt) |
+| **WP-U2** ✅ | Signing: `ouro-sign` bin, ed25519-dalek, canonical JSON, manifest verify — ceremony rehearsed end-to-end on a real 8MB agent artifact; tamper rejected |
 | **WP-U3** | Version plumbing: build stamps → telemetry → registry → HISS |
 | **WP-U4** | Agent update module + image changes (pubkey bake, polkit reboot, enroll extension, shim prefers `agent-live`) |
 | **WP-U5** | `tools/ouro-update`: push, canary flow |

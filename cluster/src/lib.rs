@@ -8,3 +8,4 @@ pub mod probe;
 pub mod registry;
 pub mod scheduler;
 pub mod transport;
+pub mod update;

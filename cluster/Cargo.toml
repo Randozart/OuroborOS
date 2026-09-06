@@ -11,3 +11,5 @@ serde_json.workspace = true
 hostname = "0.4"
 hmac.workspace = true
 sha2.workspace = true
+ed25519-dalek.workspace = true
+rand_core.workspace = true

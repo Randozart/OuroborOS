@@ -15,3 +15,6 @@ result
 result-bin
 result-man
 enroll/
+
+# WP-UPDATE signing keys — private key never leaves the head
+keys/
