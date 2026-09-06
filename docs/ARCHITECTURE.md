@@ -106,6 +106,44 @@ Rules that are load-bearing:
    point).
 3. Body bytes are UTF-8; everything else on the line is ASCII.
 
+### 3.1 Frame mode (bulk bytes — `cluster/src/transport/frames.rs`)
+
+A signed `frames begin` line flips the socket to frames; after the
+final ack both sides return to line mode for the receipt
+(WP-UPDATE, `UPDATE_ROADMAP.md` §wire):
+
+```
+"OURO" (4B) | flags (1B) | seq (8B BE) | len (4B BE) | tag (32B) | payload
+```
+
+- `tag` reuses the line primitive: `HMAC-SHA256(secret, seq_be || payload)`.
+  Magic and len are structural — tampering fails the parse or the tag,
+  same opaque error either way.
+- Flags: `ACK` (payload = u64 BE, highest contiguous data seq seen),
+  `EOF`. Chunk 256KiB; the cumulative ack window is the receiver's
+  backpressure (TCP owns reliability).
+- **The final ack carries `ACK|EOF` and is by construction the last
+  frame-mode byte** (TCP ordering). The sender drains to it — after
+  that the socket is provably clean for the line-mode receipt.
+  Breaking on the first post-EOF ack leaves trailing acks unread and
+  the close RSTs the peer mid-receipt (found live).
+- Reliability is TCP's; seq is enforced strictly in-order per
+  direction; oversized or hostile `len` is refused before allocation.
+
+### 3.2 Update trust planes (two authorities, never conflated)
+
+| Plane | Key | Answers |
+|---|---|---|
+| Transport | HMAC-SHA256 shared secret | Who may speak to this tail? |
+| Content | **ed25519** — private key head-only (`keys/update.signing.key`), public key baked into every image at `/etc/ouro/update.pub` | What will this tail believe? |
+
+A tail verifies the manifest signature over the **canonical** manifest
+bytes (compact JSON in struct field order) before accepting any bytes;
+artifact sha256 is checked against the manifest after receipt. Trust
+follows the signature, not the channel — USB, wire, or a future PXE all
+reduce to the same gate. Rotation: bake the new pubkey into an image
+push signed by the old key, then hand over (`key_id` reserved).
+
 ## 4. Registry bus protocol (`cluster/src/registry/bus.rs`)
 
 One signed exchange per TCP connection to `ouro-registry` (default

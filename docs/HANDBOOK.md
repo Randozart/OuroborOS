@@ -203,7 +203,10 @@ flash with `tools/flash.sh`). On boot, three services run in order:
    hex chars. Identity is *measured*, never stored. Also records Wake-on-LAN.
 2. **`ouro-enroll`** — finds the partition labeled `OURO`, mounts it
    read-only (15s retry for the udev race), installs `secret` (0600,
-   owner `ouro`) and the head's `authorized_keys`. Writes breadcrumbs to
+   owner `ouro`) and the head's `authorized_keys`, then **remounts the
+   anchor read-write at `/mnt/ouro` (uid/gid `ouro`)** — the update
+   module's persistent home (boot counter, `agent-live`, image staging;
+   UPDATE_ROADMAP). Writes breadcrumbs to
    `/run/ouro/enroll-status` and the console at every step. No partition
    → `secret: REFUSED` → the agent refuses the wire. Enrollment never
    lies silently.
@@ -219,6 +222,51 @@ wire as the TCP daemon — proven end-to-end by `tools/wp7_prove.py`
 
 To re-enroll or re-key: rewrite the OURO partition, reboot. The node
 keeps no other state — it is remade from the graph, not from disk.
+
+### 4.5 Updates: the tail remakes itself (WP-UPDATE)
+
+No more stick walks. Two artifacts, one contract
+(`docs/UPDATE_ROADMAP.md`):
+
+- **Agent hot-swap** — `ouro-update push agent --artifact <bin>`: 8MB
+  over the frame wire; the running process `execv`s the new binary in
+  place. The login wire survives; the task channel reconnects.
+- **Self-reflash** — `ouro-update push image --artifact <iso>
+  --wait-rejoin`: the full ISO is staged on the anchor, verified, then
+  the tail **writes its own boot medium** (readback sha256 must match;
+  the OURO partition range is never touched), and reboots into the new
+  image. The stick becomes a permanently installed peripheral.
+
+**Trust** — two planes, never conflated: the HMAC wire secret
+authorizes *transport*; **ed25519** authorizes *content*. Only the head
+signs (`keys/update.signing.key`, 0600, gitignored); every image bakes
+the public key at `/etc/ouro/update.pub`. A tail verifies the manifest
+signature BEFORE accepting any bytes — trust follows the signature,
+not the channel.
+
+**Rails** — an update is refused with `err busy` while a task runs; a
+discharging battery refuses a reflash; a reflash whose ISO would
+overrun the OURO partition start is refused outright; the write is
+readback-verified before the reboot is allowed.
+
+**Rollback** — the baked-in ISO binary is the permanent fallback. A
+hot-swapped `agent-live` carries a boot counter on the anchor: three
+boots without a successful bus registration and it is discarded. A/B
+semantics with zero extra partitions.
+
+**Head workflow**:
+
+```text
+drift [rev]                    which tails don't run the expected versions
+ouro-update push agent ...     node-by-node (closure-match rule enforced)
+ouro-update push image ...     canary first: one node, rejoin + 60s stable,
+                               then the fleet. Never a fleet-wide blast.
+```
+
+The QEMU prove (`tools/prove_update.py`) exercises the guard and the
+full self-reflash transaction on real booted images; the first
+update-capable image still needs one physical flash — after that, the
+wire is the only delivery path.
 
 ---
 

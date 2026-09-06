@@ -245,3 +245,25 @@ The DMA ladder (DMA_ROADMAP.md) is the practical form of this
 principle: at Tier 6, DMA reads a tail's RAM the way a chipset reads
 an SSD — the room becomes the backplane, and the old PC was the
 expansion card all along.
+
+---
+
+## 10. The tail rewrites its own genesis (2026-09-06)
+
+Before WP-UPDATE, expanding the fleet meant a pilgrimage: build, flash,
+walk the stick to the shelf, boot, repeat for every change. The stick
+was the fleet's umbilical cord — cut it wrongly and the machine
+couldn't grow.
+
+Now the tail consumes its own tail and is reborn. A new image crosses
+the wire as signed frames; the tail stages it on its anchor, verifies
+the ed25519 signature and the sha256, writes it onto **its own boot
+medium** with a readback gate, and reboots into what it just became.
+The stick is no longer a delivery mechanism — it is a permanently
+installed peripheral, touched once at birth and never again.
+
+The same law that lets a room become a backplane (§9) lets a shelf
+become self-modifying: the head is the only builder, the signature is
+the only permission, and the machine's growth no longer depends on
+whoever happens to be holding a USB stick. Expansion is now
+`ouro-update push image --wait-rejoin` — a doorway that opens itself.

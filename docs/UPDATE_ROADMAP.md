@@ -148,7 +148,7 @@ versions per node; the `drift` verb lists nodes behind head's build.
 | **WP-U3** ✅ | Version plumbing: build stamps → telemetry → registry → HISS — drift verified live against the bus |
 | **WP-U4** ✅ | Agent update module + image changes — full transaction proven live in sandbox (push → receipt → install → boot_check exec handoff) |
 | **WP-U5** ✅ | `tools/ouro-update`: push, canary flow — `selftest` runs the whole U4 contract in a sandbox |
-| **WP-U6** | QEMU prove-update scenario |
+| **WP-U6** ✅ | QEMU prove-update: A (guard refuses a full-staged overrun) + B (frames → staging → guard → raw write → readback → reboot → rejoin, 360s) — ALL PASS |
 | **WP-U7** | Hardware receipts + docs (HANDBOOK, ARCHITECTURE, FLEET §10) |
 
 **Bootstrap honesty**: the first update-capable image still needs one
