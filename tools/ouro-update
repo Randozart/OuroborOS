@@ -291,19 +291,52 @@ def main():
         node = args[args.index("--node") + 1] if "--node" in args else newest_node()
         port = int(args[args.index("--port") + 1]) if "--port" in args else DEFAULT_PORT
         artifact = args[args.index("--artifact") + 1] if "--artifact" in args else None
+        kind = "image" if (args[1:2] == ["image"] or "image" in args) else "agent"
+        wait_rejoin = "--wait-rejoin" in args
         wire = None
         if "--manifest" in args:
             wire = open(args[args.index("--manifest") + 1]).read().strip()
         if not artifact:
             sys.exit("push needs --artifact PATH")
         if wire is None:
-            wire, _ = build_manifest("agent" if "image" not in artifact else "image", artifact)
+            wire, _ = build_manifest(kind, artifact)
         secret = load_secret()
-        print(f"pushing {artifact} → {node}:{port} ...")
+        print(f"pushing {artifact} ({kind}) → {node}:{port} ...", flush=True)
+        t0 = time.time()
         receipt = push(node, port, secret, wire, artifact)
-        print(f"receipt: {receipt}")
+        print(f"receipt: {receipt} ({time.time()-t0:.1f}s)")
+        if receipt.get("status") != "Success":
+            sys.exit(1)
+        if wait_rejoin:
+            wait_rejoin_and_check(node, kind, wire)
     else:
         sys.exit(f"unknown command {cmd!r}")
+
+
+def wait_rejoin_and_check(node, kind, wire, timeout=600):
+    """After an image push the tail reboots — poll the registry until it
+    rejoins and reports the pushed revision (identical-reflash proves
+    mechanism; the revision CHANGE lands on real hardware, U7)."""
+    manifest = json.loads(wire)
+    want_rev = manifest["image_rev"]
+    state_path = os.path.join(REPO, "registry.json")
+    print(f"waiting for rejoin (expect image_rev {want_rev}) ...", flush=True)
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            state = json.load(open(state_path))
+            for nid, n in state.get("nodes", {}).items():
+                if n.get("entry", {}).get("ip") != node:
+                    continue
+                seen = n.get("last_seen", 0)
+                rev = n.get("entry", {}).get("image_rev", "")
+                if rev == want_rev and time.time() - seen < 30:
+                    print(f"rejoined: {nid} image_rev={rev} ({time.time()-seen:.0f}s ago)")
+                    return
+        except (OSError, json.JSONDecodeError):
+            pass
+        time.sleep(5)
+    sys.exit("tail never rejoined with the pushed revision")
 
 
 def newest_node():

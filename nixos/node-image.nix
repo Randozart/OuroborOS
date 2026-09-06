@@ -498,7 +498,13 @@ in
 
   # ocl-icd: the OpenCL loader the agent dlopens at runtime; the
   # intel-compute-runtime ICD above registers the actual driver
-  environment.systemPackages = [ ouro-agent ouro-brand ouro-probe ouro-enroll ouro-shim pkgs.iproute2 pkgs.ocl-icd ];
+  environment.systemPackages = [
+    ouro-agent ouro-brand ouro-probe ouro-enroll ouro-shim
+    pkgs.iproute2 pkgs.ocl-icd
+    # WP-U4: the self-reflash reads the partition table with sfdisk
+    # (bare PATH lookup from the agent).
+    pkgs.util-linux
+  ];
 
   # login(1)-friendly: register the custom shell
   environment.etc."shells".text = lib.mkAfter ''
