@@ -420,6 +420,45 @@ fn process_message(msg: &str) -> String {
             std::fs::read_to_string("/run/ouro/tagline").unwrap_or_default()
         }
     }
+    // RDMA setup: `rdma-setup` (auto-detect wired iface) or
+    // `rdma-setup <iface>` (explicit). Loads rdma_rxe via the
+    // ouro-rdma-setup@ systemd template service (polkit authorizes
+    // ouro to manage ouro-* services).
+    else if trimmed == "rdma-setup" || trimmed.starts_with("rdma-setup ") {
+        let iface = trimmed.strip_prefix("rdma-setup").unwrap_or("").trim();
+        let iface = if iface.is_empty() {
+            detect_wired_iface()
+        } else {
+            iface.to_string()
+        };
+        if iface.is_empty() {
+            return "err no-wired-iface".into();
+        }
+        match std::process::Command::new("systemctl")
+            .args(["start", &format!("ouro-rdma-setup@{iface}.service")])
+            .output()
+        {
+            Ok(out) => {
+                if out.status.success() {
+                    // Read back the GID from sysfs.
+                    let gid = std::fs::read_to_string(
+                        "/sys/class/infiniband/rxe0/ports/1/gids/0",
+                    )
+                    .map(|s| s.trim().to_string())
+                    .unwrap_or_default();
+                    format!(
+                        r#"{{"status":"ok","iface":"{iface}","device":"rxe0","gid":"{gid}"}}"#
+                    )
+                } else {
+                    let stderr = String::from_utf8_lossy(&out.stderr);
+                    format!(
+                        r#"{{"status":"error","iface":"{iface}","stderr":"{stderr}"}}"#
+                    )
+                }
+            }
+            Err(e) => format!(r#"{{"status":"error","error":"{e}"}}"#),
+        }
+    }
     // Task execution
     else {
         match serde_json::from_str::<executor::Task>(trimmed) {
@@ -435,6 +474,34 @@ fn process_message(msg: &str) -> String {
             Err(e) => format!(r#"{{"error":"invalid task: {}"}}"#, e),
         }
     }
+}
+
+/// Detect the first wired Ethernet interface with a carrier (link up).
+/// Skips lo, wlan*, tailscale*, docker*, virbr*, veth*.
+fn detect_wired_iface() -> String {
+    let Ok(entries) = std::fs::read_dir("/sys/class/net") else {
+        return String::new();
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().to_string();
+        if name == "lo"
+            || name.starts_with("wlan")
+            || name.starts_with("tailscale")
+            || name.starts_with("docker")
+            || name.starts_with("virbr")
+            || name.starts_with("veth")
+        {
+            continue;
+        }
+        // Check carrier (1 = link up).
+        let carrier = std::fs::read_to_string(format!("/sys/class/net/{name}/carrier"))
+            .map(|s| s.trim() == "1")
+            .unwrap_or(false);
+        if carrier {
+            return name;
+        }
+    }
+    String::new()
 }
 
 #[cfg(test)]

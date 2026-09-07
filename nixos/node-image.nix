@@ -376,13 +376,36 @@ in
     enable = true;
     extraConfig = ''
       polkit.addRule(function(action, subject) {
-        if (subject.user == "ouro" &&
-            (action.id == "org.freedesktop.login1.reboot" ||
-             action.id == "org.freedesktop.login1.power-off")) {
-          return polkit.Result.YES;
+        if (subject.user == "ouro") {
+          if (action.id == "org.freedesktop.login1.reboot" ||
+              action.id == "org.freedesktop.login1.power-off") {
+            return polkit.Result.YES;
+          }
+          if (action.id == "org.freedesktop.systemd1.manage-units") {
+            var unit = action.lookup("unit");
+            if (unit && unit.match(/^ouro-.*\.service$/)) {
+              return polkit.Result.YES;
+            }
+          }
         }
       });
     '';
+  };
+
+  # WP-DMA: SoftRoCE setup service — the head tells the tail to become
+  # a peripheral. Template: `systemctl start ouro-rdma-setup@enp7s0.service`
+  # loads rdma_rxe and creates the SoftRoCE device on the named interface.
+  systemd.services."ouro-rdma-setup@" = {
+    description = "Set up SoftRoCE RDMA on %I";
+    before = [ "ouro-agent.service" ];
+    wantedBy = [ "multi-user.target" ];
+    serviceConfig = {
+      Type = "oneshot";
+      RemainAfterExit = true;
+      ExecStartPre = "${pkgs.kmod}/bin/modprobe rdma_rxe";
+      ExecStart = "${pkgs.rdma-core}/bin/rdma link add rxe0 type rxe netdev %I";
+      ExecStop = "${pkgs.rdma-core}/bin/rdma link delete rxe0";
+    };
   };
 
   # NVIDIA: the HP Pavilion carries a 940MX (Maxwell) — legacy_580
@@ -504,6 +527,9 @@ in
     # WP-U4: the self-reflash reads the partition table with sfdisk
     # (bare PATH lookup from the agent).
     pkgs.util-linux
+    # WP-DMA: rdma-core provides the `rdma` CLI for SoftRoCE setup
+    # (ouo-rdma-setup@ service); kmod for modprobe.
+    pkgs.rdma-core pkgs.kmod
   ];
 
   # login(1)-friendly: register the custom shell
