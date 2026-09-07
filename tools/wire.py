@@ -56,22 +56,23 @@ def send(host: str, body: str, port: int = DEFAULT_PORT, timeout: int = TIMEOUT_
 
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     sock.settimeout(timeout)
+    resp_line = b""
     try:
         sock.connect((host, port))
         sock.sendall(line.encode())
-        chunks = []
-        while True:
-            try:
-                chunk = sock.recv(65536)
-            except socket.timeout:
-                break
-            if not chunk:
-                break
-            chunks.append(chunk)
+        # One response line per request. The agent keeps the connection
+        # open for pipelining, so read exactly ONE line and close —
+        # waiting for close would block every call until the socket
+        # timeout (found live: ping took 10s, tasks 120s).
+        f = sock.makefile("rb")
+        resp_line = f.readline()
+    except socket.timeout:
+        sock.close()
+        sys.exit(f"wire: no reply from {host}:{port} within {timeout}s")
     finally:
         sock.close()
 
-    resp = b"".join(chunks).decode().strip()
+    resp = resp_line.decode().strip()
     if not resp:
         sys.exit("wire: 0 bytes — connection closed without a reply (agent task died?)")
     parts = resp.split(" ", 2)

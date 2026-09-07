@@ -238,6 +238,37 @@ async fn handle_connection(
             }
             break; // receipt was written on the socket; exec or reboot follows
         }
+        // Task JSON: run on the blocking pool, never inline on a tokio
+        // worker. A long task (gpu_selftest's OpenCL JIT alone takes ~90s
+        // on first run) starves the runtime on small cores and wedges the
+        // whole task channel (found live on the 2-core HP: ping/diag/task
+        // all hung while the heartbeat kept ticking).
+        let task = auth::open_line(&secret, &line)
+            .ok()
+            .and_then(|(seq, body)| serde_json::from_str::<executor::Task>(&body).ok().map(|t| (seq, t)));
+        if let Some((seq, task)) = task {
+            let name = task.name.clone();
+            eprintln!("[task] {name} begin");
+            if TASK_BUSY.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                let _ = stream.write_all(b"err busy\n").await;
+                continue;
+            }
+            let result = tokio::task::spawn_blocking(move || executor::execute(&task)).await;
+            TASK_BUSY.store(false, std::sync::atomic::Ordering::Relaxed);
+            let response = match result {
+                Ok(Ok(out)) => serde_json::to_string(&out).unwrap_or_else(|_| "{}".into()),
+                Ok(Err(e)) => format!(r#"{{"error":"{}"}}"#, e),
+                Err(e) => format!(r#"{{"error":"task panic: {}"}}"#, e),
+            };
+            let signed = auth::sign_line(&secret, seq, &response);
+            if stream.write_all(signed.as_bytes()).await.is_err() {
+                break;
+            }
+            if stream.write_all(b"\n").await.is_err() {
+                break;
+            }
+            continue;
+        }
         match authed_process(&secret, &line) {
             Some(response) => {
                 if stream.write_all(response.as_bytes()).await.is_err() {
