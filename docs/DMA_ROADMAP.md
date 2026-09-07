@@ -70,11 +70,23 @@ as storage, not compute — a cheap shelf, not a slow server.
 
 **SoftRoCE head↔tail proof**:
 
-1. Load `rdma_rxe` on head + one tail (`rdma link add`)
-2. Register a buffer on the tail; DMA-read it from the head (`ibv_` ping
-   + throughput)
-3. Measure: latency, throughput, CPU tax on both ends
-4. Add `rdma` capability to `NodeRecord` + a placement rule
+1. ~~Load `rdma_rxe` on head + one tail (`rdma link add`)~~ ✅ **2026-09-07**:
+   the tail's image attaches `rxe0` to the wired interface **at boot**
+   (`ouro-rdma.service`, root by birthright — systemd system services run
+   as root; zero-touch, no polkit, no sudo, no head verb). The head is
+   the fleet's only sudo: `tools/ouro-rdma-head.service`, 3-line install.
+2. ~~Register a buffer on the tail; DMA-read it from the head~~ ✅ built:
+   `ouro-dma server` ships **in the image** (`ouro-dma-server.service`,
+   64MiB registered window on :9600); the head runs
+   `ouro-dma bench --addr <tail>` for the 64B→1MiB sweep.
+   Code: `cluster/src/transport/dma.rs` + `rdma_ffi.rs` (hand-rolled FFI —
+   rdma-sys 0.3.0's bindgen panics on kernel ≥6.10 headers) + a C shim for
+   the three static-inline verbs functions.
+3. **Measure: latency, throughput, CPU tax** — pending the WP-U7 flash
+   (the RDMA-capable image is the same one that ships the update system)
+4. Add `rdma` capability to `NodeRecord` + a placement rule ✅ partially:
+   `NodeEntry.has_rdma`/`rdma_gid` flow from the probe (sysfs scan) through
+   the bus into the topology; placement rules come with the measurements
 5. Re-run the ACTS parity ladder over the verbs path (Art. 10)
 
 Deliverable: one measured row in this table, and the thesis — *node as

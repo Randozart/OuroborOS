@@ -281,6 +281,45 @@ only delivery path from that point on. (The same stick *can* bootstrap
 multiple tails sequentially — reflash it for each new box — but after
 each box's first boot, it is done forever.)
 
+### 4.6 DMA: the tail becomes device space (Tier 4)
+
+`docs/DMA_ROADMAP.md` is the plan; here is the operating manual.
+
+**Tails are zero-touch.** The image loads `rdma_rxe` and attaches
+`rxe0` to the wired interface **at boot** (`ouro-rdma.service` — a
+systemd system service runs as root; the tail's own OS vouches for
+itself). A tail with no wired NIC boots without RDMA and says so.
+The Tier 4 proof server ships in the image too
+(`ouro-dma-server.service`): a registered 64MiB window on :9600 that
+answers RDMA reads.
+
+**The head is the fleet's only sudo.** It runs your daily-driver OS,
+so its RDMA attach is one manual unit install:
+
+```bash
+sudo cp tools/ouro-rdma-head.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now ouro-rdma-head
+```
+
+Verify both ends (`rdma link show`, `ibv_devinfo` — expect `rxe0`,
+state `PORT_ACTIVE`), then the proof:
+
+```bash
+target/release/ouro-dma bench --addr <tail-ip> --iters 1000
+```
+
+The sweep pulls 64B→1MiB reads across the SoftRoCE device and prints
+throughput, latency, and bandwidth — the first measured row of the DMA
+ladder, on hardware already owned.
+
+**Trust stays two-planed** (§3.2 of ARCHITECTURE): the registered
+memory window is *unauthenticated* at the RDMA layer — the rkey is the
+access token (whoever has it can read). That is acceptable for the PoC
+window; the agent-integrated form (Phase 4) hands rkeys only over the
+HMAC-signed wire, and the HMAC secret itself never enters a
+DMA-visible region (DMA_ROADMAP §security model).
+
 ---
 
 ## 5. Troubleshooting

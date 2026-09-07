@@ -450,9 +450,11 @@ in
   # for non-image boxes and manual re-setup.
   boot.kernelModules = [ "rdma_rxe" ];
 
-  # rdma-core ships the udev rules for /dev/infiniband/* (devtmpfs
-  # creates the node, the rules keep udev honest about it).
-  services.udev.packages = [ pkgs.rdma-core ];
+  # NOTE: rdma-core's udev rules are NOT installed — one references
+  # /bin/systemctl and fails the Nix purity check. Unneeded anyway:
+  # ib_uverbs registers a kernel class, devtmpfs creates
+  # /dev/infiniband/uverbs* without udev help. The rdma CLI + libs ride
+  # in systemPackages (and via rpath for the built binaries).
 
   systemd.services.ouro-rdma = {
     description = "OuroborOS SoftRoCE attach (wired iface → rxe0)";
