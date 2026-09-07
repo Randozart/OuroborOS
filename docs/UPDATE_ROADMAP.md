@@ -149,7 +149,7 @@ versions per node; the `drift` verb lists nodes behind head's build.
 | **WP-U4** ✅ | Agent update module + image changes — full transaction proven live in sandbox (push → receipt → install → boot_check exec handoff) |
 | **WP-U5** ✅ | `tools/ouro-update`: push, canary flow — `selftest` runs the whole U4 contract in a sandbox |
 | **WP-U6** ✅ | QEMU prove-update: A (guard refuses a full-staged overrun) + B (frames → staging → guard → raw write → readback → reboot → rejoin, 360s) — ALL PASS |
-| **WP-U7** | Hardware receipts + docs (HANDBOOK, ARCHITECTURE, FLEET §10) |
+| **WP-U7** ✅ | Hardware receipts + docs (HANDBOOK, ARCHITECTURE, FLEET §10) |
 
 **Bootstrap honesty**: the first update-capable image still needs one
 last physical flash. After that, the stick becomes a permanently
@@ -159,3 +159,20 @@ installed peripheral — never touched again.
 battery guard; the canary law bounds blast radius. Update dispatch is a
 control-plane operation and does not route through the energy-budget
 scheduler — but a tail mid-task is never yanked.
+
+---
+
+## Bugs found live during implementation
+
+These were not caught by unit tests or the selftest sandbox — only by
+watching a real (or QEMU) agent struggle. They shaped the final design.
+
+| Bug | Symptom | Root cause | Fix |
+|---|---|---|---|
+| BufReader over-read (WP-U5, `9ef51e9`) | Frame bytes vanished; agent died mid-transfer | Per-connection `BufReader` slurped coalesced line+frame bytes in one TCP read; leftover frame bytes died with the reader | Byte-exact line reads (`read_exact` into a `[u8; LINE_MAX]`); no BufReader |
+| tokio `into_std()` nonblocking (WP-U5, `9ef51e9`) | Agent exited silently after spawning the update task | tokio socket sets `O_NONBLOCK` on conversion to std; the frame reader blocked forever in `recv` | Explicit `socket.set_nonblocking(false)` after `into_std()` |
+| Python pty master/slave swap (`tools/prove_update.py`) | QEMU never handed over `VMEXIT_SHUTDOWN`; serial stayed silent | `openpty()` returns `(master_fd, slave_name)` — the slave name (what QEMU needs) was being opened as a master | Flip `os.open(os.ttyname(master), ...)` to `os.open(slave, ...)` |
+| MBR bytearray slice (WP-U6, `9bf7cdb`) | 55aa signature invisible; sfdisk said "partition table empty" | Python `bytearray.__setitem__` on a slice ignores past-end indices; `mbr[510:512] = b'\x55\xaa'` silently truncated | Write each byte individually with bounds check |
+| Block device permissions (WP-U6, `09b2f48`) | `[update] failed: Permission denied` when writing to /dev/vda | agent user `ouro` not in the `disk` group | `extraGroups = ["disk"]` in `node-image.nix`; enroll leaves anchor mounted `uid=ouro,gid=ouro` |
+| CD-sector 2048B (WP-U6, `691b14d`) | Scenario B: ENOSPC staging into FAT that "should" have been 742MiB | ISO size in bytes = 667808 × 2048 = 1.3GB; earlier estimate of 700MB was in 512-byte sectors | Scenario B drive bumped to 4GB; FAT geometry recalculated with correct 2048-byte sector size |
+| pkill -f self-match | QEMU prove process killed before relaunch | `pkill -f qemu-system` matched the literal text in the calling bash command | Use `pkill -x qemu-system-x86_64` (exact name match) or bracketed grep for self-avoidance |

@@ -268,6 +268,19 @@ full self-reflash transaction on real booted images; the first
 update-capable image still needs one physical flash — after that, the
 wire is the only delivery path.
 
+**Direction matters**: updates flow tail-ward, not stick-ward. Nothing
+pushes *to* the stick — the tail receives the signed ISO over the
+wire, stages it, then **rewrites its own boot medium**. The stick
+stops being a delivery device; it becomes a permanently installed disk.
+
+**Once-per-box**: every new node (a tail joining for the first time)
+still needs exactly one physical flash — `flash.sh` on the head writes
+the ISO, you walk the stick to the shelf, it boots. After that first
+boot, the tail never sees a stick walk again. `ouro-update` is the
+only delivery path from that point on. (The same stick *can* bootstrap
+multiple tails sequentially — reflash it for each new box — but after
+each box's first boot, it is done forever.)
+
 ---
 
 ## 5. Troubleshooting
@@ -282,6 +295,11 @@ wire is the only delivery path.
 | Task shows `queued (queue depth: N)` | Budget exceeded or no capable node | `tasks` to inspect; `budget 600w` or free a node; `recover` drains |
 | Node listed but `?` shows it idle with stale watts | Heartbeat gap > 30s | Node offline — `recover`; check its link |
 | `discover` finds nothing | Agents not listening on that port | `discover. <cidr> 9500`; prefer the push bus over sweeps |
+| `ouro-update push` returns `err busy` | Tail is mid-task | Wait for the task to finish; `tasks` shows the queue |
+| `ouro-update push image` → `bad frame magic` | Tail on old firmware (pre-U1 frame wire) | Physical flash required first; wire update only works on U1+ images |
+| `ouro-update push image` → staging hangs at 0% | BufReader slurped the frame bytes (known pre-U5 bug) | Update to a U5+ agent; the byte-exact line reads fix coalesced reads |
+| `[update] failed: OURO start sector not found` | ISO would overrun the anchor partition | Guard refused the write (correct behavior); see `tasks` for receipt |
+| `execv failed: no such file or directory` after update | `/proc/self/exe` pointed at a dead path | Agent reverted to baked-in binary; reboot clears it |
 | FIFO `.out` shows `err empty line` | Wrote newline only | Each request must be one non-empty line |
 
 ---
