@@ -183,6 +183,8 @@ impl Scheduler {
             gpu_driver: String::new(),
             agent_version: String::new(),
             image_rev: String::new(),
+            has_rdma: false,
+            rdma_gid: String::new(),
         }
     }
 
@@ -205,6 +207,8 @@ impl Scheduler {
             gpu_driver: String::new(),
             agent_version: String::new(),
             image_rev: String::new(),
+            has_rdma: false,
+            rdma_gid: String::new(),
         }
     }
 
@@ -256,6 +260,8 @@ impl Scheduler {
             gpu_driver: String::new(),
             agent_version: String::new(),
             image_rev: String::new(),
+            has_rdma: false,
+            rdma_gid: String::new(),
         };
         cpu.has_gpu = false;
         let mut gpu = cpu.clone();

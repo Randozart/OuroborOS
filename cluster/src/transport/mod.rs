@@ -1,5 +1,7 @@
 pub mod auth;
+pub mod dma;
 pub mod frames;
+pub mod rdma_ffi;
 pub mod ssh;
 pub mod tcp;
 

@@ -29,6 +29,10 @@ pub struct NodeEntry {
     pub agent_version: String,
     #[serde(default)]
     pub image_rev: String,
+    #[serde(default)]
+    pub has_rdma: bool,
+    #[serde(default)]
+    pub rdma_gid: String,
 }
 
 
@@ -96,6 +100,8 @@ impl ClusterTopology {
             gpu_driver: String::new(),
             agent_version: info.agent_version.clone(),
             image_rev: info.image_rev.clone(),
+            has_rdma: info.has_rdma,
+            rdma_gid: info.rdma_gid.clone(),
         };
         self.nodes.push(entry.clone());
         entry

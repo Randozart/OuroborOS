@@ -186,6 +186,8 @@ mod tests {
             gpus: Vec::new(),
             agent_version: String::new(),
             image_rev: String::new(),
+            has_rdma: false,
+            rdma_gid: String::new(),
         }
     }
 

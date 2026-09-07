@@ -82,6 +82,8 @@ impl BusTelemetry {
             gpus: self.gpus.clone(),
             agent_version: self.agent_version.clone(),
             image_rev: self.image_rev.clone(),
+            has_rdma: false,
+            rdma_gid: String::new(),
         }
     }
 

@@ -167,6 +167,8 @@ fn demo_topology() -> ClusterTopology {
         gpu_driver: String::new(),
         agent_version: String::new(),
         image_rev: String::new(),
+        has_rdma: false,
+        rdma_gid: String::new(),
     });
 
     topo.nodes.push(NodeEntry {
@@ -187,6 +189,8 @@ fn demo_topology() -> ClusterTopology {
         gpu_driver: String::new(),
         agent_version: String::new(),
         image_rev: String::new(),
+        has_rdma: false,
+        rdma_gid: String::new(),
     });
 
     topo.nodes.push(NodeEntry {
@@ -207,6 +211,8 @@ fn demo_topology() -> ClusterTopology {
         gpu_driver: String::new(),
         agent_version: String::new(),
         image_rev: String::new(),
+        has_rdma: false,
+        rdma_gid: String::new(),
     });
 
     topo.power_budget_watts = 500;

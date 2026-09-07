@@ -165,6 +165,8 @@ impl TtySession {
             gpu_driver: String::new(),
             agent_version: String::new(),
             image_rev: String::new(),
+            has_rdma: false,
+            rdma_gid: String::new(),
         });
         let scheduler = Scheduler::new(topology.clone());
         let mut config = propositions::ShellConfig::new();

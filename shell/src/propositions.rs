@@ -769,6 +769,8 @@ fn telemetry_to_node(addr: &str, tel: &crate::agent_client::AgentTelemetry, id: 
         gpu_driver: tel.gpus.first().map(|g| g.driver.clone()).unwrap_or_default(),
         agent_version: tel.agent_version.clone(),
         image_rev: tel.image_rev.clone(),
+        has_rdma: false,
+        rdma_gid: String::new(),
     }
 }
 
@@ -993,6 +995,8 @@ mod tests {
             gpu_driver: String::new(),
             agent_version: String::new(),
             image_rev: String::new(),
+            has_rdma: false,
+            rdma_gid: String::new(),
         });
         topo
     }
@@ -1062,6 +1066,8 @@ mod tests {
             gpu_driver: String::new(),
     agent_version: String::new(),
     image_rev: String::new(),
+    has_rdma: false,
+    rdma_gid: String::new(),
         };
         assert_eq!(resolve_node_property(&node, "power", &ctx), "12W (live)");
     }
@@ -1106,6 +1112,8 @@ mod tests {
             gpu_driver: String::new(),
     agent_version: String::new(),
     image_rev: String::new(),
+    has_rdma: false,
+    rdma_gid: String::new(),
         };
         let ctx = Context::new();
         assert_eq!(resolve_node_property(&node, "power", &ctx), "35W");

@@ -13,3 +13,7 @@ hmac.workspace = true
 sha2.workspace = true
 ed25519-dalek.workspace = true
 rand_core.workspace = true
+libc.workspace = true
+
+[build-dependencies]
+cc = "1"

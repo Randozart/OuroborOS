@@ -55,6 +55,8 @@ impl NodeRecord {
             gpu_driver,
             agent_version: info.agent_version.clone(),
             image_rev: info.image_rev.clone(),
+            has_rdma: info.has_rdma,
+            rdma_gid: info.rdma_gid.clone(),
         };
         Self {
             entry,
@@ -418,10 +420,10 @@ mod tests {
             gpus: Vec::new(),
             agent_version: String::new(),
             image_rev: String::new(),
+            has_rdma: false,
+            rdma_gid: String::new(),
         }
-    }
-
-    #[test]
+    }    #[test]
     fn test_refresh_entry_reconciles_hardware() {
         let mut reg = Registry::new();
         let (id, _) = reg.register(&test_info("hp", "192.168.1.114"));
