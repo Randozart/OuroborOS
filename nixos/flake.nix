@@ -39,6 +39,14 @@
         rev = self.shortRev or self.dirtyShortRev or "unknown";
       };
 
+      # WP-DMA Tier 4: the SoftRoCE proof binary rides in the image —
+      # the tail serves RDMA reads out of the box.
+      ouro-dma = pkgs.callPackage ./dma.nix {
+        src = ../.;
+        cargoLockFile = ../Cargo.lock;
+        rev = self.shortRev or self.dirtyShortRev or "unknown";
+      };
+
       # WP-U4: the update trust anchor. The seed never leaves the head;
       # the public key is committed and baked into every image. A
       # missing or malformed key must fail the build, not ship silent.
@@ -54,7 +62,7 @@
       nixosConfigurations.ouro-node = nixpkgs.lib.nixosSystem {
         inherit system;
         specialArgs = {
-          inherit ouro-agent;
+          inherit ouro-agent ouro-dma;
           rev = self.shortRev or self.dirtyShortRev or "unknown";
           inherit updatePubkey;
         };
@@ -66,6 +74,7 @@
 
       packages.${system} = {
         ouro-agent = ouro-agent;
+        ouro-dma = ouro-dma;
         node-image = self.nixosConfigurations.ouro-node.config.system.build.isoImage;
         default = self.packages.${system}.node-image;
       };

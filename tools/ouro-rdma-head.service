@@ -1,0 +1,31 @@
+# OuroborOS head-side SoftRoCE attach (Tier 4, DMA_ROADMAP.md).
+#
+# The head is the one box that ISN'T ours (your daily-driver OS), so
+# its RDMA setup is the only sudo in the fleet. One-time install:
+#
+#   sudo cp tools/ouro-rdma-head.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now ouro-rdma-head
+#
+# Verify:
+#   rdma link show          # rxe0 attached to your wired iface
+#   ibv_devinfo             # rxe0 present, port state PORT_ACTIVE
+#
+# Then the proof (tail boots the image, server is baked in):
+#   target/release/ouro-dma bench --addr <tail-ip> --iters 1000
+
+[Unit]
+Description=OuroborOS SoftRoCE attach (wired iface -> rxe0)
+Documentation=https://github.com/Randozart/OuroborOS
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/bin/modprobe rdma_rxe
+ExecStart=/bin/sh -c 'I=""; for d in /sys/class/net/*; do n=$(basename "$d"); case "$n" in lo|wlan*|docker*|virbr*|veth*|tailscale*) continue;; esac; [ "$(cat "$d/carrier" 2>/dev/null)" = 1 ] && { I="$n"; break; }; done; if [ -z "$I" ]; then echo "ouro-rdma-head: no wired iface"; exit 1; fi; [ -d /sys/class/infiniband/rxe0 ] && exit 0; /usr/bin/rdma link add rxe0 type rxe netdev "$I"'
+ExecStop=-/usr/bin/rdma link delete rxe0
+
+[Install]
+WantedBy=multi-user.target

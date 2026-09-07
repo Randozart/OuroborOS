@@ -3,7 +3,7 @@
 # Stateless cattle: squashfs root, identity derived from hardware each
 # boot, roles never persisted (Art. 1). getty autologin spawns
 # `ouro-agent --stdio-tty` — a booted node with a login joins the graph.
-{ lib, pkgs, config, ouro-agent, rev ? "unknown", updatePubkey ? "", ... }:
+{ lib, pkgs, config, ouro-agent, ouro-dma, rev ? "unknown", updatePubkey ? "", ... }:
 
 let
   crimson = "DC143C";
@@ -20,6 +20,41 @@ let
   # sessions get real truecolor.
   ouro-palette = pkgs.writeShellScript "ouro-palette" ''
     printf '\\e]P1%s' '${crimson}' > /dev/console 2>/dev/null || true
+  '';
+
+  # WP-DMA Tier 4: the zero-touch SoftRoCE attach. Idempotent — picks
+  # the first wired iface with a carrier and creates rxe0; graceful
+  # everywhere so a NIC-less tail boots without RDMA.
+  ouro-rdma-attach = pkgs.writeShellScriptBin "ouro-rdma-attach" ''
+    #!/usr/bin/env bash
+    set -u
+    if [ -d /sys/class/infiniband/rxe0 ]; then
+      echo "ouro-rdma: rxe0 already present"
+      exit 0
+    fi
+    iface=""
+    for d in /sys/class/net/*; do
+      name="$(basename "$d")"
+      case "$name" in
+        lo|wlan*|tailscale*|docker*|virbr*|veth*) continue ;;
+      esac
+      carrier="$(cat "$d/carrier" 2>/dev/null || echo 0)"
+      if [ "$carrier" = "1" ]; then
+        iface="$name"
+        break
+      fi
+    done
+    if [ -z "$iface" ]; then
+      echo "ouro-rdma: no wired interface with carrier — no rxe device"
+      exit 0
+    fi
+    "${pkgs.kmod}/bin/modprobe" rdma_rxe 2>/dev/null || true
+    if "${pkgs.rdma-core}/bin/rdma" link add rxe0 type rxe netdev "$iface" 2>/dev/null; then
+      echo "ouro-rdma: rxe0 attached to $iface"
+    else
+      echo "ouro-rdma: rdma link add failed on $iface (continuing)"
+    fi
+    exit 0
   '';
 
   ouro-brand = pkgs.writeShellScriptBin "ouro-brand" ''
@@ -408,6 +443,43 @@ in
     };
   };
 
+  # WP-DMA Tier 4, the zero-touch bake: the tail does not wait for a
+  # sudo, a polkit prompt, or a head verb — its own image attaches the
+  # SoftRoCE device at boot (systemd system services run as root). The
+  # `ouro-rdma-setup@` template + polkit verb above remain the fallback
+  # for non-image boxes and manual re-setup.
+  boot.kernelModules = [ "rdma_rxe" ];
+
+  # rdma-core ships the udev rules for /dev/infiniband/* (devtmpfs
+  # creates the node, the rules keep udev honest about it).
+  services.udev.packages = [ pkgs.rdma-core ];
+
+  systemd.services.ouro-rdma = {
+    description = "OuroborOS SoftRoCE attach (wired iface → rxe0)";
+    after = [ "network-online.target" ];
+    wants = [ "network-online.target" ];
+    wantedBy = [ "multi-user.target" ];
+    serviceConfig = {
+      Type = "oneshot";
+      RemainAfterExit = true;
+      ExecStart = "${ouro-rdma-attach}/bin/ouro-rdma-attach";
+    };
+  };
+
+  # The Tier 4 proof server: serves RDMA reads out of a registered
+  # 64MiB window on :9600. Idle cost ~0 (one pinned buffer, one TCP
+  # listener). The head's `ouro-dma bench` runs the sweep against it.
+  systemd.services.ouro-dma-server = {
+    description = "OuroborOS RDMA proof server (Tier 4)";
+    after = [ "ouro-rdma.service" ];
+    wantedBy = [ "multi-user.target" ];
+    serviceConfig = {
+      ExecStart = "${ouro-dma}/bin/ouro-dma server --port 9600";
+      Restart = "on-failure";
+      RestartSec = 10;
+    };
+  };
+
   # NVIDIA: the HP Pavilion carries a 940MX (Maxwell) — legacy_580
   # ships nvidia.ko plus the OpenCL ICD (nvidia.icd rewritten with a
   # store path to libnvidia-opencl, provisioned into /run/opengl-driver
@@ -528,8 +600,9 @@ in
     # (bare PATH lookup from the agent).
     pkgs.util-linux
     # WP-DMA: rdma-core provides the `rdma` CLI for SoftRoCE setup
-    # (ouo-rdma-setup@ service); kmod for modprobe.
-    pkgs.rdma-core pkgs.kmod
+    # (ouo-rdma-setup@ service); kmod for modprobe. ouro-dma is the
+    # Tier 4 proof server, baked in (ouro-dma-server.service).
+    pkgs.rdma-core pkgs.kmod ouro-dma
   ];
 
   # login(1)-friendly: register the custom shell

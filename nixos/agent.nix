@@ -13,7 +13,7 @@
 # bitnet-rs/ouro-wgpu members still appear in it and must resolve in the
 # vendored deps. If vendoring fights the workspace layout, pin a minimal
 # lockfile for the image build instead of the workspace one.
-{ lib, rustPlatform, ocl-icd, src ? ../., cargoLockFile ? ../Cargo.lock, rev ? "unknown" }:
+{ lib, rustPlatform, ocl-icd, rdma-core, src ? ../., cargoLockFile ? ../Cargo.lock, rev ? "unknown" }:
 
 rustPlatform.buildRustPackage {
   pname = "ouro-agent";
@@ -32,8 +32,11 @@ rustPlatform.buildRustPackage {
   buildAndTestSubdir = "agent";
   buildNoDefaultFeatures = true;
   buildFeatures = [ "gpu" ];
-  # ocl-icd in buildInputs: the setup hook feeds -lOpenCL to the linker
-  buildInputs = [ ocl-icd ];
+  # ocl-icd in buildInputs: the setup hook feeds -lOpenCL to the linker.
+  # rdma-core (WP-DMA): the cluster lib now carries the DMA transport —
+  # its build.rs compiles the verbs C shim and emits -libverbs -lrdmacm,
+  # so the agent link step needs those libs findable.
+  buildInputs = [ ocl-icd rdma-core ];
 
   # tests run in the sandbox without model files; the bitnet-gated ones
   # are compiled out with no-default-features
