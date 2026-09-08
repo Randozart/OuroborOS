@@ -51,6 +51,13 @@ pub struct BusTelemetry {
     pub agent_version: String,
     #[serde(default)]
     pub image_rev: String,
+    /// Stable identity (SMBIOS-derived); the anchor across many IPs
+    /// (docs/AIR_PATH.md §4.4). Empty for old agents.
+    #[serde(default)]
+    pub node_id: String,
+    /// This node's priced lanes, self-reported (docs/AIR_PATH.md §1.1).
+    #[serde(default)]
+    pub edges: Vec<crate::transport::edge::PricedEdge>,
 }
 
 impl BusTelemetry {
@@ -87,9 +94,8 @@ impl BusTelemetry {
             image_rev: self.image_rev.clone(),
             has_rdma: false,
             rdma_gid: String::new(),
-            // Lane pricing arrives with the agent's self-report (AIR_PATH §4.4);
-            // the head-side SSH probe cannot see the tail's lanes.
-            edges: Vec::new(),
+            edges: self.edges.clone(),
+            node_id: self.node_id.clone(),
         }
     }
 
@@ -152,6 +158,8 @@ fn handle_status(reg: &Registry) -> String {
                 "has_sse42": r.entry.has_sse42,
                 "agent_version": r.entry.agent_version,
                 "image_rev": r.entry.image_rev,
+                "node_id": r.entry.node_id,
+                "edges": r.entry.edges,
                 "power_watts": r.state.power_watts,
                 "temp_c": r.state.thermal_c,
                 "load_avg": r.state.load_avg,
@@ -178,7 +186,22 @@ fn handle_register(
         return "err bad-json".to_string();
     };
     let info = tel.to_node_info(peer_ip);
-    // Fast path: same IP = definitely same node — refresh + heartbeat.
+    // Fast path: the tail carries its stable identity — one node across many
+    // IPs (wired + Wi-Fi). Re-registering from a second interface reuses the
+    // slot, updates the primary IP, and merges the new lane (AIR_PATH §4.4).
+    if !info.node_id.is_empty() {
+        if let Some(id) = reg.find_by_node_id(&info.node_id) {
+            reg.refresh_entry(&id, &info);
+            if let Some(record) = reg.nodes.get_mut(&id) {
+                record.entry.ip = peer_ip.to_string();
+            }
+            let events = reg.heartbeat(&id, tel.power_watts, tel.temp_c, tel.load_avg, tel.status());
+            recovery.process_events(&events);
+            recovery.report_success(&id);
+            return format!("registered {}", id);
+        }
+    }
+    // Same IP = definitely same node — refresh + heartbeat.
     if let Some(id) = reg.find_by_ip(peer_ip) {
         reg.refresh_entry(&id, &info);
         let events = reg.heartbeat(&id, tel.power_watts, tel.temp_c, tel.load_avg, tel.status());
@@ -236,6 +259,15 @@ mod tests {
         format!(
             r#"{{"hostname":"{}","cpu_model":"i7-3770","cores":4,"threads":8,"has_avx":true,"has_avx2":true,"has_sse42":true,"ram_total_mib":16384,"power_watts":42,"temp_c":50,"load_avg":{}}}"#,
             hostname, load
+        )
+    }
+
+    /// Telemetry with a stable node identity + self-reported lanes — the
+    /// multi-homed case (docs/AIR_PATH.md §4.4).
+    fn tel_json_mh(hostname: &str, node_id: &str, iface: &str) -> String {
+        format!(
+            r#"{{"hostname":"{}","cpu_model":"i7-3770","cores":4,"threads":8,"has_avx":true,"has_avx2":true,"has_sse42":true,"ram_total_mib":16384,"power_watts":42,"temp_c":50,"load_avg":0.4,"node_id":"{}","edges":[{{"iface":"{}","kind":"Air","bw_mbps":60,"latency_us":2000,"jitter_us":500,"watts":2,"signal_dbm":-45}}]}}"#,
+            hostname, node_id, iface
         )
     }
 
@@ -319,5 +351,45 @@ mod tests {
         reg.touch_last_seen("n1", 0);
         assert_eq!(reg.alive_nodes().len(), 0);
         assert_eq!(reg.offline_nodes().len(), 1);
+    }
+
+    /// Multi-homed: one box re-registering from its second IP (wired -> Wi-Fi)
+    /// must reuse its slot via the stable node_id — the "one machine, two
+    /// nodes" fix (docs/AIR_PATH.md §4.4).
+    #[test]
+    fn test_multi_homed_reuses_slot_via_node_id() {
+        let mut reg = Registry::new();
+        let mut rec = ErrorRecovery::new();
+        // Wired first.
+        assert_eq!(
+            handle_bus_message(&mut reg, &mut rec, "10.0.0.5", &format!("register {}", tel_json_mh("box-a", "b1234", "enp3s0"))),
+            "registered n1"
+        );
+        let record = reg.get("n1").unwrap();
+        assert_eq!(record.entry.node_id, "b1234");
+        assert_eq!(record.entry.edges.len(), 1);
+        assert_eq!(record.entry.edges[0].iface, "enp3s0");
+        // Same box, Wi-Fi IP now.
+        assert_eq!(
+            handle_bus_message(&mut reg, &mut rec, "192.168.1.50", &format!("register {}", tel_json_mh("box-a", "b1234", "wlan0"))),
+            "registered n1"
+        );
+        assert_eq!(reg.len(), 1, "second IP must not spawn a ghost node");
+        let record = reg.get("n1").unwrap();
+        assert_eq!(record.entry.ip, "192.168.1.50");
+        // Both lanes present: wired kept, wireless merged.
+        let ifaces: Vec<&str> = record.entry.edges.iter().map(|e| e.iface.as_str()).collect();
+        assert_eq!(ifaces, vec!["enp3s0", "wlan0"]);
+    }
+
+    /// Old agents (no node_id) keep the IP-anchored idempotence.
+    #[test]
+    fn test_legacy_agent_register_still_ip_idempotent() {
+        let mut reg = Registry::new();
+        let mut rec = ErrorRecovery::new();
+        let body = format!("register {}", tel_json("box-a", 0.4));
+        assert_eq!(handle_bus_message(&mut reg, &mut rec, "10.0.0.5", &body), "registered n1");
+        assert_eq!(handle_bus_message(&mut reg, &mut rec, "10.0.0.5", &body), "registered n1");
+        assert_eq!(reg.len(), 1);
     }
 }

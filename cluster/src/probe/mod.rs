@@ -32,6 +32,45 @@ pub struct NodeInfo {
     /// reports its own lanes.
     #[serde(default)]
     pub edges: Vec<crate::transport::edge::PricedEdge>,
+    /// Stable identity (SMBIOS-derived), the one anchor across many IPs
+    /// (docs/AIR_PATH.md §4.4). Populated by the local probe.
+    #[serde(default)]
+    pub node_id: String,
+}
+
+/// Derive the node's stable identity from SMBIOS firmware (the one anchor a
+/// tail keeps across IP changes and reflashes; docs/AIR_PATH.md §4.4).
+/// Sources, in order: product UUID, board serial, product serial. Falls back
+/// to a hostname hash when no readable firmware identity exists (VMs,
+/// non-x86, minimal containers). Deterministic per box: the same machine
+/// always derives the same id.
+pub fn derive_node_id() -> String {
+    const CANDIDATES: [&str; 3] = [
+        "/sys/class/dmi/id/product_uuid",
+        "/sys/class/dmi/id/board_serial",
+        "/sys/class/dmi/id/product_serial",
+    ];
+    for path in CANDIDATES {
+        if let Ok(raw) = std::fs::read_to_string(path) {
+            let s = raw.trim();
+            if !s.is_empty() && !s.to_lowercase().contains("to be filled") {
+                return format!("b{}", stable_hash(s));
+            }
+        }
+    }
+    let hostname = hostname::get()
+        .map(|h| h.to_string_lossy().to_string())
+        .unwrap_or_else(|_| "unknown".to_string());
+    format!("b{}", stable_hash(&hostname))
+}
+
+/// A stable 8-hex hash of a string (std SipHash with default keys is
+/// deterministic across runs — fixed keys, no randomness).
+fn stable_hash(s: &str) -> String {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    s.hash(&mut h);
+    format!("{:08x}", h.finish() as u32)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -97,6 +136,7 @@ pub fn probe_node(hostname: &str, ip: &str) -> Result<NodeInfo> {
         has_rdma: false,
         rdma_gid: String::new(),
         edges: Vec::new(),
+        node_id: String::new(),
     })
 }
 
@@ -133,6 +173,7 @@ pub fn probe_local() -> Result<NodeInfo> {
         has_rdma,
         rdma_gid,
         edges,
+        node_id: derive_node_id(),
     })
 }
 
@@ -172,4 +213,28 @@ fn probe_rdma() -> (bool, String) {
     }
 
     (false, String::new())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Stable identity: deterministic per box, prefixed, non-empty, and the
+    /// same every call (the one anchor across IPs — AIR_PATH §4.4).
+    #[test]
+    fn test_derive_node_id_is_stable_and_prefixed() {
+        let id1 = derive_node_id();
+        let id2 = derive_node_id();
+        assert!(!id1.is_empty());
+        assert!(id1.starts_with('b'));
+        assert_eq!(id1, id2, "must be deterministic per box");
+        assert_eq!(id1.len(), 9, "b + 8 hex chars");
+    }
+
+    #[test]
+    fn test_stable_hash() {
+        assert_eq!(stable_hash("same"), stable_hash("same"));
+        assert_ne!(stable_hash("same"), stable_hash("other"));
+        assert!(stable_hash("x").chars().all(|c| c.is_ascii_hexdigit()));
+    }
 }

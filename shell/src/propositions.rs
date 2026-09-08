@@ -1153,6 +1153,7 @@ fn telemetry_to_node(addr: &str, tel: &crate::agent_client::AgentTelemetry, id: 
         has_rdma: false,
         rdma_gid: String::new(),
         edges: Vec::new(),
+        node_id: String::new(),
     }
 }
 
@@ -1375,6 +1376,7 @@ mod tests {
             has_rdma: false,
             rdma_gid: String::new(),
             edges: Vec::new(),
+            node_id: String::new(),
         });
         topo
     }
@@ -1447,6 +1449,7 @@ mod tests {
     has_rdma: false,
     rdma_gid: String::new(),
         edges: Vec::new(),
+        node_id: String::new(),
         };
         assert_eq!(resolve_node_property(&node, "power", &ctx), "12W (live)");
     }
@@ -1494,6 +1497,7 @@ mod tests {
     has_rdma: false,
     rdma_gid: String::new(),
         edges: Vec::new(),
+        node_id: String::new(),
         };
         let ctx = Context::new();
         assert_eq!(resolve_node_property(&node, "power", &ctx), "35W");
@@ -1657,6 +1661,7 @@ mod kernel_ops_tests {
             has_rdma: false,
             rdma_gid: String::new(),
             edges: Vec::new(),
+            node_id: String::new(),
         });
         Ctx {
             sched: Scheduler::new(topo.clone()),

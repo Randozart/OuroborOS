@@ -192,6 +192,7 @@ impl Scheduler {
             has_rdma: false,
             rdma_gid: String::new(),
             edges: Vec::new(),
+            node_id: String::new(),
         }
     }
 
@@ -217,6 +218,7 @@ impl Scheduler {
             has_rdma: false,
             rdma_gid: String::new(),
             edges: Vec::new(),
+            node_id: String::new(),
         }
     }
 
@@ -271,6 +273,7 @@ impl Scheduler {
             has_rdma: false,
             rdma_gid: String::new(),
             edges: Vec::new(),
+            node_id: String::new(),
         };
         cpu.has_gpu = false;
         let mut gpu = cpu.clone();

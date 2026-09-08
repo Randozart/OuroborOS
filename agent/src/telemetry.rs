@@ -25,6 +25,13 @@ pub struct Telemetry {
     pub agent_version: String,
     #[serde(default, skip_serializing_if="String::is_empty")]
     pub image_rev: String,
+    /// Stable identity (SMBIOS-derived); the anchor across many IPs
+    /// (docs/AIR_PATH.md §4.4).
+    #[serde(default, skip_serializing_if="String::is_empty")]
+    pub node_id: String,
+    /// This node's priced lanes, self-reported (docs/AIR_PATH.md §1.1).
+    #[serde(default, skip_serializing_if="Vec::is_empty")]
+    pub edges: Vec<ouro_cluster::transport::edge::PricedEdge>,
 }
 
 /// Compile-time build stamp. Nix sets OURO_BUILD_REV from the flake
@@ -75,6 +82,8 @@ pub fn collect() -> Result<Telemetry> {
         gpus: cached_gpus().clone(),
         agent_version: agent_version().to_string(),
         image_rev: image_rev(),
+        node_id: ouro_cluster::probe::derive_node_id(),
+        edges: ouro_cluster::probe::network::probe_lanes(None),
     })
 }
 

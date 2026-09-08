@@ -74,7 +74,7 @@ impl EdgeKind {
 
 /// A priced lane between two nodes. Measured, never spec-sheet
 /// (docs/AIR_PATH.md §4.1); the scheduler sees only the price tuple.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PricedEdge {
     /// Interface name: enp3s0 | wlan0 | rdma0 | hdmi0 | ...
     pub iface: String,

@@ -37,6 +37,10 @@ pub struct NodeEntry {
     /// reports them; old serialized topologies stay valid (`serde` default).
     #[serde(default)]
     pub edges: Vec<crate::transport::edge::PricedEdge>,
+    /// Stable identity (SMBIOS-derived) — the one anchor across many IPs
+    /// (docs/AIR_PATH.md §4.4). Empty for static/demo nodes.
+    #[serde(default)]
+    pub node_id: String,
 }
 
 
@@ -107,6 +111,7 @@ impl ClusterTopology {
             has_rdma: info.has_rdma,
             rdma_gid: info.rdma_gid.clone(),
             edges: info.edges.clone(),
+            node_id: info.node_id.clone(),
         };
         self.nodes.push(entry.clone());
         entry

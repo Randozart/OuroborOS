@@ -254,6 +254,7 @@ mod tests {
             has_rdma: false,
             rdma_gid: String::new(),
             edges: Vec::new(),
+            node_id: String::new(),
         }
     }
 

@@ -58,6 +58,7 @@ impl NodeRecord {
             has_rdma: info.has_rdma,
             rdma_gid: info.rdma_gid.clone(),
             edges: info.edges.clone(),
+            node_id: info.node_id.clone(),
         };
         Self {
             entry,
@@ -226,6 +227,18 @@ impl Registry {
                 e.image_rev = info.image_rev.clone();
                 version_changed = true;
             }
+            // Stable identity + lanes are part of the hardware truth: a
+            // multi-homed tail reports its full edge set each beat, and the
+            // bus merges (keyed by interface) so a second IP never ghosts a
+            // duplicate slot (docs/AIR_PATH.md §4.4).
+            if e.node_id.is_empty() && !info.node_id.is_empty() {
+                e.node_id = info.node_id.clone();
+                hardware_changed = true;
+            }
+            let lanes_changed = Self::merge_edges(&mut e.edges, info.edges.clone());
+            if lanes_changed {
+                hardware_changed = true;
+            }
         }
         let changed = hardware_changed || version_changed;
         if changed {
@@ -312,6 +325,40 @@ impl Registry {
             .values()
             .find(|r| r.entry.ip == ip)
             .map(|r| r.entry.id.clone())
+    }
+
+    /// Find a node ID by its stable identity (docs/AIR_PATH.md §4.4). This is
+    /// the anchor a tail keeps across IP changes: re-registering from a second
+    /// interface (wired + Wi-Fi) reuses its slot instead of spawning a ghost
+    /// node — the fix for "one machine, two nodes".
+    pub fn find_by_node_id(&self, node_id: &str) -> Option<String> {
+        self.nodes
+            .values()
+            .find(|r| !r.entry.node_id.is_empty() && r.entry.node_id == node_id)
+            .map(|r| r.entry.id.clone())
+    }
+
+    /// Merge newly-reported lanes into a node's edge set. A lane is keyed by
+    /// interface name; a re-report replaces the old measurement (live data
+    /// wins), a new interface appends. Lanes never silently drop — a lane
+    /// that goes silent stays listed with its last price until recovery.
+    pub fn merge_edges(
+        entry_edges: &mut Vec<crate::transport::edge::PricedEdge>,
+        new_edges: Vec<crate::transport::edge::PricedEdge>,
+    ) -> bool {
+        let mut changed = false;
+        for edge in new_edges {
+            if let Some(existing) = entry_edges.iter_mut().find(|e| e.iface == edge.iface) {
+                if existing != &edge {
+                    *existing = edge;
+                    changed = true;
+                }
+            } else {
+                entry_edges.push(edge);
+                changed = true;
+            }
+        }
+        changed
     }
 
     /// Find a stale (not alive) node by hostname. Fallback for reflash:
@@ -424,6 +471,7 @@ mod tests {
             has_rdma: false,
             rdma_gid: String::new(),
             edges: Vec::new(),
+            node_id: String::new(),
         }
     }    #[test]
     fn test_refresh_entry_reconciles_hardware() {
@@ -624,5 +672,68 @@ mod tests {
         assert_eq!(e.ip, "192.168.1.113");
         assert!(e.has_gpu);
         assert_eq!(e.gpu_model, "NVIDIA GeForce 940MX");
+    }
+
+    /// Stable identity anchor (docs/AIR_PATH.md §4.4): a multi-homed tail is
+    /// found by node_id regardless of which IP it speaks from.
+    #[test]
+    fn test_find_by_node_id() {
+        let mut reg = Registry::new();
+        let mut info = test_info("node-a", "192.168.1.10");
+        info.node_id = "b1234".to_string();
+        reg.register(&info);
+        assert_eq!(reg.find_by_node_id("b1234"), Some("n1".to_string()));
+        assert_eq!(reg.find_by_node_id("nope"), None);
+        // Nodes without a stable id (legacy/static) never match.
+        let mut reg2 = Registry::new();
+        reg2.register(&test_info("other", "1.1.1.1"));
+        assert_eq!(reg2.find_by_node_id(""), None);
+    }
+
+    /// Lane merge: keyed by interface, re-report replaces, new appends.
+    #[test]
+    fn test_merge_edges() {
+        let mut edges = vec![crate::transport::edge::PricedEdge {
+            iface: "enp3s0".into(),
+            kind: crate::transport::edge::EdgeKind::Tcp,
+            bw_mbps: 1000,
+            latency_us: 300,
+            jitter_us: 10,
+            watts: 1,
+            signal_dbm: 0,
+        }];
+        // New measurement for the same interface replaces.
+        assert!(Registry::merge_edges(
+            &mut edges,
+            vec![crate::transport::edge::PricedEdge {
+                iface: "enp3s0".into(),
+                kind: crate::transport::edge::EdgeKind::Tcp,
+                bw_mbps: 950,
+                latency_us: 320,
+                jitter_us: 12,
+                watts: 1,
+                signal_dbm: 0,
+            }]
+        ));
+        assert_eq!(edges.len(), 1);
+        assert_eq!(edges[0].bw_mbps, 950);
+        // A brand-new interface appends.
+        assert!(Registry::merge_edges(
+            &mut edges,
+            vec![crate::transport::edge::PricedEdge {
+                iface: "wlan0".into(),
+                kind: crate::transport::edge::EdgeKind::Air,
+                bw_mbps: 60,
+                latency_us: 0,
+                jitter_us: 0,
+                watts: 2,
+                signal_dbm: -45,
+            }]
+        ));
+        assert_eq!(edges.len(), 2);
+        // Identical re-report is a no-op.
+        let same = edges[0].clone();
+        assert!(!Registry::merge_edges(&mut edges, vec![same]));
+        assert_eq!(edges.len(), 2);
     }
 }

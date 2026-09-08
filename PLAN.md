@@ -1822,6 +1822,40 @@ across N IPs; registration `ctl nodes/<id>/edges/<iface>`; agent self-reports
 its lanes (this rung only the head's SSH/local probe enumerates the *local*
 box). Then the bond layer (§19.4c #4) and Track C range-fetch (#5).
 
+### 19.4e Multi-homed identity — one machine, one node (2026-09-08)
+
+Rung 3. **The "two nodes for one machine" bug is fixed:** a tail with wired +
+Wi-Fi is one node now, anchored by a stable identity, not a peer IP.
+
+**Built:**
+- `probe::derive_node_id()` — SMBIOS firmware identity (`product_uuid` →
+  `board_serial` → `product_serial`), fallback hostname hash; deterministic,
+  prefixed `b<8-hex>`, disjoint from registry's numeric `n*` ids. Filled on
+  the local probe; carried by `NodeInfo`/`NodeEntry.node_id`.
+- Agent `Telemetry.node_id` + `edges` (self-reported via `probe_lanes(None)`);
+  `BusTelemetry` mirrors both. Old agents (no node_id) keep IP-anchored
+  idempotence — verb mapping, Art. 10.
+- `Registry::find_by_node_id()` + `Registry::merge_edges()` (keyed by
+  interface: re-report replaces, new appends). Registration order: **node_id
+  → peer IP → stale-hostname → new**. A re-register from the second IP
+  reuses the slot, updates the primary IP, merges the new lane.
+- Status census (`handle_status`) now carries `node_id` + `edges` so the
+  shell/topology sees the full lane set of a multi-homed tail.
+
+Gates (MET): cluster **171** (was 165) + shell 77 + agent 34 · clippy
+`-D warnings` 0. Tests: `test_multi_homed_reuses_slot_via_node_id` (wired
+then Wi-Fi → same n1, both lanes, primary IP updated), legacy-agents-still-
+ip-idempotent, `find_by_node_id`, `merge_edges` (replace/append/no-op),
+`derive_node_id` stable + deterministic.
+
+**Honest limits this rung:** RTT/jitter per lane are zero on the tail's
+self-report (`probe_lanes(None)` has no head target). The head measuring each
+lane of a multi-homed tail — ping each of its IPs — lands with the bond layer
+(§19.4c #4), where the per-edge price set is actually consumed. `edges/<iface>`
+registration (true per-edge, §4.4) is the follow-on; today the node reuses one
+slot and merges edges, which fixes the ghost-node bug without the full ctl
+tree.
+
 ### 19.5 Track B — ACTS v2 air-path (SwarmLLM borrow), full rungs
 
 | Rung | Work | Gate |

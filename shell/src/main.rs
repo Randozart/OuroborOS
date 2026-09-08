@@ -170,6 +170,7 @@ fn demo_topology() -> ClusterTopology {
         has_rdma: false,
         rdma_gid: String::new(),
         edges: Vec::new(),
+        node_id: String::new(),
     });
 
     topo.nodes.push(NodeEntry {
@@ -193,6 +194,7 @@ fn demo_topology() -> ClusterTopology {
         has_rdma: false,
         rdma_gid: String::new(),
         edges: Vec::new(),
+        node_id: String::new(),
     });
 
     topo.nodes.push(NodeEntry {
@@ -216,6 +218,7 @@ fn demo_topology() -> ClusterTopology {
         has_rdma: false,
         rdma_gid: String::new(),
         edges: Vec::new(),
+        node_id: String::new(),
     });
 
     topo.power_budget_watts = 500;
