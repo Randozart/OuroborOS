@@ -30,9 +30,11 @@ fn err_chain(e: &anyhow::Error) -> String {
     s
 }
 
-/// Build the `register`/`heartbeat` request body for this node.
-pub fn request_body(verb: &str) -> Result<String> {
-    let tel = telemetry::collect()?;
+/// Build the `register`/`heartbeat` request body for this node. `head` is
+/// the registry address (`ip:port`) — passed through so the tail can price
+/// each lane's RTT/jitter against the head (docs/AIR_PATH.md §4.2).
+pub fn request_body(verb: &str, head: &str) -> Result<String> {
+    let tel = telemetry::collect_with_head(Some(head))?;
     let json = serde_json::to_string(&tel)?;
     Ok(format!("{} {}", verb, json))
 }
@@ -68,7 +70,7 @@ pub async fn run(secret: Secret, head: String, period: Duration) -> Result<()> {
     let mut seq: u64 = 1;
     loop {
         // Register pass.
-        let body = match request_body("register") {
+        let body = match request_body("register", &head) {
             Ok(b) => b,
             Err(e) => {
                 eprintln!("head-link: telemetry collect failed: {} — retry in {}s", err_chain(&e), RETRY_BACKOFF.as_secs());
@@ -100,7 +102,7 @@ pub async fn run(secret: Secret, head: String, period: Duration) -> Result<()> {
         // Heartbeat passes until the daemon forgets us or the wire breaks.
         loop {
             sleep(period).await;
-            let body = match request_body("heartbeat") {
+            let body = match request_body("heartbeat", &head) {
                 Ok(b) => b,
                 Err(e) => {
                     eprintln!("head-link: telemetry collect failed: {}", e);
@@ -133,7 +135,7 @@ mod tests {
 
     #[test]
     fn test_request_body_shape() {
-        let body = request_body("heartbeat").unwrap();
+        let body = request_body("heartbeat", "10.0.2.2:9500").unwrap();
         assert!(body.starts_with("heartbeat {"), "got: {}", &body[..40.min(body.len())]);
         assert!(body.contains("\"hostname\""));
         // Round-trips as the bus telemetry struct.

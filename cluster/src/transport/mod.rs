@@ -1,4 +1,5 @@
 pub mod auth;
+pub mod bond;
 pub mod dma;
 pub mod edge;
 pub mod frames;

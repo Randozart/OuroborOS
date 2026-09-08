@@ -1856,6 +1856,36 @@ registration (true per-edge, §4.4) is the follow-on; today the node reuses one
 slot and merges edges, which fixes the ghost-node bug without the full ctl
 tree.
 
+### 19.4f The bond layer — a scheduler over lanes (2026-09-08)
+
+Rung 4. **Which lane carries which frame is now a scheduler decision** —
+the first piece of AIR_PATH §4.2, and the thing that makes "both paths at
+once" a policy, not a promise.
+
+**Built:**
+- `cluster/src/transport/bond.rs` — `FrameClass` (`Control`/`Bulk`/
+  `Critical`) + `schedule(class, edges, stripe_round)` returning `LaneChoice`
+  (primary + optional secondary iface). Pure function of the priced edge set:
+  control → lowest (latency+jitter) lane (air loses to copper on jitter);
+  bulk → bandwidth-descending lanes round-robin by `stripe_round`; critical →
+  the two lowest-cost lanes (duplicate). No sockets — the transport rung opens
+  one channel per lane and applies the picks; frame seq already orders
+  cross-path (frames.rs).
+- Tail-side lane pricing filled: `telemetry::collect_with_head(head)` runs
+  `probe_lanes(Some(head_ip))` — each lane's RTT/jitter now measured against
+  the head, per interface. `head_link` passes the registry address. The
+  latency zeros from §19.4e are gone when an agent knows its head.
+
+Gates (MET): cluster **177** (was 171) + shell 77 + agent 34 · clippy
+`-D warnings` 0. Bond tests: control lowest-latency, control-prefers-copper,
+bulk stripes bw-descending + wraps, critical duplicates two, empty → none,
+single lane can't duplicate.
+
+**Next:** Track C — the B3 handle becomes real (`bind` a span, fetch across
+the priced edge set, size-stamp cache, resume). The transport rung (N actual
+channels per peer applying `LaneChoice`) is the wire prerequisite and lands
+with it.
+
 ### 19.5 Track B — ACTS v2 air-path (SwarmLLM borrow), full rungs
 
 | Rung | Work | Gate |

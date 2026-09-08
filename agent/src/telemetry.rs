@@ -56,6 +56,15 @@ fn cached_gpus() -> &'static Vec<ouro_cluster::probe::gpu::GpuInfo> {
 
 /// Collect a telemetry snapshot from the local system.
 pub fn collect() -> Result<Telemetry> {
+    collect_with_head(None)
+}
+
+/// Collect a telemetry snapshot, pricing each lane's RTT/jitter against the
+/// head when one is known (docs/AIR_PATH.md §4.2): `probe_lanes(Some(head))`
+/// pings through each interface, so every edge carries a real
+/// latency/jitter pair the bond policy can consume. Without a head, lanes
+/// are priced on link speed/signal/watts only.
+pub fn collect_with_head(head: Option<&str>) -> Result<Telemetry> {
     let hostname = hostname::get()
         .map(|h| h.to_string_lossy().to_string())
         .unwrap_or_else(|_| "unknown".to_string());
@@ -65,6 +74,7 @@ pub fn collect() -> Result<Telemetry> {
     let power = read_power();
     let temp = read_temp();
     let load = read_loadavg();
+    let head_ip = head.and_then(|h| h.split(':').next()).map(|s| s.to_string());
 
     Ok(Telemetry {
         hostname,
@@ -83,7 +93,7 @@ pub fn collect() -> Result<Telemetry> {
         agent_version: agent_version().to_string(),
         image_rev: image_rev(),
         node_id: ouro_cluster::probe::derive_node_id(),
-        edges: ouro_cluster::probe::network::probe_lanes(None),
+        edges: ouro_cluster::probe::network::probe_lanes(head_ip.as_deref()),
     })
 }
 
