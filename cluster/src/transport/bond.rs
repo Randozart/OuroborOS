@@ -24,7 +24,7 @@ pub enum FrameClass {
 
 /// Which lane(s) a frame of a given class rides. Both names refer to a
 /// `PricedEdge.iface`; `primary` is always set when a lane exists.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct LaneChoice {
     pub primary: Option<String>,
     pub secondary: Option<String>,

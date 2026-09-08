@@ -1886,6 +1886,35 @@ the priced edge set, size-stamp cache, resume). The transport rung (N actual
 channels per peer applying `LaneChoice`) is the wire prerequisite and lands
 with it.
 
+### 19.4g Track C slice 1 — the handle becomes real: bind/revoke (2026-09-08)
+
+Rung 5. **The B3 handle is now fetchable by contract:** `bind` a span →
+a `Binding` (span + the lanes the bond policy picked), `revoke` releases it
+en-bloc. Bytes still never ride ops (Art. 6); the binding is *fetchable*, not
+fetched.
+
+**Built:**
+- `op/mod.rs` — `Span { offset, length }`, `Binding { id, handle, node,
+  tensor, span, lanes }`, `Resource::Binding`, `Op::Bind { path, span }` /
+  `Op::Revoke { binding }`, `GraphBackend::bind`/`revoke` (default refuse
+  loudly), dispatch routing.
+- Scheduler — `bindings` registry + `bind_seq`; `bind weights.<node>.<i>`
+  validates the span against the tensor length (out-of-range is a structured
+  error, never a panic), picks lanes via `bond::schedule(Bulk, node_edges)`
+  — round 0 = fastest lane, each later bind stripes to the next. `revoke` is
+  idempotent.
+- Shell — `bind weights.n1.0 [offset] [length].` + `revoke b1.` verbs;
+  `ShellBackend::bind`/`revoke` delegate to the scheduler (one writer, Art. 3).
+
+Gates (MET): cluster **181** (was 177) + shell **78** (was 77) · clippy
+`-D warnings` 0. Tests: bind full-span + lane choice (copper over air),
+sub-range, overflow refused, revoke + idempotence, non-weights bind refused,
+shell bind/revoke round-trip.
+
+**Next:** Track C slice 2 — the transport rung: N actual channels per peer
+applying `LaneChoice`, then the range-fetch itself (fetch a bound span over
+the chosen lane(s), size-stamp cache, resume).
+
 ### 19.5 Track B — ACTS v2 air-path (SwarmLLM borrow), full rungs
 
 | Rung | Work | Gate |

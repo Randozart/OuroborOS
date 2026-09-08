@@ -41,12 +41,24 @@ pub struct Scheduler {
     /// the op kernel mint bulk handles (Rung B3). Empty for callers that do
     /// not register a manifest; old behavior unchanged.
     pub weights: Weights,
+    /// Active bulk bindings (Phase C / Track C): handle span -> Binding with
+    /// the lane choice the bond policy made. Transient arbiter bookkeeping —
+    /// never serialized.
+    pub bindings: std::collections::HashMap<String, crate::op::Binding>,
+    bind_seq: u64,
 }
 
 impl Scheduler {
     pub fn new(topology: ClusterTopology) -> Self {
         let budget = EnergyBudget::new(topology.power_budget_watts);
-        Self { topology, budget, queue: task_queue::TaskQueue::new(), weights: Weights::new() }
+        Self {
+            topology,
+            budget,
+            queue: task_queue::TaskQueue::new(),
+            weights: Weights::new(),
+            bindings: std::collections::HashMap::new(),
+            bind_seq: 0,
+        }
     }
 
     /// Attempt to dispatch a task to the best suitable node.

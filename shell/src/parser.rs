@@ -133,6 +133,11 @@ pub enum Command {
     Tasks,
     /// `weights [n1 [i]].` — weight census / open a bulk handle (Rung B3)
     Weights { target: String },
+    /// `bind weights.n1.0 [offset] [length].` — bind a span for fetch
+    /// (Track C). No range = whole tensor.
+    Bind { target: String, offset: Option<u64>, length: Option<u64> },
+    /// `revoke b1.` — release a binding en-bloc (Track C)
+    Revoke { binding: String },
     /// `drift [rev]` — which tails don't run the expected versions
     Drift { expected: Option<String> },
     /// `recover.` — trigger error recovery sweep
@@ -359,6 +364,18 @@ pub fn interpret(input: &str) -> Command {
             .trim_end_matches('.');
         return Command::Weights { target: target.to_string() };
     }
+    if trimmed == "bind" || trimmed.starts_with("bind ") {
+        let rest = trimmed.trim_start_matches("bind").trim().trim_end_matches('.');
+        let mut parts = rest.split_whitespace();
+        let target = parts.next().unwrap_or("").to_string();
+        let offset = parts.next().and_then(|s| s.parse().ok());
+        let length = parts.next().and_then(|s| s.parse().ok());
+        return Command::Bind { target, offset, length };
+    }
+    if trimmed == "revoke" || trimmed.starts_with("revoke ") {
+        let binding = trimmed.trim_start_matches("revoke").trim().trim_end_matches('.');
+        return Command::Revoke { binding: binding.to_string() };
+    }
     if trimmed == "recover." || trimmed == "recover" {
         return Command::Recover;
     }
@@ -508,6 +525,17 @@ mod tests {
         assert!(matches!(interpret("weights.n1."), Command::Weights { target } if target == "n1"));
         assert!(
             matches!(interpret("weights.n1.0."), Command::Weights { target } if target == "n1.0")
+        );
+        assert!(
+            matches!(interpret("bind weights.n1.0."), Command::Bind { target, offset, length }
+                if target == "weights.n1.0" && offset.is_none() && length.is_none())
+        );
+        assert!(
+            matches!(interpret("bind weights.n1.0 512 256."), Command::Bind { target, offset, length }
+                if target == "weights.n1.0" && offset == Some(512) && length == Some(256))
+        );
+        assert!(
+            matches!(interpret("revoke b1."), Command::Revoke { binding } if binding == "b1")
         );
         assert!(matches!(interpret("drift"), Command::Drift { expected: None }));
         assert!(

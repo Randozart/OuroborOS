@@ -622,6 +622,48 @@ pub fn handle(
             }
         }
 
+        Command::Bind { target, offset, length } => {
+            let mut backend = ShellBackend { scheduler, topology, ctx, recovery, config };
+            let path = ResourcePath::parse(&format!("weights.{}", target))
+                .map_err(|e| anyhow::anyhow!(e))?;
+            let span = match (offset, length) {
+                (None, None) => None,
+                (Some(o), Some(l)) => Some(ouro_cluster::op::Span { offset: o, length: l }),
+                _ => return Err(anyhow::anyhow!("bind needs offset AND length, or neither")),
+            };
+            match run_dispatch(&Op::Bind { path, span }, &mut backend)? {
+                Resource::Binding(b) => {
+                    let lanes = b
+                        .lanes
+                        .primary
+                        .clone()
+                        .map(|p| {
+                            let extra = b
+                                .lanes
+                                .secondary
+                                .clone()
+                                .map(|s| format!(" + {}", s))
+                                .unwrap_or_default();
+                            format!(" via {}", p + &extra)
+                        })
+                        .unwrap_or_else(|| " (no lanes)".to_string());
+                    Ok(format!(
+                        "binding {}: {} [{}..{}) of {} bytes{}",
+                        b.id, b.handle, b.span.offset, b.span.end(), b.span.length, lanes
+                    ))
+                }
+                other => Err(anyhow::anyhow!("unexpected resource: {:?}", other)),
+            }
+        }
+
+        Command::Revoke { binding } => {
+            let mut backend = ShellBackend { scheduler, topology, ctx, recovery, config };
+            match run_dispatch(&Op::Revoke { binding: binding.clone() }, &mut backend)? {
+                Resource::Ack { message } => Ok(message),
+                other => Err(anyhow::anyhow!("unexpected resource: {:?}", other)),
+            }
+        }
+
         Command::Unknown(input) => Ok(fmt.unknown(&input)),
     }
 }
@@ -992,6 +1034,16 @@ impl<'a> GraphBackend for ShellBackend<'a> {
         } else {
             Err(format!("unknown ctl: {} on {}", verb, path))
         }
+    }
+
+    /// Track C: bind/revoke delegate to the scheduler's binding registry —
+    /// the brain owns bindings (one writer, Art. 3).
+    fn bind(&mut self, path: &ResourcePath, span: Option<ouro_cluster::op::Span>) -> Result<Resource, String> {
+        self.scheduler.bind(path, span)
+    }
+
+    fn revoke(&mut self, binding: &str) -> Result<Resource, String> {
+        self.scheduler.revoke(binding)
     }
 }
 
@@ -1820,6 +1872,47 @@ mod kernel_ops_tests {
         // Opening a handle: identity + size-stamp, never bytes.
         let h = run(&mut st, Command::Weights { target: "n1.1".into() });
         assert_eq!(h, "handle h:n1.blk.1.attn_k.weight  (n1: blk.1.attn_k.weight, 2048 bytes)");
+    }
+
+    /// Track C: `bind` returns a fetchable binding (span + lanes), `revoke`
+    /// releases it en-bloc.
+    #[test]
+    fn test_bind_and_revoke_via_kernel() {
+        let mut st = setup();
+        st.sched.weights = ouro_cluster::weights::Weights::new().with_shard(
+            ouro_cluster::weights::WeightShard {
+                node: "n1".into(),
+                tensors: vec![
+                    ouro_cluster::weights::WeightTensor { name: "blk.0.attn_q.weight".into(), length: 1024 },
+                ],
+            },
+        );
+        let b = run(&mut st, Command::Bind { target: "n1.0".into(), offset: None, length: None });
+        assert!(
+            b.starts_with("binding b1: h:n1.blk.0.attn_q.weight [0..1024) of 1024 bytes"),
+            "got: {}",
+            b
+        );
+        // A sub-range binds too.
+        let b2 = run(&mut st, Command::Bind { target: "n1.0".into(), offset: Some(256), length: Some(128) });
+        assert!(b2.starts_with("binding b2:"), "got: {}", b2);
+        assert!(b2.contains("[256..384)"), "got: {}", b2);
+        // Revoke is idempotent.
+        let r1 = run(&mut st, Command::Revoke { binding: "b1".into() });
+        assert_eq!(r1, "binding b1 released");
+        let r2 = run(&mut st, Command::Revoke { binding: "b1".into() });
+        assert_eq!(r2, "binding b1 released");
+        // Out-of-range bind refuses loudly (structured error, not a panic —
+        // proven at the kernel level in op_backend.rs).
+        let err = ouro_cluster::op::dispatch(
+            &ouro_cluster::op::Op::Bind {
+                path: ouro_cluster::beast::resource::ResourcePath::parse("weights.n1.0").unwrap(),
+                span: Some(ouro_cluster::op::Span { offset: 0, length: 999999 }),
+            },
+            &mut st.sched,
+        )
+        .unwrap_err();
+        assert!(err.message.contains("exceeds tensor"), "got: {}", err.message);
     }
 
     /// Rung B3 boot-load: `load_weights` maps a shard_map's `.bmts` headers into

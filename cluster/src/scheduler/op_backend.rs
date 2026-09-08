@@ -166,6 +166,72 @@ impl GraphBackend for Scheduler {
         self.stat(path)
     }
 
+    /// `bind` a span of a weight tensor for fetch (Phase C / Track C): the
+    /// B3 handle becomes real. The binding carries the byte span and the
+    /// lane(s) the bond policy picked over the node's priced edges (bulk
+    /// class — fetch stripes when more than one lane is live). Bytes never
+    /// ride the op (Art. 6): a binding is fetchable, not fetched.
+    fn bind(&mut self, path: &ResourcePath, span: Option<crate::op::Span>) -> Result<Resource, String> {
+        self.resolve(path)?;
+        let node = weights_node(path)
+            .ok_or_else(|| format!("bind requires a weights.<node>.<i> path, got {}", path))?;
+        let idx: usize = path
+            .segments
+            .get(2)
+            .ok_or_else(|| format!("bind requires a tensor index, got {}", path))?
+            .parse()
+            .map_err(|_| format!("tensor index must be an integer, got {}", path.segments[2]))?;
+        let shard = self
+            .weights
+            .for_node(&node)
+            .ok_or_else(|| format!("no weights for node {}", node))?;
+        let t = shard
+            .at(idx)
+            .ok_or_else(|| format!("tensor index {} out of range for node {}", idx, node))?;
+        let total = t.length;
+        let span = span.unwrap_or(crate::op::Span { offset: 0, length: total });
+        if span.end() > total {
+            return Err(format!(
+                "span [{}, {}) exceeds tensor {} of {} bytes",
+                span.offset,
+                span.end(),
+                t.name,
+                total
+            ));
+        }
+        let edges: Vec<crate::transport::edge::PricedEdge> = self
+            .topology
+            .get_node(&node)
+            .map(|n| n.edges.clone())
+            .unwrap_or_default();
+        self.bind_seq += 1;
+        let id = format!("b{}", self.bind_seq);
+        let binding = crate::op::Binding {
+            id: id.clone(),
+            handle: format!("h:{}.{}", node, t.name),
+            node: node.to_string(),
+            tensor: t.name.clone(),
+            span,
+            lanes: crate::transport::bond::schedule(
+                crate::transport::bond::FrameClass::Bulk,
+                &edges,
+                // Round 0 = the best lane (first fetch takes the fastest);
+                // each later bind stripes to the next lane.
+                self.bind_seq.saturating_sub(1) as usize,
+            ),
+        };
+        self.bindings.insert(id.clone(), binding.clone());
+        Ok(Resource::Binding(binding))
+    }
+
+    /// `revoke` a binding en-bloc (the `clunk` analog). Idempotent.
+    fn revoke(&mut self, binding: &str) -> Result<Resource, String> {
+        self.bindings.remove(binding);
+        Ok(Resource::Ack {
+            message: format!("binding {} released", binding),
+        })
+    }
+
     fn write(&mut self, path: &ResourcePath, value: &str) -> Result<Resource, String> {
         self.resolve(path)?;
         if path.is_child_of("cluster", "budget") {
@@ -583,5 +649,106 @@ mod tests {
         };
         assert_eq!(nodes.len(), 1);
         assert!(nodes[0].get("edges").unwrap().as_array().unwrap().len() == 1);
+    }
+
+    /// Track C: `bind weights.<node>.<i>` returns a Binding — the B3 handle
+    /// becomes real. Full-tensor default span, with the bond policy's lane
+    /// choice over the node's priced edges.
+    #[test]
+    fn test_bind_mints_binding_with_lanes() {
+        let mut topo = ClusterTopology::new();
+        let mut n1 = make_node("n1", true, 35);
+        n1.edges = vec![
+            crate::transport::edge::PricedEdge {
+                iface: "enp3s0".into(),
+                kind: crate::transport::edge::EdgeKind::Tcp,
+                bw_mbps: 1000,
+                latency_us: 300,
+                jitter_us: 10,
+                watts: 1,
+                signal_dbm: 0,
+            },
+            crate::transport::edge::PricedEdge {
+                iface: "wlan0".into(),
+                kind: crate::transport::edge::EdgeKind::Air,
+                bw_mbps: 60,
+                latency_us: 2000,
+                jitter_us: 500,
+                watts: 2,
+                signal_dbm: -45,
+            },
+        ];
+        topo.nodes.push(n1);
+        let mut s = Scheduler::new(topo);
+        s.weights = crate::weights::Weights::new().with_shard(crate::weights::WeightShard {
+            node: "n1".into(),
+            tensors: vec![crate::weights::WeightTensor { name: "blk.0.attn_q.weight".into(), length: 4096 }],
+        });
+
+        let r = op_dispatch(&Op::Bind { path: ResourcePath::parse("weights.n1.0").unwrap(), span: None }, &mut s).unwrap();
+        let Resource::Binding(binding) = r else {
+            panic!("expected Binding, got {:?}", r);
+        };
+        assert_eq!(binding.handle, "h:n1.blk.0.attn_q.weight");
+        assert_eq!(binding.span, crate::op::Span { offset: 0, length: 4096 });
+        // Bulk class, bandwidth-descending: copper (1000) then air (60).
+        assert_eq!(binding.lanes.primary.as_deref(), Some("enp3s0"));
+        assert_eq!(s.bindings.len(), 1);
+        assert_eq!(s.bindings[&binding.id].tensor, "blk.0.attn_q.weight");
+    }
+
+    /// Track C: a sub-range binds; out-of-range refuses, never panics.
+    #[test]
+    fn test_bind_subrange_and_overflow() {
+        let mut s = sched_with_weights();
+        let r = op_dispatch(
+            &Op::Bind {
+                path: ResourcePath::parse("weights.n1.0").unwrap(),
+                span: Some(crate::op::Span { offset: 512, length: 256 }),
+            },
+            &mut s,
+        )
+        .unwrap();
+        let Resource::Binding(b) = r else { panic!("expected Binding") };
+        assert_eq!(b.span, crate::op::Span { offset: 512, length: 256 });
+
+        let err = op_dispatch(
+            &Op::Bind {
+                path: ResourcePath::parse("weights.n1.0").unwrap(),
+                span: Some(crate::op::Span { offset: 0, length: 1_000_000 }),
+            },
+            &mut s,
+        )
+        .unwrap_err();
+        assert!(err.message.contains("exceeds tensor"), "got: {}", err.message);
+    }
+
+    /// Track C: `revoke` releases a binding en-bloc; idempotent.
+    #[test]
+    fn test_revoke_binding() {
+        let mut s = sched_with_weights();
+        let r = op_dispatch(&Op::Bind { path: ResourcePath::parse("weights.n1.0").unwrap(), span: None }, &mut s).unwrap();
+        let Resource::Binding(b) = r else { panic!("expected Binding") };
+        assert_eq!(s.bindings.len(), 1);
+
+        let revoke = op_dispatch(&Op::Revoke { binding: b.id.clone() }, &mut s).unwrap();
+        let Resource::Ack { message } = revoke else { panic!("expected Ack") };
+        assert!(message.contains("released"));
+        assert_eq!(s.bindings.len(), 0);
+        // Idempotent: revoking again is an ack, not an error.
+        let again = op_dispatch(&Op::Revoke { binding: b.id }, &mut s).unwrap();
+        assert!(matches!(again, Resource::Ack { .. }));
+    }
+
+    /// Track C: bind on a non-weights path refuses loudly.
+    #[test]
+    fn test_bind_non_weights_refused() {
+        let mut s = sched();
+        let err = op_dispatch(
+            &Op::Bind { path: ResourcePath::parse("n1").unwrap(), span: None },
+            &mut s,
+        )
+        .unwrap_err();
+        assert!(err.message.contains("weights.<node>.<i>"), "got: {}", err.message);
     }
 }

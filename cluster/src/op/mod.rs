@@ -33,6 +33,34 @@ pub struct TensorCensus {
     pub length: u64,
 }
 
+/// A byte span of a bulk resource — the unit `bind` fetches (Track C).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Span {
+    pub offset: u64,
+    pub length: u64,
+}
+
+impl Span {
+    pub fn end(&self) -> u64 {
+        self.offset.saturating_add(self.length)
+    }
+}
+
+/// An active bulk binding (Phase C, docs/PLAN9.md §4.2): a span of a handle,
+/// bound for fetch, with the lane(s) the bond policy picked over the node's
+/// priced edges. Revokable en-bloc. Bytes still never ride ops.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct Binding {
+    pub id: String,
+    /// The source handle (`h:<node>.<tensor>`) this binding reads from.
+    pub handle: String,
+    pub node: String,
+    pub tensor: String,
+    pub span: Span,
+    /// Which lane(s) carry the fetch (docs/AIR_PATH.md §4.2).
+    pub lanes: crate::transport::bond::LaneChoice,
+}
+
 /// A typed value read from the resource tree. Node/record payloads are
 /// Beast values (the backend decides their shape); scalar resources are
 /// typed variants. Never bytes (anti-table, docs/PLAN9.md §3).
@@ -72,6 +100,8 @@ pub enum Resource {
     },
     /// The weight census for one node: its tensors (name + byte length).
     Tensors { node: String, tensors: Vec<TensorCensus> },
+    /// A bound span of a handle (Phase C): the fetchable unit + its lanes.
+    Binding(Binding),
     /// A bare acknowledgement with a display message.
     Ack { message: String },
 }
@@ -94,6 +124,13 @@ pub enum Op {
     Write { path: ResourcePath, value: String },
     /// Verb on a resource (`sleep`, `recover`, `register`, `unregister`).
     Ctl { path: ResourcePath, verb: String },
+    /// Bind a span of a bulk resource for fetch (Phase C / Track C):
+    /// `bind weights.<node>.<i>` returns a `Resource::Binding` with the
+    /// lanes the bond policy chose. `span` of None = the whole tensor.
+    Bind { path: ResourcePath, span: Option<Span> },
+    /// Release a binding en-bloc (the `clunk` analog). Idempotent: a
+    /// missing binding acknowledges as released.
+    Revoke { binding: String },
 }
 
 /// A structured op failure: wire-ready, never an exception.
@@ -121,6 +158,17 @@ pub trait GraphBackend {
     fn write(&mut self, path: &ResourcePath, value: &str) -> Result<Resource, String>;
     /// Run `verb` against the resource at `path`.
     fn ctl(&mut self, path: &ResourcePath, verb: &str) -> Result<Resource, String>;
+    /// Bind a span of a bulk resource for fetch (Phase C / Track C).
+    /// Backends that cannot bind bulk refuse loudly rather than pretend.
+    fn bind(&mut self, path: &ResourcePath, span: Option<Span>) -> Result<Resource, String> {
+        let _ = (path, span);
+        Err("bind not supported on this backend".to_string())
+    }
+    /// Release a binding en-bloc. Default refuses; backends holding
+    /// bindings override.
+    fn revoke(&mut self, binding: &str) -> Result<Resource, String> {
+        Err(format!("revoke not supported on this backend: {}", binding))
+    }
 }
 
 /// Route one op through the backend. The kernel is the mouth: all ops enter
@@ -149,6 +197,8 @@ pub fn dispatch(op: &Op, backend: &mut dyn GraphBackend) -> Result<Resource, OpE
         Op::Read(path) => run(backend.read(path)),
         Op::Write { path, value } => run(backend.write(path, value)),
         Op::Ctl { path, verb } => run(backend.ctl(path, verb)),
+        Op::Bind { path, span } => run(backend.bind(path, *span)),
+        Op::Revoke { binding } => run(backend.revoke(binding)),
     }
 }
 
