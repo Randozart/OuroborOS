@@ -1947,6 +1947,45 @@ size-stamp-checked) → `Bond::send` (over the chosen lane). What remains is
 wiring live agent protocol verbs (`fetch-span`) so the *server side* of the
 bond serves real remote shards — that is B2 wire unification territory.
 
+### 19.4i B2 wire unification — the live `fetch` verb (2026-09-08)
+
+Rung 7. **The loopback test is now a live cluster fetch.** The agent serves
+a tensor's byte span over the existing authenticated line protocol, and the
+head fetches it — bytes ride frames, never the line (Art. 6), exactly as the
+doctrine promised.
+
+**Built:**
+- `agent::fetch` — `fetch_verb` (parse a signed
+  `fetch <shard> <tensor> <offset> <length>` line) + `handle_fetch` (open the
+  BMTS shard on the agent's own disk, `read_span` size-stamp-checked, then
+  frame-mode the socket: 8-byte declared-length stamp first, then the span
+  over `pump_send`). One connection per fetch (mirrors `update`'s proven
+  pattern).
+- `agent::main::serve` — dispatches the `fetch` line to `handle_fetch` on
+  the blocking pool (like `update`), `break` after (one connection per
+  fetch).
+- `shell::agent_client::fetch_span` / `fetch_span_with` — the head side:
+  signed line out, 8-byte size-stamp in (refuse if `< length` — corrupt
+  peer, Art. 10), then `pump_recv` the span over frames.
+
+Gates (MET): shell lib **79** (was 78) + agent **38** (was 34) + cluster 185
+· clippy `-D warnings` 0. Tests: `agent::fetch` — verb parse/zero-length/auth
+fail + `test_handle_fetch_roundtrip` (a real head sends a signed fetch line
+over loopback, the agent serves the span, bytes arrive intact on the exact
+range); `shell::agent_client::test_fetch_span_head_side` — the head side
+against a minimal agent, intact sub-span + overrun refused (never
+truncated).
+
+The whole avenue now runs live: a head can fetch any bound tensor span from
+any tail over the wire it has open. The pre-existing flaky `tests/integration.rs`
+suite (7 live-TCP tests, pass in isolation, fail under parallel port
+contention) is unchanged — not a regression from this work.
+
+**Next:** the multi-lane live path — `fetch_span` over a `Bond` (stripe a
+large span across copper + air) is the natural extension; and the agent
+exposing its shard manifest (`fetch manifest`) so the head's `Scheduler.weights`
+can populate from a live cluster, not just a boot-time shard_map.json.
+
 ### 19.5 Track B — ACTS v2 air-path (SwarmLLM borrow), full rungs
 
 | Rung | Work | Gate |

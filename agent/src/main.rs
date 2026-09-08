@@ -1,6 +1,7 @@
 mod executor;
 #[cfg(feature = "gpu")]
 mod gpu;
+mod fetch;
 mod head_link;
 mod stage;
 mod telemetry;
@@ -238,6 +239,33 @@ async fn handle_connection(
             }
             break; // receipt was written on the socket; exec or reboot follows
         }
+        // Fetch verb switches the socket to frame mode (the head sends a
+        // signed fetch line; we serve the tensor span back over frames).
+        // One connection per fetch (the head opens a fresh one each time).
+        if let Some((shard, tensor, span)) = fetch::fetch_verb(&secret, &line) {
+            let stdio_sock = match stream.into_std() {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("[fetch] into_std: {e}");
+                    break;
+                }
+            };
+            stdio_sock.set_nonblocking(false).unwrap_or_else(|e| {
+                eprintln!("[fetch] set_nonblocking: {e}");
+            });
+            eprintln!("[fetch] {shard} {tensor} [{}..+{}]", span.offset, span.length);
+            let secret_c = secret;
+            match tokio::task::spawn_blocking(move || {
+                fetch::handle_fetch(secret_c, stdio_sock, &shard, &tensor, span)
+            })
+            .await
+            {
+                Ok(Ok(n)) => eprintln!("[fetch] served {n} bytes"),
+                Ok(Err(e)) => eprintln!("[fetch] failed: {e:#}"),
+                Err(e) => eprintln!("[fetch] task panic: {e}"),
+            }
+            break;
+        }
         // Task JSON: run on the blocking pool, never inline on a tokio
         // worker. A long task (gpu_selftest's OpenCL JIT alone takes ~90s
         // on first run) starves the runtime on small cores and wedges the
@@ -245,7 +273,7 @@ async fn handle_connection(
         // all hung while the heartbeat kept ticking).
         let task = auth::open_line(&secret, &line)
             .ok()
-            .and_then(|(seq, body)| serde_json::from_str::<executor::Task>(&body).ok().map(|t| (seq, t)));
+            .and_then(|(seq, body)| serde_json::from_str::<executor::Task>(body).ok().map(|t| (seq, t)));
         if let Some((seq, task)) = task {
             let name = task.name.clone();
             eprintln!("[task] {name} begin");

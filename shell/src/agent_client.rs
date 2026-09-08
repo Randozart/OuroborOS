@@ -1,4 +1,4 @@
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -183,6 +183,64 @@ pub fn probe(addr: &str) -> (String, bool) {
     }
 }
 
+/// Fetch a tensor's byte span from an agent over the authenticated frame
+/// line (Track C, the live side). Sends a signed
+/// `fetch <shard> <tensor> <offset> <length>` line; the agent serves the
+/// span back over frames. Returns the bytes (integrity-gated by the
+/// size-stamp the agent sends first).
+pub fn fetch_span(
+    addr: &str,
+    shard: &str,
+    tensor: &str,
+    offset: u64,
+    length: u64,
+) -> Result<Vec<u8>> {
+    fetch_span_with(&cached_secret()?, addr, shard, tensor, offset, length)
+}
+
+/// `fetch_span` with an explicit secret (tests, multi-cluster tools).
+pub fn fetch_span_with(
+    secret: &Secret,
+    addr: &str,
+    shard: &str,
+    tensor: &str,
+    offset: u64,
+    length: u64,
+) -> Result<Vec<u8>> {
+    use ouro_cluster::transport::frames::{pump_recv, FrameSession, DEFAULT_WINDOW};
+
+    let seq = REQUEST_SEQ.fetch_add(1, Ordering::Relaxed);
+    let mut stream = TcpStream::connect(addr).with_context(|| format!("connect to {}", addr))?;
+    stream.set_write_timeout(Some(Duration::from_secs(10)))?;
+    let line = auth::sign_line(
+        secret,
+        seq,
+        &format!("fetch {shard} {tensor} {offset} {length}"),
+    );
+    stream.write_all(line.as_bytes())?;
+    stream.write_all(b"\n")?;
+    stream.flush()?;
+
+    // Size-stamp: the agent sends the declared tensor length first.
+    let mut stamp = [0u8; 8];
+    stream.read_exact(&mut stamp).with_context(|| "read size-stamp")?;
+    let declared = u64::from_be_bytes(stamp);
+    if declared < length {
+        anyhow::bail!(
+            "size-stamp {declared} < requested {length} — corrupt or wrong tensor"
+        );
+    }
+
+    // Pump the span back over frames.
+    let mut session = FrameSession::new(stream, *secret);
+    let mut received = Vec::new();
+    let (n, _) = pump_recv(&mut session, &mut received, DEFAULT_WINDOW)?;
+    if n != length {
+        anyhow::bail!("fetched {n} bytes, wanted {length}");
+    }
+    Ok(received)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -273,5 +331,81 @@ mod tests {
         let tel: AgentTelemetry = serde_json::from_str(json).unwrap();
         assert_eq!(tel.hostname, "test-node");
         assert_eq!(tel.ram_total_mib, 32768);
+    }
+
+    /// The live fetch, head side: `fetch_span_with` talks to a minimal agent
+    /// that serves a BMTS shard span over frames (mirroring the agent's
+    /// `handle_fetch`), and the bytes arrive intact on the exact span.
+    #[test]
+    fn test_fetch_span_head_side() {
+        use ouro_cluster::bmts::{write_shard, BmtsShard, BmtsTensor};
+        use ouro_cluster::transport::frames::{pump_send, FrameSession, DEFAULT_CHUNK, DEFAULT_WINDOW};
+        use std::io::Cursor;
+
+        let dir = std::env::temp_dir().join(format!("ouro-hiss-fetch-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let shard = dir.join("draft.bmts");
+        let blob: Vec<u8> = (0..8000u32).map(|i| (i % 253) as u8).collect();
+        let tensor = "blk.0.attn_q.weight";
+        write_shard(
+            shard.to_str().unwrap(),
+            1,
+            &[BmtsTensor {
+                name: tensor.into(),
+                shape: vec![16, 500],
+                dtype: 34,
+                offset: 0,
+                length: 8000,
+            }],
+            &blob,
+        )
+        .unwrap();
+        let shard_path = shard.to_str().unwrap().to_string();
+
+        // Minimal agent: read the fetch line, serve the span over frames.
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        let server = thread::spawn(move || {
+            for _ in 0..2 {
+                let (stream, _) = listener.accept().unwrap();
+                let mut sock = stream;
+                let mut line = String::new();
+                let mut one = [0u8; 1];
+                while !line.ends_with('\n') {
+                    sock.read_exact(&mut one).unwrap();
+                    line.push(one[0] as char);
+                }
+                let (_seq, body) = auth::open_line(&KEY, line.trim()).unwrap();
+                let rest = body.strip_prefix("fetch ").unwrap();
+                let mut p = rest.split_whitespace();
+                let shard = p.next().unwrap().to_string();
+                let tensor = p.next().unwrap().to_string();
+                let offset: u64 = p.next().unwrap().parse().unwrap();
+                let length: u64 = p.next().unwrap().parse().unwrap();
+                let bmts = BmtsShard::open(&shard).unwrap();
+                let declared = bmts.tensor_bytes(&tensor).unwrap().len() as u64;
+                let span = ouro_cluster::op::Span { offset, length };
+                let payload = match bmts.read_span(&tensor, span) {
+                    Ok(p) => p,
+                    Err(_) => continue, // refuse: close, never truncate
+                };
+                let mut session = FrameSession::new(sock, KEY);
+                let buf = declared.to_be_bytes();
+                session.get_mut().write_all(&buf).unwrap();
+                let mut cur = Cursor::new(payload.bytes().to_vec());
+                pump_send(&mut cur, &mut session, DEFAULT_CHUNK, DEFAULT_WINDOW).unwrap();
+            }
+        });
+
+        // Head: fetch a sub-span.
+        let got = fetch_span_with(&KEY, &addr, &shard_path, tensor, 1000, 3000).unwrap();
+        assert_eq!(got, &blob[1000..4000]);
+
+        // A span past the declared length is refused, never truncated.
+        let err = fetch_span_with(&KEY, &addr, &shard_path, tensor, 7000, 2000);
+        assert!(err.is_err(), "overrun span must be refused");
+
+        server.join().unwrap();
+        std::fs::remove_dir_all(&dir).ok();
     }
 }
