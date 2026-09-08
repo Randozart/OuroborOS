@@ -1986,6 +1986,37 @@ large span across copper + air) is the natural extension; and the agent
 exposing its shard manifest (`fetch manifest`) so the head's `Scheduler.weights`
 can populate from a live cluster, not just a boot-time shard_map.json.
 
+### 19.4j Multi-lane live fetch — the bond payoff (2026-09-08)
+
+Rung 8. **"Both paths at once" in production.** A single tensor span is
+fetched across every live lane simultaneously: the span is split into
+contiguous chunks, striped across the peer's lanes (bandwidth-descending —
+the biggest chunk rides the fastest lane), each on its own connection, in
+parallel, then reassembled intact.
+
+**Built:**
+- `shell::agent_client::fetch_span_bonded(secret, edges, addr_for, shard,
+  tensor, offset, length)` — splits `[offset, length)` into `edges.len()`
+  chunks, fans out one `fetch_span_with` per lane (one connection, parallel
+  threads) on the bandwidth-ordered lanes, reassembles in order. `addr_for`
+  is the multi-homed address table (iface → addr).
+
+Gates (MET): shell lib **80** (was 79) · clippy `-D warnings` 0. Test:
+`test_fetch_span_bonded_two_lanes` — a 4 KB span fetched across two live
+lanes (copper + air, two loopback listeners serving the same shard);
+asserts (a) the reassembled bytes are byte-identical to the span, (b) the
+two lanes' served-byte counts sum to the span length, (c) **both lanes
+carried bytes** (striping uses every lane, not just the fastest).
+
+The doctrine is now the whole path, end to end: a head fetches any tensor
+span from any multi-homed tail, over whatever lanes the tail has open —
+copper and air at once, stripes reassembled on arrival.
+
+**Next:** the agent exposing its shard manifest (`fetch manifest`) so
+`Scheduler.weights` populates from a live cluster (not just boot-time
+shard_map.json) — the last piece for a cluster that describes its own
+weights.
+
 ### 19.5 Track B — ACTS v2 air-path (SwarmLLM borrow), full rungs
 
 | Rung | Work | Gate |

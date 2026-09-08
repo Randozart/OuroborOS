@@ -241,6 +241,75 @@ pub fn fetch_span_with(
     Ok(received)
 }
 
+/// Fetch a tensor's byte span **across every live lane at once** (the bond
+/// payoff, docs/AIR_PATH.md §4.2). The span is split into `edges.len()`
+/// contiguous chunks; chunk i rides lane i (bandwidth-descending — the
+/// biggest chunk takes the fastest lane), each on its own connection, in
+/// parallel; the chunks are reassembled in order. This is "both paths at
+/// once" for one tensor: a 4 MB tensor span streams over copper and air
+/// simultaneously.
+///
+/// `edges` is the peer's priced edge set (lane order = bandwidth-descending);
+/// `addr_for` maps an `iface` to the address to connect to (the multi-homed
+/// address table).
+pub fn fetch_span_bonded(
+    secret: &Secret,
+    edges: &[ouro_cluster::transport::edge::PricedEdge],
+    addr_for: &dyn Fn(&str) -> Option<String>,
+    shard: &str,
+    tensor: &str,
+    offset: u64,
+    length: u64,
+) -> Result<Vec<u8>> {
+    if edges.is_empty() {
+        anyhow::bail!("bond has no live lanes");
+    }
+    // Lane order: bandwidth-descending (the bond's bulk stripe order).
+    let mut order: Vec<usize> = (0..edges.len()).collect();
+    order.sort_by(|&a, &b| edges[b].bw_mbps.cmp(&edges[a].bw_mbps));
+
+    // Contiguous chunking: lane i (in bandwidth order) gets chunk i.
+    let n = edges.len();
+    let base = length / n as u64;
+    let rem = (length % n as u64) as usize; // extra bytes to the first `rem` lanes
+    let mut chunks: Vec<(u64, u64)> = Vec::with_capacity(n); // (offset, len)
+    let mut cur = offset;
+    for i in 0..n {
+        let len = base + if i < rem { 1 } else { 0 };
+        chunks.push((cur, len));
+        cur += len;
+    }
+
+    // Fan out: one fetch per lane, in parallel, one connection each.
+    let mut handles = Vec::with_capacity(n);
+    for (i, &idx) in order.iter().enumerate() {
+        let (chunk_off, chunk_len) = chunks[i];
+        let iface = edges[idx].iface.clone();
+        let addr = addr_for(&iface)
+            .with_context(|| format!("lane {iface} has no address"))?;
+        let secret_c = *secret;
+        let shard_c = shard.to_string();
+        let tensor_c = tensor.to_string();
+        let handle = std::thread::spawn(move || {
+            fetch_span_with(&secret_c, &addr, &shard_c, &tensor_c, chunk_off, chunk_len)
+        });
+        handles.push((i, handle));
+    }
+
+    // Reassemble in chunk order (chunks are contiguous, in order).
+    let mut out = Vec::with_capacity(length as usize);
+    for (_, handle) in handles {
+        let chunk = handle
+            .join()
+            .map_err(|_| anyhow::anyhow!("lane thread panicked"))??;
+        out.extend(chunk);
+    }
+    if out.len() != length as usize {
+        anyhow::bail!("reassembled {} bytes, wanted {length}", out.len());
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -406,6 +475,105 @@ mod tests {
         assert!(err.is_err(), "overrun span must be refused");
 
         server.join().unwrap();
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The bond payoff: fetch one tensor span across TWO live lanes at once
+    /// (copper + air, two loopback listeners each serving the same shard).
+    /// The span is split, striped across both lanes in parallel, and
+    /// reassembled intact. Both lanes must actually carry bytes.
+    #[test]
+    fn test_fetch_span_bonded_two_lanes() {
+        use ouro_cluster::bmts::{write_shard, BmtsShard, BmtsTensor};
+        use ouro_cluster::transport::edge::{EdgeKind, PricedEdge};
+        use ouro_cluster::transport::frames::{pump_send, FrameSession, DEFAULT_CHUNK, DEFAULT_WINDOW};
+        use std::io::Cursor;
+
+        let dir = std::env::temp_dir().join(format!("ouro-hiss-bonded-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let shard = dir.join("draft.bmts");
+        let blob: Vec<u8> = (0..64_000u32).map(|i| (i % 251) as u8).collect();
+        let tensor = "blk.0.attn_q.weight";
+        write_shard(
+            shard.to_str().unwrap(),
+            1,
+            &[BmtsTensor {
+                name: tensor.into(),
+                shape: vec![16, 4000],
+                dtype: 34,
+                offset: 0,
+                length: 64_000,
+            }],
+            &blob,
+        )
+        .unwrap();
+        let shard_path = shard.to_str().unwrap().to_string();
+
+        // One minimal-agent listener per lane, each serving one fetch.
+        let listener_a = TcpListener::bind("127.0.0.1:0").unwrap();
+        let listener_b = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr_a = listener_a.local_addr().unwrap().to_string();
+        let addr_b = listener_b.local_addr().unwrap().to_string();
+
+        fn serve_one(listener: TcpListener, key: Secret) -> thread::JoinHandle<u64> {
+            thread::spawn(move || {
+                let (stream, _) = listener.accept().unwrap();
+                let mut sock = stream;
+                let mut line = String::new();
+                let mut one = [0u8; 1];
+                while !line.ends_with('\n') {
+                    sock.read_exact(&mut one).unwrap();
+                    line.push(one[0] as char);
+                }
+                let (_seq, body) = auth::open_line(&key, line.trim()).unwrap();
+                let rest = body.strip_prefix("fetch ").unwrap();
+                let mut p = rest.split_whitespace();
+                let shard = p.next().unwrap().to_string();
+                let tensor = p.next().unwrap().to_string();
+                let offset: u64 = p.next().unwrap().parse().unwrap();
+                let length: u64 = p.next().unwrap().parse().unwrap();
+                let bmts = BmtsShard::open(&shard).unwrap();
+                let declared = bmts.tensor_bytes(&tensor).unwrap().len() as u64;
+                let span = ouro_cluster::op::Span { offset, length };
+                let payload = bmts.read_span(&tensor, span).unwrap();
+                let mut session = FrameSession::new(sock, key);
+                let buf = declared.to_be_bytes();
+                session.get_mut().write_all(&buf).unwrap();
+                let mut cur = Cursor::new(payload.bytes().to_vec());
+                pump_send(&mut cur, &mut session, DEFAULT_CHUNK, DEFAULT_WINDOW).unwrap()
+            })
+        }
+
+        let ha = serve_one(listener_a, KEY);
+        let hb = serve_one(listener_b, KEY);
+
+        // Two priced lanes: copper (fast) + air (slow).
+        let copper = PricedEdge { iface: "enp3s0".into(), kind: EdgeKind::Tcp, bw_mbps: 1000, latency_us: 300, jitter_us: 10, watts: 0, signal_dbm: 0 };
+        let air = PricedEdge { iface: "wlan0".into(), kind: EdgeKind::Air, bw_mbps: 60, latency_us: 2000, jitter_us: 500, watts: 0, signal_dbm: -60 };
+        let edges = vec![copper, air];
+
+        let span_len: u64 = 4000;
+        let offset: u64 = 1000;
+        let got = fetch_span_bonded(
+            &KEY,
+            &edges,
+            &|iface| match iface {
+                "enp3s0" => Some(addr_a.clone()),
+                "wlan0" => Some(addr_b.clone()),
+                _ => None,
+            },
+            &shard_path,
+            tensor,
+            offset,
+            span_len,
+        )
+        .unwrap();
+        assert_eq!(got, &blob[1000..5000], "bonded reassembly must be intact");
+
+        let (na, nb) = (ha.join().unwrap(), hb.join().unwrap());
+        assert_eq!(na + nb, span_len, "both lanes must carry bytes");
+        assert!(na > 0 && nb > 0, "striping must use every lane");
+
         std::fs::remove_dir_all(&dir).ok();
     }
 }
