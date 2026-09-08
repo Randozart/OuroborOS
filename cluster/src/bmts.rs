@@ -147,6 +147,34 @@ impl BmtsShard {
     pub fn read_tensor(&self, name: &str) -> Result<Vec<u8>> {
         Ok(self.tensor_bytes(name)?.bytes().to_vec())
     }
+
+    /// Zero-copy byte range of a tensor — the streamed range-fetch unit
+    /// (SwarmLLM borrow, AIR_PATH §2.2): fetch *only* a tensor's byte span.
+    /// Bounds-checked against the tensor's declared length (the size-stamp);
+    /// a span that exceeds it is refused, never truncated.
+    pub fn read_span(&self, tensor: &str, span: crate::op::Span) -> Result<Payload> {
+        let t = self
+            .tensors
+            .iter()
+            .find(|t| t.name == tensor)
+            .ok_or_else(|| anyhow::anyhow!("tensor {} not in shard", tensor))?;
+        if span.end() > t.length {
+            bail!(
+                "span [{}, {}) exceeds tensor {} of {} bytes (size-stamp {})",
+                span.offset,
+                span.end(),
+                tensor,
+                t.length,
+                t.length
+            );
+        }
+        let start = self.data_start as usize + t.offset as usize + span.offset as usize;
+        let end = start + span.length as usize;
+        if end > self.map.len() {
+            bail!("span range {}..{} exceeds file", start, end);
+        }
+        Ok(Payload::Mapped(self.map.clone(), start, span.length as usize))
+    }
 }
 
 /// Serialize a minimal BMTS shard (used by tools and tests).
@@ -203,6 +231,32 @@ mod tests {
         let t1 = shard.read_tensor("blk.0.attn_k.weight").unwrap();
         assert_eq!(t1, &blob[32..64]);
         assert!(shard.read_tensor("missing").is_err());
+
+        // Track C range-fetch: a sub-span of a tensor, size-stamp checked.
+        let sub = shard
+            .read_span(
+                "blk.0.attn_q.weight",
+                crate::op::Span { offset: 8, length: 16 },
+            )
+            .unwrap();
+        assert_eq!(sub.bytes(), &blob[8..24]);
+        // Full-span read equals the tensor.
+        let full = shard
+            .read_span(
+                "blk.0.attn_q.weight",
+                crate::op::Span { offset: 0, length: 32 },
+            )
+            .unwrap();
+        assert_eq!(full.bytes(), t0);
+        // Overrunning the declared length (the size-stamp) refuses.
+        assert!(
+            shard
+                .read_span(
+                    "blk.0.attn_q.weight",
+                    crate::op::Span { offset: 0, length: 33 },
+                )
+                .is_err()
+        );
 
         std::fs::remove_dir_all(&dir).ok();
     }

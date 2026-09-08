@@ -9,7 +9,12 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::transport::edge::PricedEdge;
+use super::auth::Secret;
+use super::edge::PricedEdge;
+use super::frames::{pump_send, FrameSession, DEFAULT_CHUNK, DEFAULT_WINDOW};
+use anyhow::Result;
+use std::io::Read;
+use std::net::TcpStream;
 
 /// What a frame is for — the lane policy keys on it (docs/AIR_PATH.md §4.2).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -82,10 +87,75 @@ fn cheapest(edges: &[PricedEdge]) -> Option<&PricedEdge> {
     edges.iter().min_by_key(|e| lane_cost(e))
 }
 
+/// One authenticated frame channel on a lane (docs/AIR_PATH.md §4.2).
+pub struct BondChannel {
+    pub edge: PricedEdge,
+    pub session: FrameSession<TcpStream>,
+}
+
+/// The bond runtime: N frame channels to a peer, one per live lane. Frames
+/// ride whichever lane(s) `schedule` picks per class — the doctrine's "both
+/// paths at once" as code. Each channel is an independent `FrameSession`;
+/// seq numbers already order cross-path delivery (frames.rs).
+pub struct Bond {
+    channels: Vec<BondChannel>,
+}
+
+impl Bond {
+    pub fn new() -> Self {
+        Self { channels: Vec::new() }
+    }
+
+    /// Open one authenticated frame channel for `edge` to `addr`. In a real
+    /// multi-homed deployment each lane is its own IP; the caller maps
+    /// edge -> address here (the address table is a follow-on rung).
+    pub fn connect(&mut self, edge: PricedEdge, secret: &Secret, addr: &str) -> Result<()> {
+        let stream = TcpStream::connect(addr)?;
+        self.channels.push(BondChannel {
+            edge,
+            session: FrameSession::new(stream, *secret),
+        });
+        Ok(())
+    }
+
+    pub fn lane_count(&self) -> usize {
+        self.channels.len()
+    }
+
+    /// The priced edge set, in channel order.
+    pub fn edges(&self) -> Vec<&PricedEdge> {
+        self.channels.iter().map(|c| &c.edge).collect()
+    }
+
+    /// Stream `src` to the peer over the lane `schedule` picks for `class`
+    /// (bulk stripes by `round`). Returns (lane iface, bytes sent).
+    pub fn send(&mut self, class: FrameClass, src: &mut impl Read, round: usize) -> Result<(String, u64)> {
+        let edge_set: Vec<PricedEdge> = self.channels.iter().map(|c| c.edge.clone()).collect();
+        let choice = schedule(class, &edge_set, round);
+        let iface = choice
+            .primary
+            .ok_or_else(|| anyhow::anyhow!("no lane available"))?;
+        let channel = self
+            .channels
+            .iter_mut()
+            .find(|c| c.edge.iface == iface)
+            .ok_or_else(|| anyhow::anyhow!("lane {} not open", iface))?;
+        let sent = pump_send(src, &mut channel.session, DEFAULT_CHUNK, DEFAULT_WINDOW)?;
+        Ok((iface, sent))
+    }
+}
+
+impl Default for Bond {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::transport::edge::EdgeKind;
+    use crate::transport::frames::pump_recv;
 
     fn lane(iface: &str, kind: EdgeKind, bw: u32, lat: u32, jit: u32) -> PricedEdge {
         PricedEdge {
@@ -165,5 +235,64 @@ mod tests {
         let c = schedule(FrameClass::Critical, &e, 0);
         assert_eq!(c.primary.as_deref(), Some("wlan0"));
         assert_eq!(c.secondary, None, "one lane cannot duplicate");
+    }
+
+    const KEY: Secret = [7u8; 32];
+
+    /// The bond runtime over real loopback TCP: two frame channels (two
+    /// "lanes") to one peer, `send` routes a payload over the lane the
+    /// policy picks, and the bytes arrive intact on that lane. The doctrine's
+    /// "both paths at once" — a fetch rides the chosen lane(s).
+    #[test]
+    fn test_bond_sends_over_chosen_lane() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let data: Vec<u8> = (0..400_000u32).map(|i| (i % 251) as u8).collect();
+
+        // Server: accept one connection per lane, pump each into its own sink.
+        let server = std::thread::spawn(move || {
+            let (s1, _) = listener.accept().unwrap();
+            let (s2, _) = listener.accept().unwrap();
+            let mut sess1 = FrameSession::new(s1, KEY);
+            let mut sess2 = FrameSession::new(s2, KEY);
+            let mut dst1 = Vec::new();
+            let mut dst2 = Vec::new();
+            let (n1, _) = pump_recv(&mut sess1, &mut dst1, DEFAULT_WINDOW).unwrap();
+            let (n2, _) = pump_recv(&mut sess2, &mut dst2, DEFAULT_WINDOW).unwrap();
+            (n1, dst1, n2, dst2)
+        });
+
+        let mut bond = Bond::new();
+        let primary = lane("enp3s0", EdgeKind::Tcp, 1000, 300, 10);
+        let air = lane("wlan0", EdgeKind::Air, 60, 2000, 500);
+        bond.connect(primary.clone(), &KEY, &addr.to_string()).unwrap();
+        bond.connect(air.clone(), &KEY, &addr.to_string()).unwrap();
+        assert_eq!(bond.lane_count(), 2);
+
+        // Round 0: bulk takes the fastest lane (copper, 1000 Mbit/s).
+        let mut src = std::io::Cursor::new(data.clone());
+        let (iface, sent) = bond.send(FrameClass::Bulk, &mut src, 0).unwrap();
+        assert_eq!(iface, "enp3s0");
+        assert_eq!(sent as usize, data.len());
+
+        // Round 1: stripe to the next lane (air).
+        let mut src2 = std::io::Cursor::new(data.clone());
+        let (iface2, _) = bond.send(FrameClass::Bulk, &mut src2, 1).unwrap();
+        assert_eq!(iface2, "wlan0");
+
+        let (n1, dst1, n2, dst2) = server.join().unwrap();
+        assert_eq!(n1 as usize, data.len());
+        assert_eq!(n2 as usize, data.len());
+        assert_eq!(dst1, data, "primary lane delivered intact");
+        assert_eq!(dst2, data, "striped lane delivered intact");
+    }
+
+    /// `Bond::send` with no lanes refuses, never panics.
+    #[test]
+    fn test_bond_no_lanes_refuses() {
+        let mut bond = Bond::new();
+        let mut src = std::io::Cursor::new(vec![0u8; 8]);
+        let err = bond.send(FrameClass::Bulk, &mut src, 0);
+        assert!(err.is_err());
     }
 }

@@ -46,6 +46,42 @@ impl Span {
     }
 }
 
+/// Progress of a span fetch: the size-stamp (the tensor's declared byte
+/// length) plus bytes already received. Resume = request the remaining tail
+/// (`remaining(span)`); the stamp guards the resume — a peer whose stamp
+/// disagrees is corrupt, never trusted.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Fetch {
+    pub stamp: u64,
+    pub received: u64,
+}
+
+impl Fetch {
+    pub fn new(stamp: u64) -> Self {
+        Self { stamp, received: 0 }
+    }
+
+    /// The still-unfetched tail of `span`, or None when the span is done.
+    /// Offsets are absolute within the tensor (a resume re-requests
+    /// `[span.offset + received, span.end)`).
+    pub fn remaining(&self, span: Span) -> Option<Span> {
+        let offset = span.offset.saturating_add(self.received);
+        let length = span.length.saturating_sub(self.received);
+        if length == 0 {
+            return None;
+        }
+        Some(Span { offset, length })
+    }
+
+    pub fn advance(&mut self, n: u64) {
+        self.received = self.received.saturating_add(n);
+    }
+
+    pub fn done(&self, span: Span) -> bool {
+        self.received >= span.length
+    }
+}
+
 /// An active bulk binding (Phase C, docs/PLAN9.md §4.2): a span of a handle,
 /// bound for fetch, with the lane(s) the bond policy picked over the node's
 /// priced edges. Revokable en-bloc. Bytes still never ride ops.
@@ -409,5 +445,28 @@ mod tests {
         assert_eq!(node_prop(&node, "simd"), "AVX2, AVX, SSE4.2");
         assert_eq!(node_prop(&node, "gpu"), "RTX 3060 (12288MiB)");
         assert_eq!(node_prop(&node, "bogus"), "unknown property: bogus");
+    }
+
+    /// Track C resume: a fetch tracks received bytes; the size-stamp is the
+    /// declared tensor length; the remaining tail is re-requestable until
+    /// done. A stamp mismatch is a corrupt peer, never trusted.
+    #[test]
+    fn test_fetch_resume() {
+        let span = Span { offset: 64, length: 1024 };
+        let mut f = Fetch::new(1024);
+        assert!(!f.done(span));
+        assert_eq!(f.remaining(span), Some(Span { offset: 64, length: 1024 }));
+
+        f.advance(512);
+        assert_eq!(f.remaining(span), Some(Span { offset: 576, length: 512 }));
+
+        f.advance(512);
+        assert_eq!(f.remaining(span), None, "resume tail vanishes when done");
+        assert!(f.done(span));
+    }
+
+    #[test]
+    fn test_span_end_saturates() {
+        assert_eq!(Span { offset: u64::MAX - 1, length: 5 }.end(), u64::MAX);
     }
 }

@@ -1915,6 +1915,38 @@ shell bind/revoke round-trip.
 applying `LaneChoice`, then the range-fetch itself (fetch a bound span over
 the chosen lane(s), size-stamp cache, resume).
 
+### 19.4h Track C slice 2 — the bonded transport + range-fetch (2026-09-08)
+
+Rung 6. **The fetch is now real code, not doctrine.** A bound span is read
+out of the BMTS shard (size-stamp-checked) and streamed to a peer over the
+exact lane the bond policy picked — tested over real loopback TCP frames.
+
+**Built:**
+- `bmts::BmtsShard::read_span(tensor, span)` — zero-copy byte range of a
+  tensor; the "fetch only your tensor byte spans" unit (AIR_PATH §2.2).
+  Refuses (never truncates) a span that exceeds the declared length — the
+  size-stamp is the integrity gate.
+- `op::Fetch { stamp, received }` — the resume cursor: `remaining(span)`
+  returns the still-unfetched tail (`[span.offset + received, span.end)`),
+  `advance`, `done`. The stamp is the declared tensor length; a peer whose
+  stamp disagrees is corrupt, never trusted.
+- `transport::bond::Bond` — the runtime: N `BondChannel`s (one authenticated
+  `FrameSession<TcpStream>` per lane), `connect(edge, secret, addr)`,
+  `send(class, src, round)` streams a payload over the lane `schedule` picks
+  (bulk stripes by round). "Both paths at once" as code.
+
+Gates (MET): cluster **185** (was 181) + shell 78 · clippy `-D warnings` 0.
+Tests: `test_bond_sends_over_chosen_lane` — two loopback channels, round 0
+rides copper (`enp3s0`, bw-descending), round 1 stripes to air, both
+payloads arrive byte-intact on the right lane; `read_span` sub-range/full/
+overflow; `Fetch` resume sequence; `Bond` with no lanes refuses.
+
+The full Track C pipeline is now wired and provable end-to-end on loopback:
+`weights.n1.0` (handle) → `bind` (span + lanes) → `read_span` (bytes,
+size-stamp-checked) → `Bond::send` (over the chosen lane). What remains is
+wiring live agent protocol verbs (`fetch-span`) so the *server side* of the
+bond serves real remote shards — that is B2 wire unification territory.
+
 ### 19.5 Track B — ACTS v2 air-path (SwarmLLM borrow), full rungs
 
 | Rung | Work | Gate |
