@@ -131,6 +131,8 @@ pub enum Command {
     Unregister { node: String },
     /// `tasks.` — show task queue status
     Tasks,
+    /// `weights [n1 [i]].` — weight census / open a bulk handle (Rung B3)
+    Weights { target: String },
     /// `drift [rev]` — which tails don't run the expected versions
     Drift { expected: Option<String> },
     /// `recover.` — trigger error recovery sweep
@@ -349,6 +351,14 @@ pub fn interpret(input: &str) -> Command {
     if trimmed == "tasks." || trimmed == "tasks" {
         return Command::Tasks;
     }
+    if trimmed == "weights" || trimmed.starts_with("weights ") || trimmed.starts_with("weights.") {
+        let target = trimmed
+            .trim_start_matches("weights")
+            .trim_start_matches('.')
+            .trim()
+            .trim_end_matches('.');
+        return Command::Weights { target: target.to_string() };
+    }
     if trimmed == "recover." || trimmed == "recover" {
         return Command::Recover;
     }
@@ -494,6 +504,11 @@ mod tests {
         assert!(matches!(interpret("load"), Command::Load));
         assert!(matches!(interpret("register"), Command::Register));
         assert!(matches!(interpret("tasks"), Command::Tasks));
+        assert!(matches!(interpret("weights"), Command::Weights { .. }));
+        assert!(matches!(interpret("weights.n1."), Command::Weights { target } if target == "n1"));
+        assert!(
+            matches!(interpret("weights.n1.0."), Command::Weights { target } if target == "n1.0")
+        );
         assert!(matches!(interpret("drift"), Command::Drift { expected: None }));
         assert!(
             matches!(interpret("drift abc1234."), Command::Drift { expected: Some(e) } if e == "abc1234")

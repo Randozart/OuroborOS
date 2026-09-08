@@ -1,5 +1,7 @@
 use anyhow::Result;
-use ouro_cluster::beast::topology::ClusterTopology;
+use ouro_cluster::beast::resource::ResourcePath;
+use ouro_cluster::beast::topology::{ClusterTopology, NodeEntry};
+use ouro_cluster::op::{GraphBackend, Op, QueueEntry, Resource};
 use ouro_cluster::scheduler::{ScheduleOutcome, Scheduler, Task};
 use ouro_cluster::scheduler::workload_class::WorkloadClass;
 use ouro_cluster::transport::auth;
@@ -91,125 +93,87 @@ pub fn handle(
             Ok("drift: run it from the interactive shell (ouro-hiss)".to_string())
         }
         Command::ClusterSummary | Command::ClusterQuery => {
-            if let Some(live) = live_status(config) {
-                let online = live.nodes.iter().filter(|n| n.online).count();
-                let power: u32 = live
-                    .nodes
-                    .iter()
-                    .filter(|n| n.online)
-                    .map(|n| if n.power_watts > 0 { n.power_watts } else { n.tdp_watts })
-                    .sum();
-                let mut s = fmt.cluster_summary(
-                    live.nodes.len(),
+            let mut backend = ShellBackend { scheduler, topology, ctx, recovery, config };
+            match run_dispatch(&Op::Stat(ResourcePath::parse("cluster").unwrap()), &mut backend)? {
+                Resource::Cluster {
+                    total,
                     online,
-                    power,
-                    topology.power_budget_watts,
-                    0,
-                    0,
-                );
-                s = with_gpu_census_records(s, &live.nodes);
-                if topology.node_count() != live.nodes.len() {
-                    s.push_str(&format!(
-                        "\n  source: registry bus ({} live, topology static: {})",
-                        live.nodes.len(),
-                        topology.node_count()
-                    ));
+                    power_watts,
+                    budget_watts,
+                    topology_nodes,
+                    gpus,
+                } => {
+                    let mut s = fmt.cluster_summary(total, online, power_watts, budget_watts, 0, 0);
+                    if !gpus.is_empty() {
+                        s.push_str(&format!(
+                            "\n  GPUs:   {} (vram: {})",
+                            gpus.len(),
+                            gpus.join(", ")
+                        ));
+                    }
+                    if topology_nodes != total {
+                        s.push_str(&format!(
+                            "\n  source: registry bus ({} live, topology static: {})",
+                            total, topology_nodes
+                        ));
+                    }
+                    Ok(s)
                 }
-                Ok(s)
-            } else {
-                let total = topology.node_count();
-                let power: u32 = topology.nodes.iter().map(|n| n.tdp_watts).sum();
-                let budget = topology.power_budget_watts;
-                Ok(with_gpu_census(
-                    fmt.cluster_summary(total, 0, power, budget, 0, 0),
-                    topology,
-                ))
+                other => Err(anyhow::anyhow!("unexpected resource: {:?}", other)),
             }
         }
 
         Command::NodeQuery { node } => {
-            if let Some(live) = live_status(config) {
-                if let Some(rec) = live.nodes.iter().find(|n| n.id == node) {
-                    return Ok(fmt.node_query(&record_to_display(rec)));
+            let mut backend = ShellBackend { scheduler, topology, ctx, recovery, config };
+            match run_dispatch(&Op::Stat(ResourcePath::parse(&node).unwrap()), &mut backend)? {
+                Resource::Node(record) => {
+                    let display: NodeDisplay = serde_json::from_value(record)?;
+                    Ok(fmt.node_query(&display))
                 }
+                other => Err(anyhow::anyhow!("unexpected resource: {:?}", other)),
             }
-            let entry = topology
-                .get_node(&node)
-                .ok_or_else(|| anyhow::anyhow!("Node {} not found", node))?;
-            let display = NodeDisplay {
-                id: entry.id.clone(),
-                cpu_model: entry.cpu_model.clone(),
-                ram_mib: entry.ram_mib,
-                has_avx2: entry.has_avx2,
-                has_avx: entry.has_avx,
-                has_sse42: entry.has_sse42,
-                status: "IDLE".to_string(),
-                power_watts: entry.tdp_watts,
-                temp_c: 0,
-                gpu: entry_gpu(topology, &entry.id),
-            };
-            Ok(fmt.node_query(&display))
         }
 
         Command::PropertyQuery { node, property } => {
-            if let Some(live) = live_status(config) {
-                if let Some(rec) = live.nodes.iter().find(|n| n.id == node) {
-                    let value = resolve_record_property(rec, &property, ctx);
-                    return Ok(fmt.property_query(&node, &property, &value));
+            let mut backend = ShellBackend { scheduler, topology, ctx, recovery, config };
+            let path = ResourcePath::parse(&format!("{}.{}", node, property))
+                .map_err(|e| anyhow::anyhow!("{}", e))?;
+            match run_dispatch(&Op::Stat(path), &mut backend)? {
+                Resource::Prop { node: n, property: p, value } => {
+                    Ok(fmt.property_query(&n, &p, &value))
                 }
+                other => Err(anyhow::anyhow!("unexpected resource: {:?}", other)),
             }
-            let entry = topology
-                .get_node(&node)
-                .ok_or_else(|| anyhow::anyhow!("Node {} not found", node))?;
-            let value = resolve_node_property(entry, &property, ctx);
-            Ok(fmt.property_query(&node, &property, &value))
         }
 
         Command::ContextPropertyQuery { property } => {
-            if let Some(node_id) = ctx.current_node().map(|s| s.to_string()) {
-                if let Some(live) = live_status(config) {
-                    if let Some(rec) = live.nodes.iter().find(|n| n.id == node_id) {
-                        let value = resolve_record_property(rec, &property, ctx);
-                        return Ok(fmt.property_query(&node_id, &property, &value));
-                    }
+            let Some(node_id) = ctx.current_node().map(|s| s.to_string()) else {
+                return Ok(fmt.unknown(&format!("{}?", property)));
+            };
+            let mut backend = ShellBackend { scheduler, topology, ctx, recovery, config };
+            let path = ResourcePath::parse(&format!("{}.{}", node_id, property))
+                .map_err(|e| anyhow::anyhow!("{}", e))?;
+            match run_dispatch(&Op::Stat(path), &mut backend)? {
+                Resource::Prop { node: n, property: p, value } => {
+                    Ok(fmt.property_query(&n, &p, &value))
                 }
-                let entry = topology
-                    .get_node(&node_id)
-                    .ok_or_else(|| anyhow::anyhow!("Node {} not found", node_id))?;
-                let value = resolve_node_property(entry, &property, ctx);
-                Ok(fmt.property_query(&node_id, &property, &value))
-            } else {
-                Ok(fmt.unknown(&format!("{}?", property)))
+                other => Err(anyhow::anyhow!("unexpected resource: {:?}", other)),
             }
         }
 
         Command::BulkQuery { filter } => {
-            let mut nodes: Vec<NodeDisplay> = Vec::new();
-            let mut seen: Vec<String> = Vec::new();
-            if let Some(live) = live_status(config) {
-                for rec in &live.nodes {
-                    nodes.push(record_to_display(rec));
-                    seen.push(rec.id.clone());
+            let mut backend = ShellBackend { scheduler, topology, ctx, recovery, config };
+            match run_dispatch(&Op::Stat(ResourcePath::parse("cluster.nodes").unwrap()), &mut backend)?
+            {
+                Resource::Nodes(records) => {
+                    let nodes: Vec<NodeDisplay> = records
+                        .into_iter()
+                        .map(|r| serde_json::from_value(r).map_err(|e| anyhow::anyhow!("{}", e)))
+                        .collect::<Result<Vec<_>>>()?;
+                    Ok(fmt.bulk_query(&filter, &nodes))
                 }
+                other => Err(anyhow::anyhow!("unexpected resource: {:?}", other)),
             }
-            for n in &topology.nodes {
-                if seen.iter().any(|id| id == &n.id) {
-                    continue;
-                }
-                nodes.push(NodeDisplay {
-                    id: n.id.clone(),
-                    cpu_model: n.cpu_model.clone(),
-                    ram_mib: n.ram_mib,
-                    has_avx2: n.has_avx2,
-                    has_avx: n.has_avx,
-                    has_sse42: n.has_sse42,
-                    status: "IDLE".to_string(),
-                    power_watts: n.tdp_watts,
-                    temp_c: 0,
-                    gpu: entry_gpu(topology, &n.id),
-                });
-            }
-            Ok(fmt.bulk_query(&filter, &nodes))
         }
 
         Command::SetContext { node } => {
@@ -223,14 +187,12 @@ pub fn handle(
         }
 
         Command::AssignProposition { node, workload } => {
-            let class = WorkloadClass::from_name(&workload);
-            let task = Task {
-                name: workload.clone(),
-                class,
-                payload: String::new(),
-                estimated_watts: 30,
-                estimated_seconds: 10,
+            let mut backend = ShellBackend { scheduler, topology, ctx, recovery, config };
+            let op = Op::Write {
+                path: ResourcePath::parse("tasks").unwrap(),
+                value: workload.clone(),
             };
+            let class = WorkloadClass::from_name(&workload);
             let mut details = Vec::new();
             details.push(format!("[1] Serialize {}.bv.              [OK]", workload));
             details.push(format!(
@@ -238,20 +200,22 @@ pub fn handle(
                 node,
                 class.label()
             ));
-
-            match scheduler.schedule(&task)? {
-                ScheduleOutcome::Dispatched { node: assigned } => {
+            match run_dispatch(&op, &mut backend)? {
+                Resource::Assign { node: assigned } => {
                     details.push(format!("[3] Dispatch to {}.                [OK]", assigned));
                     Ok(fmt.assign_result(&node, &workload, true, &details))
                 }
-                ScheduleOutcome::Queued { reason } => {
+                Resource::Queued { reason } => {
                     details.push(format!("[3] Scheduling failed: {}", reason));
                     Ok(fmt.assign_result(&node, &workload, false, &details))
                 }
+                other => Err(anyhow::anyhow!("unexpected resource: {:?}", other)),
             }
         }
 
         Command::AssignCheck { node, workload } => {
+            // Dry-run placement feasibility is a ClassAd stat (Phase C);
+            // sugar until the placement ads exist (docs/PLAN9.md §9.1).
             let class = WorkloadClass::from_name(&workload);
             let mut details = Vec::new();
             details.push(format!(
@@ -265,32 +229,42 @@ pub fn handle(
 
         Command::PowerState { node, sleeping } => {
             let _ = sleeping;
-            Ok(format!("Node {}休眠. Power: 12W → 2W.", node))
+            let mut backend = ShellBackend { scheduler, topology, ctx, recovery, config };
+            let op = Op::Ctl {
+                path: ResourcePath::parse(&node).unwrap(),
+                verb: "sleep".to_string(),
+            };
+            match run_dispatch(&op, &mut backend)? {
+                Resource::Ack { message } => Ok(message),
+                other => Err(anyhow::anyhow!("unexpected resource: {:?}", other)),
+            }
         }
 
         Command::SetBudget { watts } => {
-            scheduler.budget.set_budget(watts);
-            Ok(fmt.budget_set(watts))
+            let mut backend = ShellBackend { scheduler, topology, ctx, recovery, config };
+            let op = Op::Write {
+                path: ResourcePath::parse("cluster.budget").unwrap(),
+                value: watts.to_string(),
+            };
+            match run_dispatch(&op, &mut backend)? {
+                Resource::Budget { watts } => Ok(fmt.budget_set(watts)),
+                other => Err(anyhow::anyhow!("unexpected resource: {:?}", other)),
+            }
         }
 
         Command::Probe => {
-            let nodes: Vec<NodeDisplay> = topology
-                .nodes
-                .iter()
-                .map(|n| NodeDisplay {
-                    id: n.id.clone(),
-                    cpu_model: n.cpu_model.clone(),
-                    ram_mib: n.ram_mib,
-                    has_avx2: n.has_avx2,
-                    has_avx: n.has_avx,
-                    has_sse42: n.has_sse42,
-                    status: "IDLE".to_string(),
-                    power_watts: n.tdp_watts,
-                    temp_c: 0,
-                    gpu: entry_gpu(topology, &n.id),
-                })
-                .collect();
-            Ok(fmt.probe_result(&nodes))
+            let mut backend = ShellBackend { scheduler, topology, ctx, recovery, config };
+            match run_dispatch(&Op::Stat(ResourcePath::parse("cluster.static").unwrap()), &mut backend)?
+            {
+                Resource::Nodes(records) => {
+                    let nodes: Vec<NodeDisplay> = records
+                        .into_iter()
+                        .map(|r| serde_json::from_value(r).map_err(|e| anyhow::anyhow!("{}", e)))
+                        .collect::<Result<Vec<_>>>()?;
+                    Ok(fmt.probe_result(&nodes))
+                }
+                other => Err(anyhow::anyhow!("unexpected resource: {:?}", other)),
+            }
         }
 
         Command::DeployShards => {
@@ -552,79 +526,479 @@ pub fn handle(
 
         Command::Help => Ok(HELP_TEXT.to_string()),
 
-        Command::Register => {            let info = ouro_cluster::probe::probe_local()
-                .map_err(|e| anyhow::anyhow!("probe failed: {}", e))?;
-            let entry = topology.add_node(info.clone());
-            let net_info = info.network.as_ref().map(|n| format!(" | network: {:.1}ms", n.latency_ms)).unwrap_or_default();
-            Ok(format!(
-                "Registered {} @ {} | {} | {}MiB | {}W{} [DONE]",
-                entry.id,
-                entry.ip,
-                entry.cpu_model,
-                entry.ram_mib,
-                entry.tdp_watts,
-                net_info,
-            ))
+        Command::Register => {
+            let mut backend = ShellBackend { scheduler, topology, ctx, recovery, config };
+            let op = Op::Ctl {
+                path: ResourcePath::parse("cluster").unwrap(),
+                verb: "register".to_string(),
+            };
+            match run_dispatch(&op, &mut backend)? {
+                Resource::Ack { message } => Ok(message),
+                other => Err(anyhow::anyhow!("unexpected resource: {:?}", other)),
+            }
         }
 
         Command::Unregister { node } => {
             if node.is_empty() {
                 return Ok("Usage: unregister n3.".to_string());
             }
-            let before = topology.node_count();
-            topology.remove_node(&node);
-            if topology.node_count() < before {
-                Ok(format!("Unregistered {}. [DONE]", node))
-            } else {
-                Ok(format!("Node {} not found.", node))
+            let mut backend = ShellBackend { scheduler, topology, ctx, recovery, config };
+            let op = Op::Ctl {
+                path: ResourcePath::parse(&node).unwrap(),
+                verb: "unregister".to_string(),
+            };
+            match run_dispatch(&op, &mut backend)? {
+                Resource::Ack { message } => Ok(message),
+                other => Err(anyhow::anyhow!("unexpected resource: {:?}", other)),
             }
         }
 
         Command::Tasks => {
-            let entries = scheduler.queue.summary();
-            if entries.is_empty() {
-                return Ok("Task queue: empty.".to_string());
+            let mut backend = ShellBackend { scheduler, topology, ctx, recovery, config };
+            match run_dispatch(&Op::Stat(ResourcePath::parse("queue").unwrap()), &mut backend)? {
+                Resource::Queue { entries, .. } => {
+                    if entries.is_empty() {
+                        return Ok("Task queue: empty.".to_string());
+                    }
+                    let mut out = format!("Task queue ({}):\n", entries.len());
+                    for e in &entries {
+                        out.push_str(&format!(
+                            "  {} [{}] age={}s retries={}/3 priority={}\n",
+                            e.name, e.class, e.age_secs, e.retries, e.priority,
+                        ));
+                    }
+                    Ok(out)
+                }
+                other => Err(anyhow::anyhow!("unexpected resource: {:?}", other)),
             }
-            let mut out = format!("Task queue ({}):\n", entries.len());
-            for e in &entries {
-                out.push_str(&format!(
-                    "  {} [{}] age={}s retries={}/3 priority={}\n",
-                    e.name, e.class, e.age_secs, e.retries, e.priority,
-                ));
-            }
-            Ok(out)
         }
 
         Command::Recover => {
-            let stale = recovery.sweep_stale(&ouro_cluster::registry::Registry::new());
-            let failed: Vec<_> = recovery.failed_nodes().iter().map(|f| f.node_id.clone()).collect();
-            let mut out = String::new();
-            if stale.is_empty() && failed.is_empty() {
-                out.push_str("No stale or failed nodes. [OK]");
+            let mut backend = ShellBackend { scheduler, topology, ctx, recovery, config };
+            let op = Op::Ctl {
+                path: ResourcePath::parse("cluster").unwrap(),
+                verb: "recover".to_string(),
+            };
+            match run_dispatch(&op, &mut backend)? {
+                Resource::Ack { message } => Ok(message),
+                other => Err(anyhow::anyhow!("unexpected resource: {:?}", other)),
+            }
+        }
+
+        Command::Weights { target } => {
+            let mut backend = ShellBackend { scheduler, topology, ctx, recovery, config };
+            let path_str = if target.is_empty() {
+                "weights".to_string()
             } else {
-                for id in &stale {
-                    out.push_str(&format!("  stale: {} — scheduling recovery\n", id));
+                format!("weights.{}", target)
+            };
+            let path = ResourcePath::parse(&path_str)
+                .map_err(|e| anyhow::anyhow!(e))?;
+            // `weights.<node>.<i>` opens a handle (read); the rest stat.
+            let op = if path.segments.len() == 3 {
+                Op::Read(path)
+            } else {
+                Op::Stat(path)
+            };
+            match run_dispatch(&op, &mut backend)? {
+                Resource::Ack { message } => Ok(message),
+                Resource::Tensors { node, tensors } => {
+                    if tensors.is_empty() {
+                        return Ok(format!("{}: no tensors", node));
+                    }
+                    let mut out = format!("{} ({} tensors, {} bytes):\n", node, tensors.len(),
+                        tensors.iter().map(|t| t.length).sum::<u64>());
+                    for (i, t) in tensors.iter().enumerate() {
+                        out.push_str(&format!(
+                            "  [{}] {}  {} bytes\n", i, t.name, t.length
+                        ));
+                    }
+                    Ok(out)
                 }
-                for id in &failed {
-                    out.push_str(&format!("  failed: {} — tracking\n", id));
+                Resource::Handle { id, node, tensor, length } => {
+                    Ok(format!("handle {}  ({}: {}, {} bytes)", id, node, tensor, length))
                 }
+                other => Err(anyhow::anyhow!("unexpected resource: {:?}", other)),
             }
-            // Drain queue to retry any queued tasks
-            let results = scheduler.drain_queue();
-            if !results.is_empty() {
-                out.push_str(&format!("\nDrained {} queued tasks:\n", results.len()));
-                for (name, outcome) in &results {
-                    out.push_str(&format!("  {} → {:?}\n", name, outcome));
-                }
-            }
-            Ok(out)
         }
 
         Command::Unknown(input) => Ok(fmt.unknown(&input)),
     }
 }
 
+/// The shell's op-kernel backend (docs/PLAN9.md §4.2). Ops are the mouth;
+/// the live graph, scheduler, and recovery are the brain. Produces the same
+/// values the pre-kernel handlers produced — output is byte-identical.
+struct ShellBackend<'a> {
+    scheduler: &'a mut Scheduler,
+    topology: &'a mut ClusterTopology,
+    ctx: &'a mut Context,
+    recovery: &'a mut ouro_cluster::error_recovery::ErrorRecovery,
+    config: &'a ShellConfig,
+}
+
+/// Static display record for one node (no live registry).
+fn static_display(topology: &ClusterTopology, n: &NodeEntry) -> NodeDisplay {
+    NodeDisplay {
+        id: n.id.clone(),
+        cpu_model: n.cpu_model.clone(),
+        ram_mib: n.ram_mib,
+        has_avx2: n.has_avx2,
+        has_avx: n.has_avx,
+        has_sse42: n.has_sse42,
+        status: "IDLE".to_string(),
+        power_watts: n.tdp_watts,
+        temp_c: 0,
+        gpu: entry_gpu(topology, &n.id),
+    }
+}
+
+/// Run one op through the kernel, mapping structured errors to anyhow.
+fn run_dispatch(op: &Op, backend: &mut ShellBackend) -> Result<Resource, anyhow::Error> {
+    ouro_cluster::op::dispatch(op, backend).map_err(|e| anyhow::anyhow!("{}", e.message))
+}
+
+fn census_string(model: &str, vram_mib: u64) -> String {
+    format!("{}:{}MiB", model.replace("NVIDIA GeForce ", ""), vram_mib)
+}
+
+impl<'a> ShellBackend<'a> {
+    /// `weights` paths (Rung B3): census, mirroring the scheduler backend.
+    /// The shell's scheduler carries the weight manifest (node -> tensors
+    /// name+length); empty until a manifest is loaded.
+    fn stat_weights(&mut self, path: &ResourcePath) -> Result<Resource, String> {
+        if path.is("weights") {
+            let nodes = self.scheduler.weights.nodes();
+            return Ok(Resource::Ack {
+                message: if nodes.is_empty() {
+                    "no weights registered".to_string()
+                } else {
+                    format!("weights: {}", nodes.join(", "))
+                },
+            });
+        }
+        let is_weights = path.segments.first().map(|s| s.as_str()) == Some("weights");
+        if is_weights {
+            if let Some(node) = path.segments.get(1).map(|s| s.as_str()) {
+                let shard = self
+                    .scheduler
+                    .weights
+                    .for_node(node)
+                    .ok_or_else(|| format!("no weights for node {}", node))?;
+                let tensors: Vec<ouro_cluster::op::TensorCensus> = shard
+                    .tensors
+                    .iter()
+                    .map(|t| ouro_cluster::op::TensorCensus {
+                        name: t.name.clone(),
+                        length: t.length,
+                    })
+                    .collect();
+                return Ok(Resource::Tensors {
+                    node: node.to_string(),
+                    tensors,
+                });
+            }
+        }
+        Err(format!("no such resource: {}", path))
+    }
+}
+
+impl<'a> GraphBackend for ShellBackend<'a> {
+    fn resolve(&mut self, path: &ResourcePath) -> Result<(), String> {
+        if let Some(node) = path.node() {
+            let live_hit = live_status(self.config)
+                .map(|l| l.nodes.iter().any(|n| n.id == node))
+                .unwrap_or(false);
+            if live_hit || self.topology.get_node(node).is_some() {
+                return Ok(());
+            }
+            return Err(format!("Node {} not found", node));
+        }
+        match path.segments.first().map(|s| s.as_str()) {
+            Some("cluster") | Some("queue") | Some("tasks") | Some("weights") => Ok(()),
+            other => Err(format!("no such resource: {:?}", other)),
+        }
+    }
+
+    fn stat(&mut self, path: &ResourcePath) -> Result<Resource, String> {
+        self.resolve(path)?;
+        if path.is("cluster") {
+            if let Some(live) = live_status(self.config) {
+                let online = live.nodes.iter().filter(|n| n.online).count();
+                let power: u32 = live.nodes.iter().filter(|n| n.online).map(record_watts).sum();
+                let gpus: Vec<String> = live
+                    .nodes
+                    .iter()
+                    .filter(|n| n.has_gpu)
+                    .map(|n| census_string(&n.gpu_model, n.gpu_vram_mib))
+                    .collect();
+                return Ok(Resource::Cluster {
+                    total: live.nodes.len(),
+                    online,
+                    power_watts: power,
+                    budget_watts: self.topology.power_budget_watts,
+                    topology_nodes: self.topology.node_count(),
+                    gpus,
+                });
+            }
+            let total = self.topology.node_count();
+            let power: u32 = self.topology.nodes.iter().map(|n| n.tdp_watts).sum();
+            let gpus: Vec<String> = self
+                .topology
+                .nodes
+                .iter()
+                .filter(|n| n.has_gpu)
+                .map(|n| census_string(&n.gpu_model, n.gpu_vram_mib))
+                .collect();
+            return Ok(Resource::Cluster {
+                total,
+                online: 0,
+                power_watts: power,
+                budget_watts: self.topology.power_budget_watts,
+                topology_nodes: total,
+                gpus,
+            });
+        }
+        if path.is_child_of("cluster", "budget") {
+            return Ok(Resource::Budget {
+                watts: self.scheduler.budget.budget_watts,
+            });
+        }
+        if path.is_child_of("cluster", "nodes") {
+            let mut displays: Vec<NodeDisplay> = Vec::new();
+            let mut seen: Vec<String> = Vec::new();
+            if let Some(live) = live_status(self.config) {
+                for rec in &live.nodes {
+                    displays.push(record_to_display(rec));
+                    seen.push(rec.id.clone());
+                }
+            }
+            for n in &self.topology.nodes {
+                if seen.iter().any(|id| id == &n.id) {
+                    continue;
+                }
+                displays.push(static_display(self.topology, n));
+            }
+            let records: Vec<serde_json::Value> = displays
+                .into_iter()
+                .map(|d| serde_json::to_value(d).map_err(|e| e.to_string()))
+                .collect::<Result<_, _>>()?;
+            return Ok(Resource::Nodes(records));
+        }
+        if path.is_child_of("cluster", "static") {
+            let records: Vec<serde_json::Value> = self
+                .topology
+                .nodes
+                .iter()
+                .map(|n| {
+                    serde_json::to_value(static_display(self.topology, n)).map_err(|e| e.to_string())
+                })
+                .collect::<Result<_, _>>()?;
+            return Ok(Resource::Nodes(records));
+        }
+        if path.is("queue") || path.is("tasks") {
+            let entries: Vec<QueueEntry> = self
+                .scheduler
+                .queue
+                .summary()
+                .into_iter()
+                .map(|e| QueueEntry {
+                    name: e.name,
+                    class: e.class,
+                    age_secs: e.age_secs,
+                    retries: e.retries,
+                    priority: e.priority,
+                })
+                .collect();
+            let depth = entries.len();
+            return Ok(Resource::Queue { depth, entries });
+        }
+        if let Some(node) = path.node() {
+            let live = live_status(self.config);
+            let live_rec = live.as_ref().and_then(|l| l.nodes.iter().find(|n| n.id == node));
+            if let Some(property) = path.property() {
+                let entry = self
+                    .topology
+                    .get_node(node)
+                    .ok_or_else(|| format!("Node {} not found", node))?;
+                let value = match live_rec {
+                    Some(rec) => resolve_record_property(rec, property, self.ctx),
+                    None => resolve_node_property(entry, property, self.ctx),
+                };
+                return Ok(Resource::Prop {
+                    node: node.to_string(),
+                    property: property.to_string(),
+                    value,
+                });
+            }
+            let display = match live_rec {
+                Some(rec) => record_to_display(rec),
+                None => {
+                    let entry = self
+                        .topology
+                        .get_node(node)
+                        .ok_or_else(|| format!("Node {} not found", node))?;
+                    static_display(self.topology, entry)
+                }
+            };
+            let record = serde_json::to_value(display).map_err(|e| e.to_string())?;
+            return Ok(Resource::Node(record));
+        }
+        self.stat_weights(path)
+    }
+
+    /// `read` of a weight tensor path opens a bulk handle (Rung B3).
+    fn read(&mut self, path: &ResourcePath) -> Result<Resource, String> {
+        let is_weights = path.segments.first().map(|s| s.as_str()) == Some("weights");
+        if is_weights && path.segments.len() == 3 {
+            if let Some(node) = path.segments.get(1).map(|s| s.as_str()) {
+                let idx = path.segments[2]
+                    .parse::<usize>()
+                    .map_err(|_| format!("tensor index must be an integer, got {}", path.segments[2]))?;
+                let shard = self
+                    .scheduler
+                    .weights
+                    .for_node(node)
+                    .ok_or_else(|| format!("no weights for node {}", node))?;
+                let t = shard
+                    .at(idx)
+                    .ok_or_else(|| format!("tensor index {} out of range for node {}", idx, node))?;
+                return Ok(Resource::Handle {
+                    id: format!("h:{}.{}", node, t.name),
+                    node: node.to_string(),
+                    tensor: t.name.clone(),
+                    length: t.length,
+                });
+            }
+        }
+        self.stat(path)
+    }
+
+    fn write(&mut self, path: &ResourcePath, value: &str) -> Result<Resource, String> {
+        self.resolve(path)?;
+        if path.is_child_of("cluster", "budget") {
+            let watts: u32 = value
+                .trim()
+                .trim_end_matches('w')
+                .trim_end_matches('W')
+                .parse()
+                .map_err(|_| format!("budget must be watts, got {:?}", value))?;
+            self.scheduler.budget.set_budget(watts);
+            return Ok(Resource::Budget { watts });
+        }
+        if path.is("tasks") {
+            let task = Task {
+                name: value.to_string(),
+                class: WorkloadClass::from_name(value),
+                payload: String::new(),
+                estimated_watts: 30,
+                estimated_seconds: 10,
+            };
+            return match self
+                .scheduler
+                .schedule(&task)
+                .map_err(|e| format!("schedule failed: {}", e))?
+            {
+                ScheduleOutcome::Dispatched { node } => Ok(Resource::Assign { node }),
+                ScheduleOutcome::Queued { reason } => Ok(Resource::Queued { reason }),
+            };
+        }
+        Err(format!("write not supported on {}", path))
+    }
+
+    fn ctl(&mut self, path: &ResourcePath, verb: &str) -> Result<Resource, String> {
+        // No resolve pre-check: node `ctl` verbs report on missing nodes
+        // rather than erroring (byte-identical to the pre-kernel handlers).
+        if let Some(node) = path.node() {
+            match verb {
+                "sleep" => Ok(Resource::Ack {
+                    message: format!("Node {}休眠. Power: 12W → 2W.", node),
+                }),
+                "unregister" => {
+                    if self.topology.remove_node(node).is_some() {
+                        Ok(Resource::Ack {
+                            message: format!("Unregistered {}. [DONE]", node),
+                        })
+                    } else {
+                        Ok(Resource::Ack {
+                            message: format!("Node {} not found.", node),
+                        })
+                    }
+                }
+                _ => Err(format!("unknown verb: {} on {}", verb, path)),
+            }
+        } else if path.is("cluster") {
+            match verb {
+                "register" => {
+                    let info = ouro_cluster::probe::probe_local()
+                        .map_err(|e| format!("probe failed: {}", e))?;
+                    let entry = self.topology.add_node(info.clone());
+                    let net_info = info
+                        .network
+                        .as_ref()
+                        .map(|n| format!(" | network: {:.1}ms", n.latency_ms))
+                        .unwrap_or_default();
+                    Ok(Resource::Ack {
+                        message: format!(
+                            "Registered {} @ {} | {} | {}MiB | {}W{} [DONE]",
+                            entry.id,
+                            entry.ip,
+                            entry.cpu_model,
+                            entry.ram_mib,
+                            entry.tdp_watts,
+                            net_info,
+                        ),
+                    })
+                }
+                "recover" => {
+                    let stale = self
+                        .recovery
+                        .sweep_stale(&ouro_cluster::registry::Registry::new());
+                    let failed: Vec<String> = self
+                        .recovery
+                        .failed_nodes()
+                        .iter()
+                        .map(|f| f.node_id.clone())
+                        .collect();
+                    let mut out = String::new();
+                    if stale.is_empty() && failed.is_empty() {
+                        out.push_str("No stale or failed nodes. [OK]");
+                    } else {
+                        for id in &stale {
+                            out.push_str(&format!("  stale: {} — scheduling recovery\n", id));
+                        }
+                        for id in &failed {
+                            out.push_str(&format!("  failed: {} — tracking\n", id));
+                        }
+                    }
+                    let results = self.scheduler.drain_queue();
+                    if !results.is_empty() {
+                        out.push_str(&format!("\nDrained {} queued tasks:\n", results.len()));
+                        for (name, outcome) in &results {
+                            out.push_str(&format!("  {} → {:?}\n", name, outcome));
+                        }
+                    }
+                    Ok(Resource::Ack { message: out })
+                }
+                _ => Err(format!("unknown ctl: {} on {}", verb, path)),
+            }
+        } else {
+            Err(format!("unknown ctl: {} on {}", verb, path))
+        }
+    }
+}
+
 /// rsync-or-scp one shard file to a node if checksums differ. Returns log line.
+/// Load the brain's weight manifest from a shard_map (Rung B3): maps each
+/// stage's `.bmts` header into `Scheduler::weights`. Missing shard files are
+/// collected, not fatal. Returns `(shards, missing_files)`.
+pub fn load_weights(shard_map: &str) -> (ouro_cluster::weights::Weights, Vec<String>) {
+    match ouro_cluster::pipeline::PipelinePlan::load(shard_map) {
+        Ok(plan) => ouro_cluster::weights::Weights::from_pipeline_plan(&plan),
+        Err(_) => (ouro_cluster::weights::Weights::new(), Vec::new()),
+    }
+}
+
 fn sync_file(ip: &str, local: &str) -> String {
     let name = std::path::Path::new(local)
         .file_name()
@@ -775,19 +1149,8 @@ fn telemetry_to_node(addr: &str, tel: &crate::agent_client::AgentTelemetry, id: 
 }
 
 /// Append GPU census line to a cluster summary when any node has a GPU.
-fn with_gpu_census(mut s: String, topology: &ClusterTopology) -> String {
-    let gpus: Vec<String> = topology
-        .nodes
-        .iter()
-        .filter(|n| n.has_gpu)
-        .map(|n| format!("{}:{}MiB", n.gpu_model.replace("NVIDIA GeForce ", ""), n.gpu_vram_mib))
-        .collect();
-    if !gpus.is_empty() {
-        s.push_str(&format!("\n  GPUs:   {} (vram: {})", gpus.len(), gpus.join(", ")));
-    }
-    s
-}
-
+/// (Live-record variant lives below; the static variant moved into the op
+/// kernel's `stat cluster` — ShellBackend builds the census strings.)
 fn entry_gpu(topology: &ClusterTopology, id: &str) -> String {
     topology
         .get_node(id)
@@ -850,6 +1213,9 @@ fn record_to_display(n: &RegistryNode) -> NodeDisplay {
 }
 
 /// GPU census line from live records instead of the static topology.
+/// (Kept for the census tests; production census now comes from the op
+/// kernel's `stat cluster`.)
+#[cfg(test)]
 fn with_gpu_census_records(mut s: String, nodes: &[RegistryNode]) -> String {
     let gpus: Vec<String> = nodes
         .iter()
@@ -1231,5 +1597,247 @@ mod registry_live_tests {
         assert!(s.contains("GTX 1060 6GB:6144MiB"));
         let none = with_gpu_census_records(String::new(), &[]);
         assert!(none.is_empty());
+    }
+}
+
+/// Rung B1 gate: the op verbs run through the kernel and their output is
+/// byte-identical to the pre-kernel handlers (docs/PLAN9.md §9.2). No
+/// `OURO_SECRET_FILE` in tests → `live_status` is None → static path,
+/// deterministic.
+#[cfg(test)]
+mod kernel_ops_tests {
+    use super::*;
+    use ouro_cluster::error_recovery::ErrorRecovery;
+    use ouro_cluster::beast::topology::NodeEntry;
+
+    struct Ctx {
+        sched: Scheduler,
+        topo: ClusterTopology,
+        ctx: Context,
+        fmt: Formatter,
+        config: ShellConfig,
+        recovery: ErrorRecovery,
+    }
+
+    fn setup() -> Ctx {
+        let mut topo = ClusterTopology::new();
+        topo.power_budget_watts = 500;
+        topo.nodes.push(NodeEntry {
+            id: "n1".into(),
+            hostname: "pavilion".into(),
+            ip: "192.168.1.114".into(),
+            cpu_model: "i5-7200U".into(),
+            cores: 2,
+            threads: 4,
+            has_avx: true,
+            has_avx2: true,
+            has_sse42: true,
+            ram_mib: 7829,
+            tdp_watts: 35,
+            has_gpu: true,
+            gpu_model: "NVIDIA GeForce GTX 1060 6GB".into(),
+            gpu_vram_mib: 6144,
+            gpu_driver: String::new(),
+            agent_version: String::new(),
+            image_rev: String::new(),
+            has_rdma: false,
+            rdma_gid: String::new(),
+        });
+        Ctx {
+            sched: Scheduler::new(topo.clone()),
+            topo,
+            ctx: Context::new(),
+            fmt: Formatter::new(false),
+            config: ShellConfig::new(),
+            recovery: ErrorRecovery::new(),
+        }
+    }
+
+    fn run(st: &mut Ctx, cmd: Command) -> String {
+        handle(
+            cmd,
+            &mut st.topo,
+            &mut st.sched,
+            &mut st.ctx,
+            &mut st.fmt,
+            &st.config,
+            &mut st.recovery,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn test_property_query_via_kernel() {
+        let mut st = setup();
+        assert_eq!(
+            run(&mut st, Command::PropertyQuery { node: "n1".into(), property: "power".into() }),
+            "n1.power = 35W"
+        );
+        let gpu = run(&mut st, Command::PropertyQuery { node: "n1".into(), property: "gpu".into() });
+        assert_eq!(gpu, "n1.gpu = NVIDIA GeForce GTX 1060 6GB (6144MiB)");
+    }
+
+    #[test]
+    fn test_context_property_query_via_kernel() {
+        let mut st = setup();
+        st.ctx.set_node("n1");
+        assert_eq!(run(&mut st, Command::ContextPropertyQuery { property: "ram".into() }), "n1.ram = 7829MiB");
+    }
+
+    #[test]
+    fn test_budget_via_kernel() {
+        let mut st = setup();
+        assert_eq!(run(&mut st, Command::SetBudget { watts: 400 }), "Cluster power budget: 400W. [SET]");
+        assert_eq!(st.sched.budget.budget_watts, 400);
+    }
+
+    #[test]
+    fn test_sleep_via_kernel() {
+        let mut st = setup();
+        assert_eq!(
+            run(&mut st, Command::PowerState { node: "n1".into(), sleeping: true }),
+            "Node n1休眠. Power: 12W → 2W."
+        );
+    }
+
+    #[test]
+    fn test_tasks_via_kernel() {
+        let mut st = setup();
+        assert_eq!(run(&mut st, Command::Tasks), "Task queue: empty.");
+        st.sched.budget.set_budget(0);
+        run(&mut st, Command::AssignProposition { node: "n1".into(), workload: "matmul".into() });
+        let out = run(&mut st, Command::Tasks);
+        assert!(out.starts_with("Task queue (1):\n  matmul [SimdFriendly] age="), "got: {}", out);
+        assert!(out.contains("retries=0/3 priority=0"));
+    }
+
+    #[test]
+    fn test_assign_via_kernel() {
+        let mut st = setup();
+        let out = run(&mut st, Command::AssignProposition { node: "n1".into(), workload: "matmul".into() });
+        assert!(out.contains("THE COUNSEL ACTS:"), "got: {}", out);
+        assert!(out.contains("[1] Serialize matmul.bv.              [OK]"));
+        assert!(out.contains("[2] Check: n1 supports SIMD_FRIENDLY."));
+        assert!(out.contains("[3] Dispatch to n1.                [OK]"));
+        assert!(out.contains("RESULT: matmul assigned to n1. [TRUE]"));
+    }
+
+    #[test]
+    fn test_assign_queues_when_no_budget() {
+        let mut st = setup();
+        st.sched.budget.set_budget(0);
+        let out = run(&mut st, Command::AssignProposition { node: "n1".into(), workload: "matmul".into() });
+        assert!(out.contains("RESULT: Assignment failed. [FALSE]"), "got: {}", out);
+        assert!(out.contains("[3] Scheduling failed: energy budget exceeded"));
+    }
+
+    #[test]
+    fn test_node_query_via_kernel() {
+        let mut st = setup();
+        let out = run(&mut st, Command::NodeQuery { node: "n1".into() });
+        assert!(out.starts_with("NODE_n1\n  CPU:    i5-7200U"), "got: {}", out);
+        assert!(out.contains("GPU:    NVIDIA GeForce GTX 1060 6GB (6144MiB)"));
+    }
+
+    #[test]
+    fn test_cluster_query_via_kernel() {
+        let mut st = setup();
+        let out = run(&mut st, Command::ClusterQuery);
+        assert!(out.contains("Nodes:  1 total | 0 active | 1 idle"), "got: {}", out);
+        assert!(out.contains("GPUs:   1 (vram: GTX 1060 6GB:6144MiB)"));
+    }
+
+    #[test]
+    fn test_probe_via_kernel() {
+        let mut st = setup();
+        let out = run(&mut st, Command::Probe);
+        assert!(out.contains("Probing all nodes... [DONE]"), "got: {}", out);
+        assert!(out.contains("n1: i5-7200U, 7829MiB, AVX2, AVX, SSE4.2 [FOUND]"));
+    }
+
+    #[test]
+    fn test_bulk_query_via_kernel() {
+        let mut st = setup();
+        let out = run(&mut st, Command::BulkQuery { filter: "active".into() });
+        assert!(out.starts_with("ACTIVE\n"), "got: {}", out);
+        assert!(out.contains("n1: i5-7200U | IDLE | 35W"));
+    }
+
+    #[test]
+    fn test_unregister_via_kernel() {
+        let mut st = setup();
+        assert_eq!(run(&mut st, Command::Unregister { node: "n9".into() }), "Node n9 not found.");
+        assert_eq!(run(&mut st, Command::Unregister { node: "n1".into() }), "Unregistered n1. [DONE]");
+        assert_eq!(st.topo.node_count(), 0);
+    }
+
+    #[test]
+    fn test_recover_via_kernel() {
+        let mut st = setup();
+        assert_eq!(run(&mut st, Command::Recover), "No stale or failed nodes. [OK]");
+    }
+
+    /// Rung B3 (docs/PLAN9.md): the shell exposes the weight census and opens
+    /// bulk handles via the op kernel — `weights` and `weights.<node>`.
+    #[test]
+    fn test_weights_census_and_handle_via_kernel() {
+        let mut st = setup();
+        // No manifest loaded yet: an honest empty answer.
+        assert_eq!(run(&mut st, Command::Weights { target: "".into() }), "no weights registered");
+        // Load a manifest for n1 and re-run.
+        st.sched.weights = ouro_cluster::weights::Weights::new().with_shard(
+            ouro_cluster::weights::WeightShard {
+                node: "n1".into(),
+                tensors: vec![
+                    ouro_cluster::weights::WeightTensor { name: "blk.0.attn_q.weight".into(), length: 1024 },
+                    ouro_cluster::weights::WeightTensor { name: "blk.1.attn_k.weight".into(), length: 2048 },
+                ],
+            },
+        );
+        let census = run(&mut st, Command::Weights { target: "n1".into() });
+        assert!(census.starts_with("n1 (2 tensors, 3072 bytes):\n"), "got: {}", census);
+        assert!(census.contains("[0] blk.0.attn_q.weight  1024 bytes"), "got: {}", census);
+        // Opening a handle: identity + size-stamp, never bytes.
+        let h = run(&mut st, Command::Weights { target: "n1.1".into() });
+        assert_eq!(h, "handle h:n1.blk.1.attn_k.weight  (n1: blk.1.attn_k.weight, 2048 bytes)");
+    }
+
+    /// Rung B3 boot-load: `load_weights` maps a shard_map's `.bmts` headers into
+    /// the manifest. A real 2-tensor shard yields a census the kernel can read.
+    #[test]
+    fn test_load_weights_from_shard_map() {
+        let dir = std::env::temp_dir().join(format!("ouro_weights_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let shard_path = dir.join("shard_1.bmts");
+        let blob: Vec<u8> = (0..64u8).collect();
+        ouro_cluster::bmts::write_shard(
+            shard_path.to_str().unwrap(),
+            1,
+            &[
+                ouro_cluster::bmts::BmtsTensor { name: "blk.0.attn_q.weight".into(), shape: vec![8, 8], dtype: 34, offset: 0, length: 32 },
+                ouro_cluster::bmts::BmtsTensor { name: "blk.1.attn_k.weight".into(), shape: vec![8, 8], dtype: 34, offset: 32, length: 32 },
+            ],
+            &blob,
+        )
+        .unwrap();
+        let map_path = dir.join("shard_map.json");
+        std::fs::write(
+            &map_path,
+            format!(
+                r#"{{"model":"t","nodes":[{{"node":1,"file":"{}","layers":[0,1],"tensors":2,"bytes":64}}]}}"#,
+                shard_path.to_str().unwrap()
+            ),
+        )
+        .unwrap();
+
+        let (weights, missing) = load_weights(map_path.to_str().unwrap());
+        assert!(missing.is_empty(), "missing: {:?}", missing);
+        let shard = weights.for_node("n1").expect("n1 manifest");
+        assert_eq!(shard.tensors.len(), 2);
+        assert_eq!(shard.total_bytes(), 64);
+        assert_eq!(shard.at(0).unwrap().name, "blk.0.attn_q.weight");
+
+        // Clean up.
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

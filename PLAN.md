@@ -753,6 +753,12 @@ reads per-node probe (FLOPS class + VRAM) and emits stage -> [layer list].
 | M3: model alive across chassis, CPU-mode | **architecture proven**: 9B over 4 localhost TCP agents == in-process stream exactly; remaining work is physical wiring |
 | M4: wgpu GPU stages | **dense 27B >= 10 tok/s; 35B-A3B >= 30 tok/s**; shell reports W/token, budget never exceeded |
 
+> **Note (2026-09-08, SwarmLLM borrow):** `nextn`/MTP is currently filtered at
+> shard time. The air-path program (§19 Track B) **un-filters it**: the MTP
+> draft head is the slow-link workhorse — chained drafts move 3–7 tokens per
+> network lap, verified in one batched pass. Draft lives on the brain node;
+> workers never carry it. Contract: speculative == plain, token-exact (Art. 10).
+
 ### 13.5 Remaining Work (full)
 
 | # | Item | Where |
@@ -942,6 +948,7 @@ surrounding space is occupied by excellent work.
 | Petals (NeurIPS 2023) | llms.blog + petals papers | Public volunteer swarm: Hivemind/libp2p DHT advertises layer blocks; latency-aware path construction; **8-bit activation quantization on the wire**; redundancy per block | Wire-activation quant = optional ACTS v2 mode for bad links |
 | CrossPipe (2025) | arxiv.org/html/2507.00217 (Hoefler group, ETH) | Latency-aware pipeline schedules via **MILP-solver or greedy** over bandwidth/latency models; 33.6% faster than naive under cross-DC constraints; MoE shifts preference further to PP | Validates §14.4 partitioner as solved-science shape; adopt solver-then-greedy pattern |
 | Decentralized inference survey | llms.blog (2026-08-23) | 160 syncs/token at 80 layers; PP = the only viable WAN strategy at ms latencies; KV loss on disconnect => re-evaluate prompt from scratch | Our per-stage KV = accepted risk; §2.6 checkpointing addresses it |
+| **SwarmLLM** | github.com/Nehanth/swarmllm (MIT, N. Narendrula; README + docs/protocol.md + docs/architecture.md read 2026-09-08) | Peer-to-peer LLM inference across browser tabs: from-scratch WebGPU engine + WebRTC room splits **Qwen 3.8 27B** (48 Gated-DeltaNet + 16 attention + MTP `nextn`) over a room. Hidden state 10 KB f16/lap; **slow-link protocol**: batched prefill (≤16 tokens/round), MTP speculative draft (depth 3/5/7), exact recurrent-state rollback, verify ≤8 cols in one lap; bit-exact spec==plain; streamed tensor range-fetch + size-stamp cache; memory-roofline WGSL (183/184 GB/s decode). Measured: GB10 9.0/16.1 tok/s, MacBook+iPhone same Wi-Fi 7.7, cross-internet 3.5–6 | Proves the **air path is a protocol problem, not a penalty**; confirms ACTS/§14.2 shape; the whole borrow program lives in docs/AIR_PATH.md (adopted 2026-09-08, §15.10 items 13–18, tracks in §19) |
 
 ### 15.2 Display links as data links (the HDMI modem question)
 
@@ -968,6 +975,7 @@ surrounding space is occupied by excellent work.
 | **Kerrighed** | Wikipedia + Lottiaux et al. CCGRID'05 comparative study (hal-01271223) | SSI with **process migration** over cluster (INRIA 1998-2012) | Ouroboros clause (Art. 4) has precedent for processes; moving the *scheduler itself* with the graph's authority (bootstrap-seed invariant) remains ours |
 | **HTCondor** | Litzkow et al., ICDCS 1988; Thain et al. "Cheap cycles…" + "Distributed Computing in Practice" (htcondor.org) | Opportunistic cycle scavenging of idle desktops; **ClassAd matchmaking language**; checkpoint-migrate; preemptive-resume | Art. 9-item-5 (idle=reserved) ancestor; ClassAd = ready-made formalism for our PlacementPlan request/offer matching (adopt, 15.10) |
 | **Beowulf** | Sterling/Becker et al., ICPP'95 (webhome.phy.duke.edu mirror); NASA history (ntrs.nasa.gov 20150001285); beowulf.org | 16 commodity 486 boards + **two channel-bonded Ethernets** ("the network, even in its dual configuration, is inadequate" — same finding, 31 yrs old); origin quote: "Cheap high-performance computing systems are virtually non existent… PC-compatible hardware is cheap and supports… Linux" | Our thesis is Beowulf's thesis for the GPU era; our bonded GbE + HDMI downlink is Becker's bonding move applied to *display ports* |
+| **Plan 9** | Pike, Presotto, Dorward, Flandrena, Thompson, Trickey, Winterbottom, *Computing Systems* 8(3):221-254, 1995 (doc.cat-v.org/plan_9/4th_edition/papers/9; usenix.org/legacy/publications/compsystems/1995/sum_pike.pdf); "The Use of Name Spaces in Plan 9," *OSR* 27(2):72-76, 1993 (plan9.io/sys/doc/names.html, doi 10.1145/506378.506413) | Cheap terminals + central cpu/file servers joined by **9P**, one uniform resource protocol; **per-process name spaces** (`mount`/`bind`, union dirs, `import`, `cpu(1)`); "no global name space; local name spaces must adhere to global conventions"; identity via factotum/secstore. Killed by POSIX/X11/TCP interop tax, 9P per-op generality cost, and all-or-nothing adoption | Our Art. 3 "one machine" was Plan 9's program minus its three fatal defaults — we own both ends of every wire (Art. 10), split control from bulk (Art. 6), and never demand a full OS per node. The typed/priced/revocable graph edge (Art. 3/7) replaces the byte-file; per-op *views* gated by parity contracts (Art. 10). Full doctrine + numbered deltas: `docs/PLAN9.md` (verified 2026-09-08) |
 
 ### 15.4 GPU-OS integration & removing the host OS from the critical path
 
@@ -1060,6 +1068,49 @@ the combination, none of which we found together in any system:
 8. **BitNet kernel target shift**: benchmark our Rust Q4/TQ1 path not just
    vs TQ1_0 but vs **TL2/I2_S** (their tables: 1.33-1.65× and lossless-1.58×
    expectations) so our contracts cite the current SOTA bar.
+
+**Plan 9 program (docs/PLAN9.md, adopted 2026-09-08 — doctrine + phase specs;**
+**implementation scheduled in §16 on approval):**
+
+9. **One op kernel over a named resource tree** (`docs/PLAN9.md` §4): fixed op
+   set — attach/resolve/stat/read/write/ctl/bind/revoke — over the signed
+   line/frames, as the single grammar for HISS, ttyd FIFOs, registry bus, and
+   the scheduler API. Typed Beast resources, never byte-files (Art. 2/3/7).
+10. **Namespace slices as the scheduling unit** (`docs/PLAN9.md` §5):
+    `Scheduler::schedule()` binds a revocable Namespace (edges + watts +
+    contracts) instead of a bare node; rebind re-passes the parity ladder or is
+    rejected (Art. 10). PlacementPlan v2; opt-in per class; existing dispatch
+    path stays green.
+11. **Union weight plane** (`docs/PLAN9.md` §6): BMTS shards register as
+    `weights/<model>/<tensor>/`; a tensor resolves across whichever shards hold
+    it over frames/DMA; parity contract = bit-identical union view across
+    rebinds. Checkpoint tier (Art. 1) mounts into the same union.
+12. **Head identity service** (`docs/PLAN9.md` §7): factotum analog for the
+    two-plane trust model — delegated, rotatable proofs feeding update-key
+    rotation; no new trust boundary.
+
+**Multi-path / air-path program (docs/AIR_PATH.md, adopted 2026-09-08 — the**
+**SwarmLLM borrow; tracks scheduled in §19):**
+
+13. **ACTS v2 air-path modes** (SwarmLLM slow-link protocol): `acts-batch`
+    (≤16 hidden/lap prefill, no LM head), `acts-spec` (MTP draft verify ≤8
+    cols in one lap), `acts-rollback {k}` (exact KV + Gated-DeltaNet state
+    restore), `WIRE_F16` negotiation with loud version fail. Keeps MTP `nextn`
+    at shard time (currently filtered).
+14. **MTP draft on the brain node** (SwarmLLM host-owns-draft): draft head
+    shards to the sampling node; air workers never carry it.
+15. **Per-edge spec depth + batch width** (SwarmLLM per-room tuning) →
+    scheduler outputs over `PricedEdge`s (bw/latency/jitter/watts), feeding
+    Plan-9 namespace slices (PLAN9.md §5). Bond layer over frames.rs:
+    control→lowest-latency, bulk→stripe, critical→duplicate.
+16. **Streamed tensor range-fetch** (SwarmLLM gguf.js) → `deploy shards`
+    fetches only a node's tensor spans + size-stamp cache + resume; the
+    Phase D union-store write path.
+17. **SwarmLLM as second parity oracle**: its bit-exact golden streams (0.6B +
+    27B spec==plain suites) fold into the parity ladder beside cb_eval.
+18. **wgpu kernel reference** (SwarmLLM WGSL): cooperative GEMV family,
+    dequant-in-registers, one-submit-per-token, roofline discipline → ouro-wgpu
+    G3/G4; their prefill-GEMM gap informs the Rust prefill path.
 
 ## 16. Build Schedule (approved 2026-08-29)
 
@@ -1552,5 +1603,247 @@ All six mottos baked in, one picked at random per boot, echoed in
 crimson on the head's terminal at registration — the boot reveal
 happens on the host screen. WoL/suspend measured as graph attributes;
 wake-on-demand pricing deferred as an Art. 4 energy feature.
+
+## 19. The Multi-Path Program & Phase B Rung 1 (session record, 2026-09-08)
+
+Complete record of the planning session: Plan 9 adoption, the Phase B op
+kernel rung plan, and the SwarmLLM air-path borrow. Everything decided here
+is written down so no decision is lost to the session.
+
+### 19.1 What this session decided
+
+1. **Plan 9 program adopted (Phase A done).** Doctrine + phase specs in
+   `docs/PLAN9.md`; lineage in CONSTITUTION Appendix C + §15.3; adoption
+   items §15.10 #9–12. Phases B–E scheduled on approval.
+2. **Next-lane choice: L1 — Phase B op kernel.** Justified: the only large
+   software item with zero owner/hardware gates (W2, R2, AM5, CUDA all wait
+   on physical actions); it is the grammar every future seam speaks
+   (discover, register, budget, ClassAds, namespaces).
+3. **Phase B Rung B1 scope locked** (three decisions):
+   - **Kernel first**, wire second — pure in-process dispatch, fixture-tested;
+     wire (ttyd/bus) untouched this rung, provable equivalence before B2.
+   - **`GraphBackend` trait**, not a snapshot struct — Scheduler now,
+     Registry later (bus `status` is literally a stat over the registry).
+   - **All query + placement verbs** through `dispatch`, not a subset.
+     Full verb→op map in `docs/PLAN9.md` §9.
+4. **SwarmLLM borrow — everything** (incl. wgpu reference + second parity
+   oracle), captured in `docs/AIR_PATH.md` and §15.10 #13–18, scheduled as
+   Tracks B–E below. Owner's framing preserved in AIR_PATH.md §0: swarm over
+   Wi-Fi; wired + air simultaneously; a distributed system is a protocol
+   problem.
+5. **CUDA install in progress** (owner running `pacman -S cuda` during the
+   session) → unblocks `tools/m2_bridge.sh` (§16.2 item E) → M2 baseline →
+   the §16.2 "not now: wgpu kernels (wait for E's numbers)" gate lifts.
+   Independent of B1 (different crate); run in parallel.
+
+### 19.2 State snapshot (where the backlog actually stands)
+
+| §16.2 item | State (2026-09-08) |
+|---|---|
+| A — 27B mmap forward | blocked: head RAM/swap (AM5 swap, FLEET §2) |
+| B — GPU probe + `n1.gpu?` + scheduler rank | **done** (probe/gpu.rs nvidia-smi+vulkaninfo; `n1.gpu?` in propositions; gpu_bucket in scheduler) |
+| C — AVX1 fused dequant-dot + delta recurrence | open, pure software |
+| D — bring-up kit | WP4 `discover.` deferred to second node |
+| E — M2 bridge | unblocked by CUDA install this session |
+| F — CI | open |
+
+Summit thread is one owner-action from moving: W2 (stop `vitriol-server`,
+maybe r580 swap) → R2 join (flash node image; needs Nix on head). Software
+for WP1/2/3 already landed it (R2_BRINGUP §9).
+
+### 19.3 Master execution order (approved)
+
+```
+1.  Phase B Rung B1 — op kernel          (docs/PLAN9.md §9)
+2.  Track B — ACTS v2 air-path            (docs/AIR_PATH.md §6; this §19.5)
+3.  Track C — streamed range-fetch → Phase D union store
+4.  Track D — SwarmLLM second parity oracle
+5.  Track E — wgpu kernel reference (Track G)
+∥   CUDA → tools/m2_bridge.sh → wgpu-vs-CUDA decision (independent)
+```
+
+Rung B1 and Track B touch different modules (op vs pipeline/qwen35) —
+parallel-safe.
+
+### 19.4 Phase B Rung B1 — concrete build spec
+
+Design: `docs/PLAN9.md` §4 (grammar) + §9 (rung map). **BUILT 2026-09-08.**
+
+Files built:
+
+- NEW `cluster/src/beast/resource.rs` — `ResourcePath` (dot-path parser),
+  `Resource` typed-value enum.
+- NEW `cluster/src/op/mod.rs` — `Op` (`attach|resolve|stat|read|write|ctl`;
+  `bind`/`revoke` reserved for Phase C), `Resource`/`OpError` (serde-canonical,
+  Beast-serializable), `trait GraphBackend` (`stat`/`resolve`/`write`/`ctl`),
+  `dispatch(op, &mut backend)`.
+- `cluster/src/lib.rs` — register `op` + `beast::resource` modules.
+- NEW `scheduler/op_backend.rs` — `impl GraphBackend for Scheduler`
+  (budget → `set_budget`; ctl sleep/recover; stat node/budget/queue/cluster;
+  `write tasks` → `Scheduler::schedule()`).
+- `shell/propositions.rs` — `ShellBackend` (GraphBackend over live graph +
+  scheduler + recovery); query/placement verbs routed through `dispatch`;
+  output byte-identical (13 kernel-ops integration tests).
+- `registry/bus.rs` — wire untouched; documented `status` ≡ `stat cluster`.
+- Gate hygiene: cleared 7 pre-existing clippy errors (probe/mod.rs, dma.rs,
+  agent main.rs, ouro-dma.rs) — behavior-preserving only.
+
+Gates (MET): `cargo test --lib` — cluster 144 passed (was 140) + shell 74
+passed (was 61, +13 kernel-ops) · `cargo clippy -- -D warnings` 0 · shell
+tests prove `n1.gpu?`/`budget`/`tasks`/`assign`/`probe`/`cluster?`/`recover`/
+`unregister` output unchanged.
+
+**Found during B1 (→ B2):** the Beast *text* codec does not round-trip
+objects/enums (`serialize` emits `(key value)` pairs, `deserialize` expects
+arrays — verified on `ClusterTopology`, regression-tested). Ops are
+serde-canonical (JSON) until the codec is fixed; then op bodies ride Beast.
+
+Deferred: **B2** wire unification (ttyd/bus speak op bodies over the signed
+line; `stat` as discovery verb; old-agent verb mapping; Beast codec fix).
+**B3** `bind`/`revoke` surface + frame handles for bulk (`read weights/...` →
+handle, never bytes through ops).
+
+### 19.4b Phase B Rung B3 — `read` opens a bulk handle (2026-09-08)
+
+> **Reframe note.** The session nearly drifted into MTP draft-head inference
+> math (Track B B2). The owner redirected: *the center of gravity is the
+> distributed computation, not the inference.* The grammar (`Op::Read`) was a
+> stub — wired to `stat`, returning a value, never a handle. That is the
+> actual thesis hole (one graph, one grammar, priced edges), so B3 landed
+> before more inference work. Art. 11 answer: this is the primitive Track C
+> (streamed range-fetch), Phase D (union store), and the checkpoint plane all
+> stand on; it is not a default inherited from an inference stack.
+
+**Scope (core):** `read` of a weight/tensor path returns a *typed bulk handle*
+— identity + size-stamp, never bytes (Art. 6). The handle is the value the
+grammar carries; a range of it is fetched later (Track C) and `revoke`d (Phase
+C).
+
+**Built:**
+- `cluster/src/op/mod.rs` — `Resource::Handle { id, node, tensor, length }` +
+  `Resource::Tensors { node, tensors: Vec<TensorCensus> }`; `GraphBackend`
+  gains `read()` (defaults to `stat`); `dispatch` routes `Op::Read` →
+  `backend.read`.
+- `cluster/src/weights.rs` (new) — the weight manifest store (metadata only:
+  `WeightShard { node, tensors: Vec<WeightTensor { name, length } }`), with
+  `Weights::from_bmts` (copies the tensor table, never the data section).
+- `cluster/src/scheduler/mod.rs` — `Scheduler.weights: Weights` (default empty;
+  old callers unchanged).
+- `cluster/src/scheduler/op_backend.rs` — `weights` root resolves;
+  `stat weights.<node>` → `Tensors` census; `read weights.<node>.<i>` →
+  `Handle` (minted `h:<node>.<tensor>`, index-bounds + unknown-node are
+  structured errors, not panics).
+- Shell (`parser.rs` + `propositions.rs`) — `weights [n1 [i]].` verb routes
+  through `Op::Read`/`Op::Stat` and renders census + handle; `ShellBackend`
+  mirrors the weights paths.
+
+**Grammar note:** tensors are addressed by *index* (`weights.n1.0`), not name —
+tensor names contain dots (`blk.0.attn_q.weight`) and the path grammar is
+strict dot-separation. The name rides the handle/census as a value, where dots
+are fine.
+
+Gates (MET): `cargo test --lib` — cluster 155 (was 146, +9) + shell 75 (was
+74) · parser 18 · `cargo clippy -- -D warnings` 0 workspace-wide · sharder
+GREEN. Shell test proves `weights` census + `weights.n1.1` opens
+`handle h:n1.blk.1.attn_k.weight (… 2048 bytes)`.
+
+**Boot-load landed (same session):** `load_weights` (`shell/propositions.rs`)
+reads shard_map → `Weights::from_pipeline_plan` → mmaps each `.bmts` header →
+fills `scheduler.weights` at boot in both the interactive shell
+(`shell/src/main.rs`) and ttyd. Missing shard files report loudly, never panic.
+Shell gate now 76. The `weights` verb answers from real shard headers.
+
+**Next (not this rung):** Track C (`bind` + fetch a byte range of a handle
+over a `PricedEdge`), which is blocked on edges-as-first-class (§19.4c).
+
+### 19.4c The avenue doctrine — every lane is a lane (2026-09-08)
+
+Owner framing (verbatim in intent): "If it can make a connection, whether
+through copper or air, it's an avenue, protocols be damned." Written down as
+**docs/AIR_PATH.md §1.1** (the avenue doctrine) + lane-inventory table:
+copper (TCP frames, L2 0x88B5, DMA/PCIe, RDMA, BMTS raw, NVMe/SATA, USB/Thunderbolt,
+powerline, serial/any-pin, NVLink, display port) and air (Wi-Fi, modem, BT/BLE,
+cellular, LoRa/ISM, IR/light, acoustic). Pricing is the same `{bw, latency,
+jitter, watts, reliability}` tuple for every avenue; the `PricedEdge.kind` enum
+is the typed registry and grows as avenues are enumerated. Trust never degrades
+per lane (Art. 10).
+
+Adopted as the framing for the re-sequenced plan:
+
+1. Commit Rung B3 (+ boot-load).
+2. **Edges first-class** (AIR_PATH §4.1): `PricedEdge` on `NodeEntry`; probe
+   `iw dev` link speed + RTT/jitter. Prerequisite for exploiting any avenue —
+   you cannot schedule a lane you have not priced. Phase C step (PLAN9 §5.2 #1)
+   pulled forward.
+3. **Multi-homed identity** (§4.4): `node_id` = SMBIOS hash anchors one node
+   across N IPs; registration `ctl nodes/<id>/edges/<iface>`;
+   `find_by_ip` → `find_by_node_id`. Fixes "two nodes for one machine" — the
+   bug that breaks the one-machine illusion.
+4. **Bond layer over frames** (§4.2): N channels per peer, policy-striped.
+5. **Track C range-fetch** — the B3 handle becomes real: `bind` a span, fetch
+   across the priced edge set, size-stamp cache, resume.
+
+No prior work discarded. B2 (wire unification) stays, sequenced after edges/
+identity so ops-over-the-signed-line runs on priced lanes.
+
+### 19.5 Track B — ACTS v2 air-path (SwarmLLM borrow), full rungs
+
+| Rung | Work | Gate |
+|---|---|---|
+| B1 | MTP un-filter at shard time (§13.4 note); draft head shards to brain node | shard tool emits draft tensors; 9B card accounts them |
+| B2 | Draft on brain: MTP needs only last hidden + last token | draft predicts next token from trunk output |
+| B3 | Snapshot/rollback in `qwen35.rs` + `pipeline.rs`: between-column KV + DeltaNet state, `acts-rollback {k}` | spec == plain, token-exact (Art. 10) |
+| B4 | ACTS modes + `WIRE_F16` negotiation in `pipeline.rs` | old agents degrade; version mismatch fails loudly |
+| B5 | Per-edge depth/batch as scheduler outputs; probe adds jitter/latency | 9B Q6_K + nextn over TCP agents; tok/s vs baseline over simulated lossy lap |
+
+**Track B status (2026-09-08):** Rung B1 **done** — `tools/shard_model.py`
+keeps MTP draft tensors (`--no-draft` restores pre-rung behavior), routes them
+to brain node 1 as `draft.bmts`, records `draft` in shard_map.json and
+`draft_layers`/`draft_node`/`draft_bytes` in model.json; ranges now computed
+over the full tensor list (fixes a latent last-tensor over-read). Gate: 4
+synthetic-GGUF tests in `tools/test_shard_model.py` (draft-on-brain, no-nextn,
+bitnet-untouched, `--no-draft` regression), wired into `tools/ci.sh`; Rust
+`Card` gains defaulted `draft_layers`/`draft_node` + `has_draft()` (2 tests,
+old cards load unchanged). Full gates green (cluster 146, shell 74, clippy 0,
+sharder GREEN).
+
+### 19.7 M2 bridge attempt (2026-09-08) — blocked on CUDA toolkit version
+
+Owner installed `cuda 13.3.1-1`; r580 driver `580.178.04` live on both GPUs
+(3060 + 1070 Ti). M2 instrument work done, benchmark blocked:
+
+- **Fixed** `tools/m2_bridge.sh`: fork defaults `LLAMA_BUILD_TOOLS=OFF`; added
+  `-DLLAMA_BUILD_TOOLS=ON -DLLAMA_BUILD_COMMON=ON` so `llama-bench` builds.
+- **Built** fresh `bitnet-cpp/build-cuda` (CUDA 13.3, sm_86) incl. `llama-bench`.
+- **Diagnosed**: every CUDA bench run aborts (`ggml_cuda_error`, `ggml-cuda.cu:104`,
+  `cudaFuncGetAttributes`/`cudaGetDevice` in the PDL path, `GGML_ABORT`). Reproduced
+  on the 2B AND 27B, single- and dual-GPU, with `GGML_CUDA_PDL=0` (gets past PDL,
+  still aborts in `rms_norm_mul_f32_cuda`). `--list-devices` and a minimal
+  `cudaGetDevice`/`cudaGetDeviceCount` program work fine.
+- **Root cause (high confidence)**: CUDA 13.3 runtime (`libcudart.so.13`, resolved
+  from `~/.cuda-libs`) is too new for the r580 legacy driver branch
+  (580.178.04) on this fork's compiled-in `GGML_CUDA_USE_PDL` path. The
+  pre-existing `build-m2` (built vs 12.8) also fails now — it dlopens the same
+  `libcudart.so.13`. Basic enumeration works; kernel-launch entry points fail.
+- **Fix (owner)**: install the CUDA toolkit version r580 supports —
+  `tools/m2_bridge.sh` was written and validated against **CUDA 12.8**
+  (`pacman` `cuda12` / AUR, or set `LD_LIBRARY_PATH` to a 12.8 runtime for the
+  existing `build-m2`). Then rerun `tools/m2_bridge.sh`; no code changes needed.
+
+Side note: with both GPUs on r580, `-ngl 99` tensor-splits the 27B Q3_K_M
+(13.8 GB) across 20 GB combined VRAM — the full-GPU M2 bar is one toolkit
+install away.
+
+### 19.6 Lineage recorded this session
+
+- CONSTITUTION Appendix C: Plan 9 row + SwarmLLM row.
+- PLAN §15.1: Plan 9 row, SwarmLLM row. §15.3: Plan 9 row. §15.10: #9–12
+  (Plan 9 program), #13–18 (multi-path program).
+- New docs: `docs/PLAN9.md` (grammar doctrine), `docs/AIR_PATH.md`
+  (multi-path design).
+- Provenance verified 2026-09-08: Plan 9 (Pike et al. 1995 Computing Systems
+  8(3):221-254; names paper OSR 27(2):72-76, doi 10.1145/506378.506413),
+  SwarmLLM (github.com/Nehanth/swarmllm, MIT, README + protocol/architecture
+  docs).
 
 

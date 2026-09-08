@@ -168,12 +168,16 @@ impl TtySession {
             has_rdma: false,
             rdma_gid: String::new(),
         });
-        let scheduler = Scheduler::new(topology.clone());
+        let mut scheduler = Scheduler::new(topology.clone());
         let mut config = propositions::ShellConfig::new();
         // Live agent endpoints only exist on the TCP wire; a getty/stdio
         // node is reached through the child, not the node_addrs list.
         if let TtyWire::Tcp(addr) = &wire {
             config.node_addrs = vec![(node.to_string(), addr.clone())];
+        }
+        if std::path::Path::new(&config.shard_map).exists() {
+            let (weights, _missing) = propositions::load_weights(&config.shard_map);
+            scheduler.weights = weights;
         }
         Self {
             node: node.to_string(),

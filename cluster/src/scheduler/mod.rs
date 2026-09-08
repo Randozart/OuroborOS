@@ -1,4 +1,5 @@
 pub mod energy_budget;
+pub mod op_backend;
 pub mod task_queue;
 pub mod workload_class;
 
@@ -7,6 +8,7 @@ use energy_budget::{BudgetCheck, EnergyBudget};
 use workload_class::WorkloadClass;
 
 use crate::beast::topology::{ClusterTopology, NodeEntry};
+use crate::weights::Weights;
 
 /// A task submitted to the cluster scheduler.
 #[derive(Debug, Clone)]
@@ -35,12 +37,16 @@ pub struct Scheduler {
     pub topology: ClusterTopology,
     pub budget: EnergyBudget,
     pub queue: task_queue::TaskQueue,
+    /// Brain-side weight census (metadata: node -> tensors name+length). Lets
+    /// the op kernel mint bulk handles (Rung B3). Empty for callers that do
+    /// not register a manifest; old behavior unchanged.
+    pub weights: Weights,
 }
 
 impl Scheduler {
     pub fn new(topology: ClusterTopology) -> Self {
         let budget = EnergyBudget::new(topology.power_budget_watts);
-        Self { topology, budget, queue: task_queue::TaskQueue::new() }
+        Self { topology, budget, queue: task_queue::TaskQueue::new(), weights: Weights::new() }
     }
 
     /// Attempt to dispatch a task to the best suitable node.

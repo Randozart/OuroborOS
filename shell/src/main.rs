@@ -443,7 +443,7 @@ fn main() -> Result<()> {
         .map(|w| w[1].clone());
 
     let topology = demo_topology();
-    let scheduler = Scheduler::new(topology.clone());
+    let mut scheduler = Scheduler::new(topology.clone());
     let mut ctx = Context::new();
     let fmt = Formatter::new(false);
 
@@ -454,6 +454,20 @@ fn main() -> Result<()> {
 
     let mut config = propositions::ShellConfig::new();
     config.node_addrs = node_addrs.clone();
+
+    // Load the weight manifest (Rung B3) so `weights` answers from real
+    // shard headers, not an empty store. Best-effort: a missing map is fine.
+    if std::path::Path::new(&config.shard_map).exists() {
+        let (weights, missing) = propositions::load_weights(&config.shard_map);
+        scheduler.weights = weights;
+        if !missing.is_empty() {
+            eprintln!(
+                "weights: {} shard file(s) unreadable ({})",
+                missing.len(),
+                missing.join(", ")
+            );
+        }
+    }
 
     if !node_addrs.is_empty() {
         println!("Probing {} nodes...", node_addrs.len());
