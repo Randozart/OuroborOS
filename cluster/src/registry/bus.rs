@@ -6,6 +6,9 @@
 //! - `register <telemetry-json>` → `registered <id>` (idempotent per IP)
 //! - `heartbeat <telemetry-json>` → `ok <id>` | `unknown` (re-register)
 //! - `ping` → `pong`
+//! - `status` → JSON census (Rung B1: this verb *is* `stat cluster` over the
+//!   registry — the head-side GraphBackend's `cluster` census is its mirror;
+//!   Rung B2 wires the verb itself to the op kernel, docs/PLAN9.md §9.3).
 //!
 //! The IP is taken from the connection peer, never self-reported.
 
@@ -84,6 +87,9 @@ impl BusTelemetry {
             image_rev: self.image_rev.clone(),
             has_rdma: false,
             rdma_gid: String::new(),
+            // Lane pricing arrives with the agent's self-report (AIR_PATH §4.4);
+            // the head-side SSH probe cannot see the tail's lanes.
+            edges: Vec::new(),
         }
     }
 

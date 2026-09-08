@@ -253,6 +253,7 @@ mod tests {
             image_rev: String::new(),
             has_rdma: false,
             rdma_gid: String::new(),
+            edges: Vec::new(),
         }
     }
 
@@ -538,5 +539,48 @@ mod tests {
         let json = serde_json::to_string(&h).unwrap();
         let back: Resource = serde_json::from_str(&json).unwrap();
         assert_eq!(h, back);
+    }
+
+    /// Rung: edges are first-class — a node record carries its priced lanes
+    /// (docs/AIR_PATH.md §1.1), and `cluster.nodes` surfaces them too.
+    #[test]
+    fn test_node_carries_priced_edges() {
+        let mut topo = ClusterTopology::new();
+        let mut n1 = make_node("n1", true, 35);
+        n1.edges = vec![crate::transport::edge::PricedEdge {
+            iface: "wlan0".into(),
+            kind: crate::transport::edge::EdgeKind::Air,
+            bw_mbps: 60,
+            latency_us: 2000,
+            jitter_us: 500,
+            watts: 2,
+            signal_dbm: -45,
+        }];
+        topo.nodes.push(n1);
+        let mut sched = Scheduler::new(topo);
+
+        // stat n1 carries the lane.
+        let record = match sched
+            .stat(&ResourcePath::parse("n1").unwrap())
+            .unwrap()
+        {
+            Resource::Node(record) => record,
+            other => panic!("expected Node, got {:?}", other),
+        };
+        let edges: Vec<crate::transport::edge::PricedEdge> =
+            serde_json::from_value(record.get("edges").cloned().unwrap()).unwrap();
+        assert_eq!(edges.len(), 1);
+        assert_eq!(edges[0].iface, "wlan0");
+        assert_eq!(edges[0].kind, crate::transport::edge::EdgeKind::Air);
+
+        // cluster.nodes surfaces them too.
+        let Resource::Nodes(nodes) = sched
+            .stat(&ResourcePath::parse("cluster.nodes").unwrap())
+            .unwrap()
+        else {
+            panic!("expected Nodes");
+        };
+        assert_eq!(nodes.len(), 1);
+        assert!(nodes[0].get("edges").unwrap().as_array().unwrap().len() == 1);
     }
 }

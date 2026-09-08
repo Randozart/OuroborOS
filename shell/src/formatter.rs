@@ -59,7 +59,7 @@ impl Formatter {
 
     /// Format node discovery output.
     pub fn node_query(&self, node: &NodeDisplay) -> String {
-        format!(
+        let mut out = format!(
             "NODE_{}\n  CPU:    {}\n  RAM:    {}MiB\n  SIMD:   {}\n  Status: {}\n  Power:  {}W | Temp: {}C{}",
             node.id,
             node.cpu_model,
@@ -69,7 +69,11 @@ impl Formatter {
             node.power_watts,
             node.temp_c,
             if node.gpu.is_empty() { String::new() } else { format!("\n  GPU:    {}", node.gpu) }
-        )
+        );
+        if !node.lanes.is_empty() {
+            out.push_str(&format!("\n  Lanes:  {}", node.lanes));
+        }
+        out
     }
 
     /// Format property query.
@@ -160,7 +164,10 @@ impl Formatter {
     }
 }
 
-/// Display-ready node data.
+/// Display-ready node data. Serde derives let a node record ride the op
+/// kernel (`Resource::Node`/`Nodes`) and come back to the formatter
+/// unchanged (docs/PLAN9.md §9).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct NodeDisplay {
     pub id: String,
     pub cpu_model: String,
@@ -172,6 +179,8 @@ pub struct NodeDisplay {
     pub power_watts: u32,
     pub temp_c: u32,
     pub gpu: String,
+    /// Priced lanes summary (docs/AIR_PATH.md §1.1). Empty when unknown.
+    pub lanes: String,
 }
 
 fn simd_list(node: &NodeDisplay) -> String {
@@ -226,6 +235,7 @@ mod tests {
             power_watts: 12,
             temp_c: 42,
             gpu: String::new(),
+            lanes: String::new(),
         };
         let out = fmt.node_query(&node);
         assert!(out.contains("i5-7200U"));

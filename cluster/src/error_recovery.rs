@@ -188,6 +188,7 @@ mod tests {
             image_rev: String::new(),
             has_rdma: false,
             rdma_gid: String::new(),
+            edges: Vec::new(),
         }
     }
 

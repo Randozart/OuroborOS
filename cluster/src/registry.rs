@@ -57,6 +57,7 @@ impl NodeRecord {
             image_rev: info.image_rev.clone(),
             has_rdma: info.has_rdma,
             rdma_gid: info.rdma_gid.clone(),
+            edges: info.edges.clone(),
         };
         Self {
             entry,
@@ -422,6 +423,7 @@ mod tests {
             image_rev: String::new(),
             has_rdma: false,
             rdma_gid: String::new(),
+            edges: Vec::new(),
         }
     }    #[test]
     fn test_refresh_entry_reconciles_hardware() {

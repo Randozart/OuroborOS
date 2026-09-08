@@ -27,6 +27,11 @@ pub struct NodeInfo {
     pub has_rdma: bool,
     #[serde(default)]
     pub rdma_gid: String,
+    /// Priced lanes on this node (docs/AIR_PATH.md §1.1). Populated by the
+    /// local probe; remote SSH probes leave empty until a tail-side agent
+    /// reports its own lanes.
+    #[serde(default)]
+    pub edges: Vec<crate::transport::edge::PricedEdge>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -91,6 +96,7 @@ pub fn probe_node(hostname: &str, ip: &str) -> Result<NodeInfo> {
         image_rev: String::new(),
         has_rdma: false,
         rdma_gid: String::new(),
+        edges: Vec::new(),
     })
 }
 
@@ -110,6 +116,9 @@ pub fn probe_local() -> Result<NodeInfo> {
     // or check if rdma_rxe is loaded.
     let (has_rdma, rdma_gid) = probe_rdma();
 
+    // Enumerate + price every lane (link speed, iw signal, RTT/jitter).
+    let edges = network::probe_lanes(None);
+
     Ok(NodeInfo {
         hostname,
         ip: "127.0.0.1".to_string(),
@@ -123,6 +132,7 @@ pub fn probe_local() -> Result<NodeInfo> {
         image_rev: String::new(),
         has_rdma,
         rdma_gid,
+        edges,
     })
 }
 
@@ -136,16 +146,13 @@ fn probe_rdma() -> (bool, String) {
         return (false, String::new());
     }
 
-    // Find the first RDMA device.
+    // Find the first RDMA device. (The probe only ever used the first
+    // entry — the previous `for` loop always returned on its first pass.)
     let entries = match std::fs::read_dir(ib_dir) {
         Ok(e) => e,
         Err(_) => return (false, String::new()),
     };
-
-    for entry in entries.flatten() {
-        let dev_name = entry.file_name();
-        let dev_name_str = dev_name.to_string_lossy();
-
+    if let Some(entry) = entries.flatten().next() {
         // Check if the device is a SoftRoCE (rxe) or real IB device.
         let dev_type_path = entry.path().join("node_type");
         if let Ok(node_type) = std::fs::read_to_string(&dev_type_path) {
@@ -160,7 +167,7 @@ fn probe_rdma() -> (bool, String) {
             .unwrap_or_default();
 
         // SoftRoCE GID format: "fe80:0000:0000:0000:<mac>:0000:0000:0001"
-        // Real IB GID: "0000:0000:0000:0000:0000:0000:0000:0000:0000:0000:0000:0000:0000:0000:0000:0001"
+        // Real IB GID: "0000:...:0001"
         return (true, gid);
     }
 

@@ -1786,6 +1786,42 @@ Adopted as the framing for the re-sequenced plan:
 No prior work discarded. B2 (wire unification) stays, sequenced after edges/
 identity so ops-over-the-signed-line runs on priced lanes.
 
+### 19.4d Edges first-class — lanes are graph citizens (2026-09-08)
+
+Rung 2 of the re-sequenced plan. **Edges are now typed, priced, and on the
+graph** — the prerequisite for exploiting any avenue (you cannot schedule a
+lane you have not priced).
+
+**Built:**
+- `cluster/src/transport/edge.rs` (new) — `EdgeKind` (the §1.1 registry:
+  TCP/L2/DMA/RDMA/BLK/NVMe/USB/PWR/SERIAL/GPU/DISPLAY/AIR/MODEM/BT/CELLULAR/
+  LORA/OPTICAL/ACOUSTIC + `Other(String)` for avenues with no kind yet) and
+  `PricedEdge { iface, kind, bw_mbps, latency_us, jitter_us, watts,
+  signal_dbm }` with `is_air()` + `describe()`. Serde-canonical (JSON) so it
+  rides ops and the wire.
+- `NodeEntry.edges: Vec<PricedEdge>` (`#[serde(default)]` — old serialized
+  topologies stay valid) and `NodeInfo.edges` (local probe fills it).
+- `probe/network.rs::probe_lanes(target)` — enumerates `/sys/class/net`,
+  classifies by name (`wlan*`→Air, `rxe/ib*`→Rdma, else TCP), reads negotiated
+  link speed from `/sys/class/net/*/speed`, parses `iw dev` signal dBm + tx
+  bitrate for air lanes, and per-interface `ping -I` for RTT/jitter. Watts =
+  conservative card-level estimates (powercap measurement is Phase C).
+- Shell `n1?`/`cluster.nodes` render the lane inventory (`Lanes:` line).
+
+Gates (MET): cluster **165** (was 155) + shell **77** (was 76) · clippy
+`-D warnings` 0 workspace-wide. Tests: 5 edge.rs + 5 lane-parser + node-
+carries-priced-edges (kernel) + shell renders lanes.
+
+**Measured, never spec-sheet:** the probe reads negotiated link speed, live
+`iw` signal/bitrate, and pings each lane. `probe_lanes(None)` on the tail (no
+target) prices speed/signal/watts; RTT/jitter fill once a target (the head)
+is known — that arrives with multi-homed identity (§19.4c #3).
+
+**Next:** multi-homed identity — `node_id` = SMBIOS hash anchors one node
+across N IPs; registration `ctl nodes/<id>/edges/<iface>`; agent self-reports
+its lanes (this rung only the head's SSH/local probe enumerates the *local*
+box). Then the bond layer (§19.4c #4) and Track C range-fetch (#5).
+
 ### 19.5 Track B — ACTS v2 air-path (SwarmLLM borrow), full rungs
 
 | Rung | Work | Gate |

@@ -650,7 +650,14 @@ fn static_display(topology: &ClusterTopology, n: &NodeEntry) -> NodeDisplay {
         power_watts: n.tdp_watts,
         temp_c: 0,
         gpu: entry_gpu(topology, &n.id),
+        lanes: lanes_summary(&n.edges),
     }
+}
+
+/// One-line lane inventory for a node (docs/AIR_PATH.md §1.1): every priced
+/// edge, comma-joined. Empty when the node has no lane report.
+fn lanes_summary(edges: &[ouro_cluster::transport::edge::PricedEdge]) -> String {
+    edges.iter().map(|e| e.describe()).collect::<Vec<_>>().join(" | ")
 }
 
 /// Run one op through the kernel, mapping structured errors to anyhow.
@@ -1145,6 +1152,7 @@ fn telemetry_to_node(addr: &str, tel: &crate::agent_client::AgentTelemetry, id: 
         image_rev: tel.image_rev.clone(),
         has_rdma: false,
         rdma_gid: String::new(),
+        edges: Vec::new(),
     }
 }
 
@@ -1209,6 +1217,9 @@ fn record_to_display(n: &RegistryNode) -> NodeDisplay {
         power_watts: record_watts(n),
         temp_c: n.temp_c,
         gpu: record_gpu(n),
+        // Live records carry no lane inventory yet; the agent's self-report
+        // lands in the next rung (AIR_PATH §4.4).
+        lanes: String::new(),
     }
 }
 
@@ -1363,6 +1374,7 @@ mod tests {
             image_rev: String::new(),
             has_rdma: false,
             rdma_gid: String::new(),
+            edges: Vec::new(),
         });
         topo
     }
@@ -1434,6 +1446,7 @@ mod tests {
     image_rev: String::new(),
     has_rdma: false,
     rdma_gid: String::new(),
+        edges: Vec::new(),
         };
         assert_eq!(resolve_node_property(&node, "power", &ctx), "12W (live)");
     }
@@ -1480,6 +1493,7 @@ mod tests {
     image_rev: String::new(),
     has_rdma: false,
     rdma_gid: String::new(),
+        edges: Vec::new(),
         };
         let ctx = Context::new();
         assert_eq!(resolve_node_property(&node, "power", &ctx), "35W");
@@ -1642,6 +1656,7 @@ mod kernel_ops_tests {
             image_rev: String::new(),
             has_rdma: false,
             rdma_gid: String::new(),
+            edges: Vec::new(),
         });
         Ctx {
             sched: Scheduler::new(topo.clone()),
@@ -1839,5 +1854,27 @@ mod kernel_ops_tests {
 
         // Clean up.
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A node with priced lanes renders them in `n1?` (docs/AIR_PATH.md §1.1).
+    #[test]
+    fn test_node_query_renders_lanes() {
+        let mut st = setup();
+        let node = st.topo.nodes.iter_mut().find(|n| n.id == "n1").unwrap();
+        node.edges = vec![ouro_cluster::transport::edge::PricedEdge {
+            iface: "wlan0".into(),
+            kind: ouro_cluster::transport::edge::EdgeKind::Air,
+            bw_mbps: 60,
+            latency_us: 2000,
+            jitter_us: 500,
+            watts: 2,
+            signal_dbm: -45,
+        }];
+        let out = run(&mut st, Command::NodeQuery { node: "n1".into() });
+        assert!(
+            out.contains("Lanes:  wlan0 (air, 60 Mbit/s, 2000us+/-500us, 2W, -45 dBm)"),
+            "got: {}",
+            out
+        );
     }
 }

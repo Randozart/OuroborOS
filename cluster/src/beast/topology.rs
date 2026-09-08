@@ -33,6 +33,10 @@ pub struct NodeEntry {
     pub has_rdma: bool,
     #[serde(default)]
     pub rdma_gid: String,
+    /// Priced lanes (docs/AIR_PATH.md §1.1). Empty until the agent probe
+    /// reports them; old serialized topologies stay valid (`serde` default).
+    #[serde(default)]
+    pub edges: Vec<crate::transport::edge::PricedEdge>,
 }
 
 
@@ -102,6 +106,7 @@ impl ClusterTopology {
             image_rev: info.image_rev.clone(),
             has_rdma: info.has_rdma,
             rdma_gid: info.rdma_gid.clone(),
+            edges: info.edges.clone(),
         };
         self.nodes.push(entry.clone());
         entry

@@ -167,6 +167,7 @@ impl TtySession {
             image_rev: String::new(),
             has_rdma: false,
             rdma_gid: String::new(),
+            edges: Vec::new(),
         });
         let mut scheduler = Scheduler::new(topology.clone());
         let mut config = propositions::ShellConfig::new();

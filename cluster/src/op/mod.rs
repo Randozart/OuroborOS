@@ -352,6 +352,7 @@ mod tests {
             image_rev: String::new(),
             has_rdma: false,
             rdma_gid: String::new(),
+            edges: Vec::new(),
         };
         assert_eq!(node_prop(&node, "power"), "77W");
         assert_eq!(node_prop(&node, "simd"), "AVX2, AVX, SSE4.2");
