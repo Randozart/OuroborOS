@@ -2060,6 +2060,48 @@ complete.
 (Track B full gate: B5 per-edge depth/batch, 9B Q6_K model + CUDA 12.8).
 The avenue feeds the engine.
 
+### 19.4l The `fetch` REPL verb — the avenue in the shell (2026-09-08)
+
+Rung 10. **The payoff is now at the keyboard.** Before this rung, fetching
+a tensor's bytes existed only as a library function exercised by tests —
+the shell could `weights`, `bind`, `revoke`, but the actual fetch (the
+whole point of Track C) had no REPL verb. Now:
+
+    weights.n1.0        → the tensor census (name + size-stamp)
+    bind weights.n1.0.  → a binding: span + the lanes the policy picked
+    fetch b1.           → the bytes, live from the tail, over frames
+
+**Built:**
+- Agent verb: `fetch-tensor <tensor> <offset> <length>` — the head names a
+  tensor, the **tail resolves where it keeps it** (its own shard_map, via
+  `find_shard_for_tensor`) and serves the span over frames. The shard path
+  never leaves the tail — the head need not know the deployer's layout.
+  Wired into `handle_connection` (frame mode, one connection per fetch).
+- Shell client: `fetch_tensor` / `fetch_tensor_with` in `agent_client.rs`
+  (signed line out, size-stamp in, `pump_recv` the span).
+- REPL verb: `fetch b1.` or `fetch weights.n1.0 [offset] [length].` —
+  resolves a binding id or a weights path to (node, tensor, span), finds
+  the node's address in `config.node_addrs`, fetches, reports bytes +
+  a sha256 digest. Rejects a span past the declared length (never
+  truncated).
+
+Gates (MET): cluster **185** · shell lib **82** (was 81) · agent **41**
+(was 39) · clippy `-D warnings` 0. Tests: `fetch_tensor_verb_parses`,
+`find_shard_for_tensor` (two-shard map, resolves the right one, missing
+tensor refused), parser `fetch` forms, `test_fetch_via_kernel_live` — the
+full REPL dispatch against a loopback agent: a real 4096-byte BMTS shard,
+a 256-byte span fetched over frames, digest reported.
+
+**Also fixed (real bug, found by the parallel suite):** `test_fetch_manifest_roundtrip`
+hardcoded response seq `1` while `REQUEST_SEQ` is a process-global atomic
+advanced by every parallel wire call — the seq mismatch made the test flake
+~2/3 of full-suite runs. The server now echoes the request's seq. Five
+consecutive full-suite runs, zero flakes.
+
+**What this means:** the avenue is now fully usable from the REPL, not just
+testable. `fetch` is the shell's direct hand on the cluster's bytes —
+the machine remaking itself, fetchable by name.
+
 ### 19.5 Track B — ACTS v2 air-path (SwarmLLM borrow), full rungs
 
 | Rung | Work | Gate |

@@ -56,6 +56,66 @@ pub fn handle_fetch(
     Ok(sent)
 }
 
+/// Parse a signed `fetch-tensor <tensor> <offset> <length>` line — the
+/// tensor-by-name fetch (the tail resolves where it keeps the tensor).
+/// Returns (tensor, span), or `None` if not a fetch-tensor line or auth
+/// fails.
+pub fn fetch_tensor_verb(secret: &Secret, line: &str) -> Option<(String, Span)> {
+    let (_seq, body) = ouro_cluster::transport::auth::open_line(secret, line).ok()?;
+    let rest = body.strip_prefix("fetch-tensor ")?;
+    let mut parts = rest.split_whitespace();
+    let tensor = parts.next()?.to_string();
+    let offset: u64 = parts.next()?.parse().ok()?;
+    let length: u64 = parts.next()?.parse().ok()?;
+    if length == 0 {
+        return None;
+    }
+    Some((tensor, Span { offset, length }))
+}
+
+/// Resolve which shard in the shard_map contains `tensor`, and return the
+/// resolved file path. The agent's own shard_map is the source of truth for
+/// where it keeps its tensors.
+fn find_shard_for_tensor(shard_map_path: &str, tensor: &str) -> anyhow::Result<String> {
+    use ouro_cluster::pipeline::PipelinePlan;
+    let plan = PipelinePlan::load(shard_map_path)?;
+    for stage in &plan.nodes {
+        // The shard file path may be relative to the shard map's parent.
+        let shard_path = if std::path::Path::new(&stage.file).is_absolute() {
+            std::path::PathBuf::from(&stage.file)
+        } else {
+            std::path::Path::new(shard_map_path)
+                .parent()
+                .unwrap_or(std::path::Path::new("."))
+                .join(&stage.file)
+        };
+        if !shard_path.exists() {
+            continue;
+        }
+        let shard = match BmtsShard::open(shard_path.to_str().unwrap_or(&stage.file)) {
+            Ok(s) => s,
+            Err(_) => continue,
+        };
+        if shard.tensors.iter().any(|t| t.name == tensor) {
+            return Ok(shard_path.to_str().unwrap_or(&stage.file).to_string());
+        }
+    }
+    anyhow::bail!("tensor {tensor} not found in any shard of {shard_map_path}")
+}
+
+/// Serve a fetch-tensor: resolve the shard from the agent's shard_map,
+/// read the span, pump the bytes back over frames. Returns bytes sent.
+pub fn handle_fetch_tensor(
+    secret: Secret,
+    sock: TcpStream,
+    shard_map_path: &str,
+    tensor: &str,
+    span: Span,
+) -> anyhow::Result<u64> {
+    let shard_path = find_shard_for_tensor(shard_map_path, tensor)?;
+    handle_fetch(secret, sock, &shard_path, tensor, span)
+}
+
 /// Send a single u64 (big-endian) as a line-mode preamble to the socket.
 fn write_u64<W: Write>(w: &mut W, v: u64) -> std::io::Result<()> {
     let buf = v.to_be_bytes();
@@ -93,6 +153,57 @@ mod tests {
     fn test_fetch_verb_auth_fail() {
         let line = auth::sign_line(&[10u8; 32], 1, "fetch /s/d.bmts t 0 4");
         assert!(fetch_verb(&KEY, &line).is_none());
+    }
+
+    #[test]
+    fn test_fetch_tensor_verb_parses() {
+        let line = auth::sign_line(&KEY, 1, "fetch-tensor blk.0.attn_q.weight 128 4096");
+        let (tensor, span) = fetch_tensor_verb(&KEY, &line).unwrap();
+        assert_eq!(tensor, "blk.0.attn_q.weight");
+        assert_eq!(span, Span { offset: 128, length: 4096 });
+        // zero-length refused
+        let bad = auth::sign_line(&KEY, 2, "fetch-tensor t 0 0");
+        assert!(fetch_tensor_verb(&KEY, &bad).is_none());
+    }
+
+    /// The tail resolves where it keeps a tensor: a shard_map with two
+    /// shards, the tensor lives in shard 2, and find_shard_for_tensor
+    /// returns shard 2's resolved path.
+    #[test]
+    fn test_find_shard_for_tensor() {
+        let dir = std::env::temp_dir().join(format!("ouro-find-shard-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let map_path = dir.join("shard_map.json");
+        let blob = vec![0u8; 64];
+        write_shard(
+            dir.join("shard_1.bmts").to_str().unwrap(),
+            1,
+            &[BmtsTensor { name: "blk.0.attn_q.weight".into(), shape: vec![4, 4], dtype: 34, offset: 0, length: 64 }],
+            &blob,
+        )
+        .unwrap();
+        write_shard(
+            dir.join("shard_2.bmts").to_str().unwrap(),
+            2,
+            &[BmtsTensor { name: "blk.0.attn_k.weight".into(), shape: vec![4, 4], dtype: 34, offset: 0, length: 64 }],
+            &blob,
+        )
+        .unwrap();
+        let map = serde_json::json!({
+            "model": "test",
+            "nodes": [
+                { "node": 1, "file": "shard_1.bmts", "layers": [0], "tensors": 1, "bytes": 64 },
+                { "node": 2, "file": "shard_2.bmts", "layers": [1], "tensors": 1, "bytes": 64 },
+            ]
+        });
+        std::fs::write(&map_path, serde_json::to_string(&map).unwrap()).unwrap();
+
+        let p = find_shard_for_tensor(map_path.to_str().unwrap(), "blk.0.attn_k.weight").unwrap();
+        assert!(p.ends_with("shard_2.bmts"), "resolved to {p}");
+        let missing = find_shard_for_tensor(map_path.to_str().unwrap(), "no.such.tensor");
+        assert!(missing.is_err());
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// The live fetch, on loopback: a head sends a signed fetch line, the

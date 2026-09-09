@@ -5,6 +5,7 @@ use ouro_cluster::op::{GraphBackend, Op, QueueEntry, Resource};
 use ouro_cluster::scheduler::{ScheduleOutcome, Scheduler, Task};
 use ouro_cluster::scheduler::workload_class::WorkloadClass;
 use ouro_cluster::transport::auth;
+use sha2::{Digest, Sha256};
 
 use crate::context::Context;
 use crate::formatter::{Formatter, NodeDisplay};
@@ -662,6 +663,101 @@ pub fn handle(
                 Resource::Ack { message } => Ok(message),
                 other => Err(anyhow::anyhow!("unexpected resource: {:?}", other)),
             }
+        }
+
+        Command::Fetch { target, offset, length } => {
+            let backend = ShellBackend { scheduler, topology, ctx, recovery, config };
+
+            // Resolve the target to (node, tensor, span). Two forms:
+            //   fetch b1            — a binding (node + tensor + span known)
+            //   fetch weights.n1.0  — a tensor path (whole tensor unless a
+            //                         sub-span is given)
+            let (node, tensor, span) = if target.starts_with('b') {
+                let binding = backend
+                    .scheduler
+                    .bindings
+                    .get(&target)
+                    .ok_or_else(|| anyhow::anyhow!("no such binding: {}", target))?;
+                let span = match (offset, length) {
+                    (None, None) => binding.span,
+                    (Some(o), Some(l)) => ouro_cluster::op::Span { offset: o, length: l },
+                    _ => return Err(anyhow::anyhow!("fetch needs offset AND length, or neither")),
+                };
+                (binding.node.clone(), binding.tensor.clone(), span)
+            } else {
+                // weights.<node>.<i>
+                let full = if target.starts_with("weights.") {
+                    target.clone()
+                } else {
+                    format!("weights.{}", target)
+                };
+                let path = ResourcePath::parse(&full)
+                    .map_err(|e| anyhow::anyhow!(e))?;
+                let node = path
+                    .segments
+                    .get(1)
+                    .ok_or_else(|| anyhow::anyhow!("fetch requires a weights.<node>.<i> path, got {}", target))?
+                    .to_string();
+                let idx: usize = path
+                    .segments
+                    .get(2)
+                    .ok_or_else(|| anyhow::anyhow!("fetch requires a tensor index"))?
+                    .parse()
+                    .map_err(|_| anyhow::anyhow!("tensor index must be an integer"))?;
+                let shard = backend
+                    .scheduler
+                    .weights
+                    .for_node(&node)
+                    .ok_or_else(|| anyhow::anyhow!("no weights for node {}", node))?;
+                let t = shard
+                    .at(idx)
+                    .ok_or_else(|| anyhow::anyhow!("tensor index {} out of range for node {}", idx, node))?;
+                let total = t.length;
+                let span = match (offset, length) {
+                    (None, None) => ouro_cluster::op::Span { offset: 0, length: total },
+                    (Some(o), Some(l)) => {
+                        let s = ouro_cluster::op::Span { offset: o, length: l };
+                        if s.end() > total {
+                            return Err(anyhow::anyhow!(
+                                "span [{}, {}) exceeds tensor {} of {} bytes",
+                                s.offset,
+                                s.end(),
+                                t.name,
+                                total
+                            ));
+                        }
+                        s
+                    }
+                    _ => return Err(anyhow::anyhow!("fetch needs offset AND length, or neither")),
+                };
+                (node.to_string(), t.name.clone(), span)
+            };
+
+            // The node's live address: the multi-homed table (--nodes).
+            let addr = backend
+                .config
+                .node_addrs
+                .iter()
+                .find(|(id, _)| id == &node)
+                .map(|(_, a)| a.clone())
+                .ok_or_else(|| anyhow::anyhow!("no address known for node {} (start with --nodes)", node))?;
+
+            // Bulk rides frames, never the line (Art. 6). The tail resolves
+            // where it keeps the tensor.
+            let bytes = crate::agent_client::fetch_tensor(&addr, &tensor, span.offset, span.length)?;
+            let mut sha = Sha256::new();
+            sha.update(&bytes);
+            let digest = format!("{:x}", sha.finalize());
+            Ok(format!(
+                "fetched {}: {} bytes of {} [{}..{}) from {} — sha256 {}",
+                target,
+                bytes.len(),
+                tensor,
+                span.offset,
+                span.end(),
+                addr,
+                &digest[..16]
+            ))
         }
 
         Command::Unknown(input) => Ok(fmt.unknown(&input)),
@@ -1801,6 +1897,79 @@ mod kernel_ops_tests {
         let out = run(&mut st, Command::AssignProposition { node: "n1".into(), workload: "matmul".into() });
         assert!(out.contains("RESULT: Assignment failed. [FALSE]"), "got: {}", out);
         assert!(out.contains("[3] Scheduling failed: energy budget exceeded"));
+    }
+
+    /// The REPL `fetch` verb, live: a loopback agent serves a tensor span
+    /// over frames; the dispatch resolves the target (a weights path), calls
+    /// the agent, and reports the bytes fetched + a digest.
+    #[test]
+    fn test_fetch_via_kernel_live() {
+        use ouro_cluster::bmts::{write_shard, BmtsShard, BmtsTensor};
+        use ouro_cluster::transport::frames::{pump_send, FrameSession, DEFAULT_CHUNK, DEFAULT_WINDOW};
+        use std::io::{Cursor, Read, Write};
+        use std::net::TcpListener;
+
+        let dir = std::env::temp_dir().join(format!("ouro-hiss-fetchk-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let shard_path = dir.join("shard_1.bmts");
+        let blob: Vec<u8> = (0..4096u32).map(|i| (i % 239) as u8).collect();
+        write_shard(
+            shard_path.to_str().unwrap(),
+            1,
+            &[BmtsTensor { name: "blk.0.attn_q.weight".into(), shape: vec![16, 256], dtype: 34, offset: 0, length: 4096 }],
+            &blob,
+        )
+        .unwrap();
+        let shard_path_str = shard_path.to_str().unwrap().to_string();
+
+        // The shell's agent client signs the wire with OURO_SECRET_FILE.
+        let secret_file = dir.join("secret.hex");
+        std::fs::write(&secret_file, "0707070707070707070707070707070707070707070707070707070707070707").unwrap();
+        std::env::set_var("OURO_SECRET_FILE", secret_file.to_str().unwrap());
+
+        // Loopback agent serving `fetch-tensor <tensor> <offset> <length>`.
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        let key: ouro_cluster::transport::auth::Secret = [7u8; 32];
+        let server = std::thread::spawn(move || {
+            let (sock, _) = listener.accept().unwrap();
+            let mut sock = sock;
+            let mut line = String::new();
+            let mut one = [0u8; 1];
+            while !line.ends_with('\n') {
+                sock.read_exact(&mut one).unwrap();
+                line.push(one[0] as char);
+            }
+            let (_seq, body) = ouro_cluster::transport::auth::open_line(&key, line.trim()).unwrap();
+            let rest = body.strip_prefix("fetch-tensor ").unwrap();
+            let mut p = rest.split_whitespace();
+            let tensor = p.next().unwrap().to_string();
+            let offset: u64 = p.next().unwrap().parse().unwrap();
+            let length: u64 = p.next().unwrap().parse().unwrap();
+            let bmts = BmtsShard::open(&shard_path_str).unwrap();
+            let declared = bmts.tensor_bytes(&tensor).unwrap().len() as u64;
+            let payload = bmts.read_span(&tensor, ouro_cluster::op::Span { offset, length }).unwrap();
+            let mut session = FrameSession::new(sock, key);
+            let buf = declared.to_be_bytes();
+            session.get_mut().write_all(&buf).unwrap();
+            let mut cur = Cursor::new(payload.bytes().to_vec());
+            pump_send(&mut cur, &mut session, DEFAULT_CHUNK, DEFAULT_WINDOW).unwrap();
+        });
+
+        // The shell knows the tensor census + the node's address.
+        let mut st = setup();
+        st.sched.weights.shards.push(ouro_cluster::weights::WeightShard {
+            node: "n1".into(),
+            tensors: vec![ouro_cluster::weights::WeightTensor { name: "blk.0.attn_q.weight".into(), length: 4096 }],
+        });
+        st.config.node_addrs = vec![("n1".to_string(), addr.clone())];
+
+        let out = run(&mut st, Command::Fetch { target: "weights.n1.0".into(), offset: Some(1000), length: Some(256) });
+        assert!(out.contains("fetched weights.n1.0"), "got: {out}");
+        assert!(out.contains("256 bytes"), "got: {out}");
+        assert!(out.contains("sha256"), "got: {out}");
+        server.join().unwrap();
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

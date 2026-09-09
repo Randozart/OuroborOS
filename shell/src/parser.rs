@@ -138,6 +138,10 @@ pub enum Command {
     Bind { target: String, offset: Option<u64>, length: Option<u64> },
     /// `revoke b1.` — release a binding en-bloc (Track C)
     Revoke { binding: String },
+    /// `fetch b1 [offset] [length].` or `fetch weights.n1.0 [offset]
+    /// [length].` — fetch a bound span's bytes from the live agent (Track C).
+    /// Target is a binding id or a weights path; bytes ride frames.
+    Fetch { target: String, offset: Option<u64>, length: Option<u64> },
     /// `drift [rev]` — which tails don't run the expected versions
     Drift { expected: Option<String> },
     /// `recover.` — trigger error recovery sweep
@@ -376,6 +380,14 @@ pub fn interpret(input: &str) -> Command {
         let binding = trimmed.trim_start_matches("revoke").trim().trim_end_matches('.');
         return Command::Revoke { binding: binding.to_string() };
     }
+    if trimmed == "fetch" || trimmed.starts_with("fetch ") {
+        let rest = trimmed.trim_start_matches("fetch").trim().trim_end_matches('.');
+        let mut parts = rest.split_whitespace();
+        let target = parts.next().unwrap_or("").to_string();
+        let offset = parts.next().and_then(|s| s.parse().ok());
+        let length = parts.next().and_then(|s| s.parse().ok());
+        return Command::Fetch { target, offset, length };
+    }
     if trimmed == "recover." || trimmed == "recover" {
         return Command::Recover;
     }
@@ -536,6 +548,14 @@ mod tests {
         );
         assert!(
             matches!(interpret("revoke b1."), Command::Revoke { binding } if binding == "b1")
+        );
+        assert!(
+            matches!(interpret("fetch b1."), Command::Fetch { target, offset, length }
+                if target == "b1" && offset.is_none() && length.is_none())
+        );
+        assert!(
+            matches!(interpret("fetch weights.n1.0 128 256."), Command::Fetch { target, offset, length }
+                if target == "weights.n1.0" && offset == Some(128) && length == Some(256))
         );
         assert!(matches!(interpret("drift"), Command::Drift { expected: None }));
         assert!(

@@ -329,6 +329,52 @@ pub fn fetch_manifest_with(
     Ok(shard)
 }
 
+/// Fetch a tensor's byte span from an agent by **name** — the tail resolves
+/// where it keeps the tensor (its own shard_map). Sends a signed
+/// `fetch-tensor <tensor> <offset> <length>` line; the span comes back over
+/// frames. The REPL's `fetch` verb uses this.
+pub fn fetch_tensor(addr: &str, tensor: &str, offset: u64, length: u64) -> Result<Vec<u8>> {
+    fetch_tensor_with(&cached_secret()?, addr, tensor, offset, length)
+}
+
+/// `fetch_tensor` with an explicit secret (tests, multi-cluster tools).
+pub fn fetch_tensor_with(
+    secret: &Secret,
+    addr: &str,
+    tensor: &str,
+    offset: u64,
+    length: u64,
+) -> Result<Vec<u8>> {
+    use ouro_cluster::transport::frames::{pump_recv, FrameSession, DEFAULT_WINDOW};
+
+    let seq = REQUEST_SEQ.fetch_add(1, Ordering::Relaxed);
+    let mut stream = TcpStream::connect(addr).with_context(|| format!("connect to {}", addr))?;
+    stream.set_write_timeout(Some(Duration::from_secs(10)))?;
+    let line = auth::sign_line(secret, seq, &format!("fetch-tensor {tensor} {offset} {length}"));
+    stream.write_all(line.as_bytes())?;
+    stream.write_all(b"\n")?;
+    stream.flush()?;
+
+    // Size-stamp: the agent sends the declared tensor length first.
+    let mut stamp = [0u8; 8];
+    stream.read_exact(&mut stamp).with_context(|| "read size-stamp")?;
+    let declared = u64::from_be_bytes(stamp);
+    if declared < length {
+        anyhow::bail!(
+            "size-stamp {declared} < requested {length} — corrupt or wrong tensor"
+        );
+    }
+
+    // Pump the span back over frames.
+    let mut session = FrameSession::new(stream, *secret);
+    let mut received = Vec::new();
+    let (n, _) = pump_recv(&mut session, &mut received, DEFAULT_WINDOW)?;
+    if n != length {
+        anyhow::bail!("fetched {n} bytes, wanted {length}");
+    }
+    Ok(received)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -612,7 +658,7 @@ mod tests {
                 sock.read_exact(&mut one).unwrap();
                 line.push(one[0] as char);
             }
-            let (_seq, body) = auth::open_line(&KEY, line.trim()).unwrap();
+            let (seq, body) = auth::open_line(&KEY, line.trim()).unwrap();
             assert_eq!(body, "fetch-manifest");
             let resp = serde_json::json!({
                 "node": "n1",
@@ -621,7 +667,7 @@ mod tests {
                     { "name": "blk.0.attn_k.weight", "length": 256 },
                 ]
             });
-            let signed = auth::sign_line(&KEY, 1, &resp.to_string());
+            let signed = auth::sign_line(&KEY, seq, &resp.to_string());
             sock.write_all(signed.as_bytes()).unwrap();
             sock.write_all(b"\n").unwrap();
         });
