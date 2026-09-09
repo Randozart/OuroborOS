@@ -2017,6 +2017,49 @@ copper and air at once, stripes reassembled on arrival.
 shard_map.json) — the last piece for a cluster that describes its own
 weights.
 
+### 19.4k Agent shard-manifest verb — live weight discovery (2026-09-08)
+
+Rung 9. **The cluster describes its own weights.** The agent exposes its
+local tensor census over the line protocol (`fetch-manifest`), and the
+head's `Scheduler.weights` populates from live tails, not just boot-time
+files. The head asks each agent what it holds; the answers are the source
+of truth. This closes the self-describing loop.
+
+**Built:**
+- Agent CLI: `--node <u16>` (pipeline stage identity, required for
+  `fetch-manifest`) and `--shard-map <path>` (default:
+  `shards/shard_map.json`), stored in `OnceLock` statics.
+- Agent verb: `fetch-manifest` in `process_message` → `build_manifest`
+  (pure, testable): reads `PipelinePlan::load(shard_map_path)`, filters
+  `StageSpec` entries to the agent's own `--node`, opens each `.bmts` shard
+  to read tensor headers, returns `WeightShard` JSON (node + tensors[{name,
+  length}]).
+- Shell client: `fetch_manifest` / `fetch_manifest_with` in `agent_client.rs`
+  — signed line out, JSON `WeightShard` back.
+- Live weight discovery: in both `main.rs` and `ttyd.rs`, after boot-time
+  `load_weights`, loops over `config.node_addrs` calling `fetch_manifest`
+  to each agent; merges live responses into `scheduler.weights` (overriding
+  boot-time for agents that respond; keeping boot-time for agents that
+  don't).
+
+Gates (MET): cluster **185** · shell lib **81** (was 80) · agent **39**
+(was 38) · clippy `-D warnings` 0. Tests: `build_manifest` — synthetic
+shard_map + BMTS, node 1 returns two tensors, node 2 (missing shard)
+returns empty; `fetch_manifest_roundtrip` — loopback agent serving the
+verb, JSON parses into `WeightShard` correctly.
+
+**What this closes:** the entire Track C / avenue ladder is done. Every
+rung from the doctrine (§19.4a) through live multi-lane fetch (§19.4j)
+through self-describing weights (§19.4k) is committed. A head discovers
+its cluster's weights from the tails themselves, fetches tensor spans from
+any tail over whatever lanes are open, and the whole path runs over a
+650-line transport with zero framework dependencies. The avenue is
+complete.
+
+**Next:** Phase D — live inference. The pipeline runs over real agents
+(Track B full gate: B5 per-edge depth/batch, 9B Q6_K model + CUDA 12.8).
+The avenue feeds the engine.
+
 ### 19.5 Track B — ACTS v2 air-path (SwarmLLM borrow), full rungs
 
 | Rung | Work | Gate |

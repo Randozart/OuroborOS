@@ -181,6 +181,16 @@ impl TtySession {
             let (weights, _missing) = propositions::load_weights(&config.shard_map);
             scheduler.weights = weights;
         }
+        // Live weight discovery for this node.
+        for (_id, addr) in &config.node_addrs {
+            if let Ok(shard) = agent_client::fetch_manifest(addr) {
+                if !shard.tensors.is_empty() {
+                    let node = shard.node.clone();
+                    scheduler.weights.shards.retain(|s| s.node != node);
+                    scheduler.weights.shards.push(shard);
+                }
+            }
+        }
         Self {
             node: node.to_string(),
             wire,

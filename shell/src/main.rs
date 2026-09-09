@@ -475,6 +475,28 @@ fn main() -> Result<()> {
         }
     }
 
+    // Live weight discovery: ask each agent for its shard manifest.
+    // Overrides boot-time weights for agents that respond; keeps the
+    // boot-time data for agents that don't. This is how the cluster
+    // describes its own weights — no boot-time shard_map.json required
+    // on the head (the tails are the source of truth).
+    for (_id, addr) in &config.node_addrs {
+        match agent_client::fetch_manifest(addr) {
+            Ok(shard) => {
+                let node = shard.node.clone();
+                if !shard.tensors.is_empty() {
+                    // Remove old entry for this node, if any.
+                    scheduler.weights.shards.retain(|s| s.node != node);
+                    scheduler.weights.shards.push(shard);
+                    eprintln!("weights: live manifest from {node} ({} tensors)", scheduler.weights.for_node(&node).map(|s| s.tensors.len()).unwrap_or(0));
+                }
+            }
+            Err(e) => {
+                eprintln!("weights: live manifest from {addr} failed ({e:#}), keeping boot-time");
+            }
+        }
+    }
+
     if !node_addrs.is_empty() {
         println!("Probing {} nodes...", node_addrs.len());
         for (id, addr) in &node_addrs {

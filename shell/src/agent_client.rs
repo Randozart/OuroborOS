@@ -310,6 +310,25 @@ pub fn fetch_span_bonded(
     Ok(out)
 }
 
+/// Fetch the shard manifest from an agent — the live tensor census. Returns
+/// a `WeightShard` (node id + tensor names + byte lengths) that can be
+/// merged into `Scheduler.weights`. The agent must have been started with
+/// `--node <id>`.
+pub fn fetch_manifest(addr: &str) -> Result<ouro_cluster::weights::WeightShard> {
+    fetch_manifest_with(&cached_secret()?, addr)
+}
+
+/// `fetch_manifest` with an explicit secret (tests, multi-cluster tools).
+pub fn fetch_manifest_with(
+    secret: &Secret,
+    addr: &str,
+) -> Result<ouro_cluster::weights::WeightShard> {
+    let resp = send_raw_with(secret, addr, "fetch-manifest", Duration::from_secs(5))?;
+    let shard: ouro_cluster::weights::WeightShard = serde_json::from_str(&resp)
+        .with_context(|| format!("parse manifest from {} (raw {:?})", addr, &resp[..resp.len().min(80)]))?;
+    Ok(shard)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -575,5 +594,46 @@ mod tests {
         assert!(na > 0 && nb > 0, "striping must use every lane");
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The shard manifest: `fetch_manifest_with` talks to a minimal agent
+    /// that handles `fetch-manifest` by returning a JSON `WeightShard`,
+    /// and the bytes parse correctly into the struct.
+    #[test]
+    fn test_fetch_manifest_roundtrip() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        let server = thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let mut sock = stream;
+            let mut line = String::new();
+            let mut one = [0u8; 1];
+            while !line.ends_with('\n') {
+                sock.read_exact(&mut one).unwrap();
+                line.push(one[0] as char);
+            }
+            let (_seq, body) = auth::open_line(&KEY, line.trim()).unwrap();
+            assert_eq!(body, "fetch-manifest");
+            let resp = serde_json::json!({
+                "node": "n1",
+                "tensors": [
+                    { "name": "blk.0.attn_q.weight", "length": 512 },
+                    { "name": "blk.0.attn_k.weight", "length": 256 },
+                ]
+            });
+            let signed = auth::sign_line(&KEY, 1, &resp.to_string());
+            sock.write_all(signed.as_bytes()).unwrap();
+            sock.write_all(b"\n").unwrap();
+        });
+
+        let shard = fetch_manifest_with(&KEY, &addr).unwrap();
+        assert_eq!(shard.node, "n1");
+        assert_eq!(shard.tensors.len(), 2);
+        assert_eq!(shard.tensors[0].name, "blk.0.attn_q.weight");
+        assert_eq!(shard.tensors[0].length, 512);
+        assert_eq!(shard.tensors[1].name, "blk.0.attn_k.weight");
+        assert_eq!(shard.tensors[1].length, 256);
+
+        server.join().unwrap();
     }
 }

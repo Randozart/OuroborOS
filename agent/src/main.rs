@@ -20,11 +20,19 @@ use tokio::time::interval;
 
 const DEFAULT_PORT: u16 = 9500;
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(5);
+const DEFAULT_SHARD_MAP: &str = "shards/shard_map.json";
 
 /// WP-U4 rail: an update never yanks a running task (UPDATE_ROADMAP
 /// §rails). Set while a task executes; `update begin` is refused with
 /// `err busy` while it holds.
 static TASK_BUSY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Agent identity: set by `--node <id>` at startup. Required for the
+/// `fetch-manifest` verb (the agent must know which pipeline stage it is).
+static NODE_ID: std::sync::OnceLock<u16> = std::sync::OnceLock::new();
+
+/// Shard map path: set by `--shard-map <path>` (default: shards/shard_map.json).
+static SHARD_MAP: std::sync::OnceLock<String> = std::sync::OnceLock::new();
 
 /// Agent daemon entry point.
 ///
@@ -69,6 +77,25 @@ async fn main() -> Result<()> {
             });
         }
     }
+
+    // --node <id>: pipeline stage identity (required for fetch-manifest).
+    if let Some(i) = std::env::args().position(|a| a == "--node") {
+        if let Some(id) = std::env::args().nth(i + 1) {
+            match id.parse::<u16>() {
+                Ok(n) => { let _ = NODE_ID.set(n); }
+                Err(e) => eprintln!("[warn] --node {id}: not a valid u16: {e}"),
+            }
+        }
+    }
+
+    // --shard-map <path>: where to find the pipeline's shard map (default: shards/shard_map.json).
+    if let Some(i) = std::env::args().position(|a| a == "--shard-map") {
+        if let Some(path) = std::env::args().nth(i + 1) {
+            let _ = SHARD_MAP.set(path);
+        }
+    }
+    // Set default shard map if not overridden.
+    SHARD_MAP.get_or_init(|| DEFAULT_SHARD_MAP.to_string());
 
     if std::env::args().any(|a| a == "--stdio-tty") {
         // One process, two mouths: the login wire on stdio AND the TCP
@@ -518,6 +545,16 @@ fn process_message(msg: &str) -> String {
             Err(e) => format!(r#"{{"status":"error","error":"{e}"}}"#),
         }
     }
+    // Shard manifest: the head discovers this agent's tensor census
+    // live — no boot-time shard_map.json required (Track C, the
+    // self-describing cluster). The agent must have been started with
+    // `--node <id>` to respond; without one, it refuses.
+    else if trimmed == "fetch-manifest" {
+        match handle_fetch_manifest() {
+            Ok(json) => json,
+            Err(e) => format!(r#"{{"error":"{e}"}}"#),
+        }
+    }
     // Task execution
     else {
         match serde_json::from_str::<executor::Task>(trimmed) {
@@ -561,6 +598,69 @@ fn detect_wired_iface() -> String {
         }
     }
     String::new()
+}
+
+/// Build the shard manifest JSON for this agent's node. Reads the
+/// pipeline's shard map, filters to the stage assigned to `--node`,
+/// opens each `.bmts` shard file to read tensor headers, and returns
+/// a `WeightShard` JSON — the live census the head uses to populate
+/// `Scheduler.weights` without a boot-time shard_map.json.
+fn handle_fetch_manifest() -> Result<String> {
+    let node_id = NODE_ID
+        .get()
+        .ok_or_else(|| anyhow::anyhow!("agent started without --node; cannot serve manifest"))?;
+    let shard_map_path = SHARD_MAP.get()
+        .ok_or_else(|| anyhow::anyhow!("shard map path not set"))?;
+    build_manifest(*node_id, shard_map_path)
+}
+
+/// Pure inner: build the manifest from explicit parameters (testable
+/// without touching the `OnceLock` statics).
+fn build_manifest(node_id: u16, shard_map_path: &str) -> Result<String> {
+    use ouro_cluster::bmts::BmtsShard;
+    use ouro_cluster::pipeline::PipelinePlan;
+
+    let plan = PipelinePlan::load(shard_map_path)
+        .map_err(|e| anyhow::anyhow!("load shard map {}: {e:#}", shard_map_path))?;
+
+    let mut tensors: Vec<serde_json::Value> = Vec::new();
+
+    for stage in &plan.nodes {
+        if stage.node != node_id {
+            continue;
+        }
+        // The shard file path may be relative — resolve against the
+        // shard map's parent directory (the deployer's layout).
+        let shard_path = if std::path::Path::new(&stage.file).is_absolute() {
+            std::path::PathBuf::from(&stage.file)
+        } else {
+            let parent = std::path::Path::new(shard_map_path)
+                .parent()
+                .unwrap_or(std::path::Path::new("."));
+            parent.join(&stage.file)
+        };
+
+        let shard = match BmtsShard::open(shard_path.to_str().unwrap_or(&stage.file)) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("[manifest] open {}: {e:#}", shard_path.display());
+                continue;
+            }
+        };
+        for t in &shard.tensors {
+            tensors.push(serde_json::json!({
+                "name": t.name,
+                "length": t.length,
+            }));
+        }
+    }
+
+    let node_name = format!("n{}", node_id);
+    let out = serde_json::json!({
+        "node": node_name,
+        "tensors": tensors,
+    });
+    Ok(serde_json::to_string(&out)?)
 }
 
 #[cfg(test)]
@@ -666,5 +766,60 @@ mod tests {
     fn test_process_invalid() {
         let resp = process_message("not json");
         assert!(resp.contains("error"));
+    }
+
+    /// The shard manifest: a synthetic shard_map + BMTS file, the manifest
+    /// function reads the tensor census and returns it as JSON. Two nodes
+    /// in the map, only the requested one appears.
+    #[test]
+    fn test_build_manifest() {
+        use ouro_cluster::bmts::{write_shard, BmtsTensor};
+        use ouro_cluster::weights::WeightShard;
+
+        let dir = std::env::temp_dir().join(format!("ouro-manifest-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let shard_map_path = dir.join("shard_map.json");
+        let bmts_path = dir.join("shard_1.bmts");
+
+        // Write a BMTS shard with two tensors.
+        let data = vec![0u8; 1024];
+        write_shard(
+            bmts_path.to_str().unwrap(),
+            1,
+            &[
+                BmtsTensor { name: "blk.0.attn_q.weight".into(), shape: vec![16, 64], dtype: 34, offset: 0, length: 512 },
+                BmtsTensor { name: "blk.0.attn_k.weight".into(), shape: vec![16, 64], dtype: 34, offset: 512, length: 512 },
+            ],
+            &data,
+        )
+        .unwrap();
+
+        // Write shard_map.json referencing the BMTS (two nodes, we request node 1).
+        let map = serde_json::json!({
+            "model": "test",
+            "nodes": [
+                { "node": 1, "file": "shard_1.bmts", "layers": [0], "tensors": 2, "bytes": 1024 },
+                { "node": 2, "file": "shard_2.bmts", "layers": [1], "tensors": 0, "bytes": 0 },
+            ]
+        });
+        std::fs::write(&shard_map_path, serde_json::to_string(&map).unwrap()).unwrap();
+
+        // build_manifest for node 1 returns the two tensors.
+        let json = build_manifest(1, shard_map_path.to_str().unwrap()).unwrap();
+        let shard: WeightShard = serde_json::from_str(&json).unwrap();
+        assert_eq!(shard.node, "n1");
+        assert_eq!(shard.tensors.len(), 2);
+        assert_eq!(shard.tensors[0].name, "blk.0.attn_q.weight");
+        assert_eq!(shard.tensors[0].length, 512);
+        assert_eq!(shard.tensors[1].name, "blk.0.attn_k.weight");
+        assert_eq!(shard.tensors[1].length, 512);
+
+        // build_manifest for node 2 (missing shard file) → empty tensors.
+        let json2 = build_manifest(2, shard_map_path.to_str().unwrap()).unwrap();
+        let shard2: WeightShard = serde_json::from_str(&json2).unwrap();
+        assert_eq!(shard2.node, "n2");
+        assert!(shard2.tensors.is_empty());
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 }
