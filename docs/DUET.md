@@ -150,12 +150,18 @@ prompt + generated text draft K continuations; the model verifies.
 
 - `cluster/src/infer/qwen35.rs`: n-gram drafter + accept/reject loop on
   `Qwen35Model` (greedy longest-prefix acceptance)
-- **Honest engine limit**: the current engine steps one token at a time;
-  the classic spec-decode win (verify K in one batched pass) needs a
-  K-column matmul kernel where weight decode amortizes across positions
-  (`matmul_tl1` — memory-bound today, so batching K positions is up to K×
-  on the dominant cost). v1 lands the drafter + stepwise verify + lossless
-  gate; the batched kernel is the documented next step.
+- **Landed 2026-09-20 (batched verify)**: `matmul_tl1` K-column kernel
+  (decode once, K dots — pure-matmul 2x at K=8), batched layer path
+  (`run_layer_batched`: projections amortize, conv/recurrence/attention
+  cores stay sequential-causal), block verification with recurrent-state
+  snapshot/rollback (rejected drafts pollute delta-net state — restore
+  on partial accept), batched lm_head. **Gates**: batched == sequential
+  at cos 1.0000000 per position; speculative block stream token-identical
+  to greedy. **Measured**: verify(4) = 1.45x vs 4 sequential steps
+  end-to-end (sequential delta-net cores damp the 2x matmul win).
+  One real bug found by the equivalence gate: the batched lm_head
+  skipped the Hadamard pre-rotation the scalar path applies — caught at
+  cos 0.037, fixed, gate green.
 
 **Gates**: spec output stream token-identical to greedy stream (losslessness
 on this model, this prompt set); miss path changes nothing observable; hit

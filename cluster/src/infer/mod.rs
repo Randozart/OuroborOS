@@ -146,6 +146,26 @@ impl Stage {
         Ok(ops::matvec_q(w.payload.bytes(), w.kind, w.out_len, w.in_len, x))
     }
 
+    /// Batched matmul over K input vectors through one named tensor
+    /// (DUET P3 block verification: weight streams amortize across the
+    /// block). Returns K output vectors.
+    pub fn wmat_batched(&self, name: &str, xs: &[Vec<f32>]) -> Result<Vec<Vec<f32>>> {
+        let w = self
+            .tensors
+            .get(name)
+            .ok_or_else(|| anyhow::anyhow!("missing tensor {}", name))?;
+        let k = xs.len();
+        let mut flat = Vec::with_capacity(k * w.in_len);
+        for x in xs {
+            if w.in_len != x.len() {
+                bail!("tensor {}: in_len {} != x len {}", name, w.in_len, x.len());
+            }
+            flat.extend_from_slice(x);
+        }
+        let y = ops::matmul_q(w.payload.bytes(), w.kind, w.out_len, w.in_len, &flat, k);
+        Ok((0..k).map(|c| y[c * w.out_len..(c + 1) * w.out_len].to_vec()).collect())
+    }
+
     /// Embedding lookup: token row of `token_embd.weight` as f32.
     pub fn embed(&self, token: usize) -> Result<Vec<f32>> {
         let w = self.tensors.get("token_embd.weight")
@@ -242,6 +262,12 @@ impl Stage {
 
     pub fn logits_untied(&self, h: &[f32]) -> Result<Vec<f32>> {
         self.wm("output.weight", h)
+    }
+
+    /// Batched untied lm_head over K final hiddens (DUET P3): one ternary
+    /// weight stream, K dots. Returns K logit vectors.
+    pub fn logits_untied_batched(&self, hs: &[Vec<f32>]) -> Result<Vec<Vec<f32>>> {
+        self.wmat_batched("output.weight", hs)
     }
 
     /// Expose matrix apply for sub-family runners.

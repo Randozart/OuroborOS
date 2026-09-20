@@ -394,6 +394,105 @@ fn bonsai27_tokenizer_gates() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+/// DUET P3 kernel gates (docs/DUET.md):
+/// (a) batched verify_block == K sequential steps, position by position;
+/// (b) speculative block generation stream == greedy stream (lossless);
+/// (c) amortization measured honestly: verify_block(K) time vs K steps.
+#[test]
+#[ignore]
+fn bonsai27_block_verify_equivalence_and_speed() -> Result<(), Box<dyn std::error::Error>> {
+    let r = root();
+    std::env::set_current_dir(&r).unwrap();
+    if !std::path::Path::new("shards_bonsai27_n1/shard_1.bmts").exists() {
+        eprintln!("no shards");
+        return Ok(());
+    }
+
+    let load = || {
+        Qwen35Model::load(
+            &["shards_bonsai27_n1/shard_1.bmts"],
+            Card::load_dir("shards_bonsai27_n1").unwrap(),
+        )
+    };
+    let block = [9419usize, 11, 353, 2688]; // "Hello" "," " I" "'m"
+
+    // k=1 sanity: verify_block([t]) vs step(t) on fresh models
+    {
+        let mut m1 = load()?;
+        let mut m2 = load()?;
+        let h = m1.step(9419)?;
+        let l1 = m1.logits(&h)?;
+        let l2 = m2.verify_block(&[9419])?;
+        let d = l1
+            .iter()
+            .zip(&l2[0])
+            .fold(0.0f32, |m, (a, b)| m.max((a - b).abs()));
+        let n1: f32 = l1.iter().map(|v| v * v).sum();
+        eprintln!("k=1 verify vs step: max_delta={d:.5} (logit l2^2={n1:.1})");
+    }
+
+    // (a) equivalence: sequential steps vs one batched verify
+    let t_seq = std::time::Instant::now();
+    let mut seq = load()?;
+    let mut seq_logits: Vec<Vec<f32>> = Vec::new();
+    for &t in &block {
+        let h = seq.step(t)?;
+        seq_logits.push(seq.logits(&h)?);
+    }
+    let seq_dt = t_seq.elapsed().as_secs_f64();
+
+    let mut bat = load()?;
+    let t_bat = std::time::Instant::now();
+    let bat_logits = bat.verify_block(&block)?;
+    let bat_dt = t_bat.elapsed().as_secs_f64();
+
+    for (j, (s, b)) in seq_logits.iter().zip(&bat_logits).enumerate() {
+        let (mut d, mut na, mut nb) = (0.0f64, 0.0f64, 0.0f64);
+        for i in 0..s.len() {
+            let (x, y) = (s[i] as f64, b[i] as f64);
+            d += x * y;
+            na += x * x;
+            nb += y * y;
+        }
+        let c = (d / (na.sqrt() * nb.sqrt()).max(1e-30)) as f32;
+        let maxd = s.iter().zip(b).fold(0.0f32, |m, (a, b)| m.max((a - b).abs()));
+        eprintln!("pos {j}: logits cos={c:.7} max_delta={maxd:.5}");
+        assert!(c > 0.999, "batched position {j} diverged: cos {c}");
+    }
+    eprintln!(
+        "sequential 4 steps: {seq_dt:.2}s | batched verify(4): {bat_dt:.2}s ({:.2}x)",
+        seq_dt / bat_dt
+    );
+
+    // (b) losslessness: speculative block stream == greedy stream
+    let greedy = || -> Result<Vec<usize>, Box<dyn std::error::Error>> {
+        let mut m = load()?;
+        let mut tok = 9419usize;
+        let mut out = Vec::new();
+        for _ in 0..6 {
+            let h = m.step(tok)?;
+            let l = m.logits(&h)?;
+            tok = Qwen35Model::argmax(&l);
+            out.push(tok);
+        }
+        Ok(out)
+    };
+    let spec = || -> Result<(Vec<usize>, ouro_cluster::infer::qwen35::SpecStats), Box<dyn std::error::Error>> {
+        let mut m = load()?;
+        let mut drafter = ouro_cluster::infer::qwen35::PromptLookup::default();
+        // seed the drafter with the KNOWN continuation so drafts actually
+        // hit: this measures the accept path, not the cold table
+        drafter.observe(&[9419, 11, 353, 2688, 264, 5286, 303, 279]);
+        Ok(m.generate_speculative_block(9419, 6, &mut drafter, 4)?)
+    };
+    let g = greedy()?;
+    let (s, stats) = spec()?;
+    eprintln!("greedy: {g:?}");
+    eprintln!("spec:   {s:?} (hits {} misses {} no_draft {})", stats.hits, stats.misses, stats.no_draft);
+    assert_eq!(g, s, "speculative block decode must be lossless");
+    Ok(())
+}
+
 #[test]
 #[ignore] // heavy: 27B oracle + full forward pass
 fn bonsai27_oracle_diff() {
@@ -484,3 +583,79 @@ fn bonsai27_oracle_diff() {
     assert!(c > 0.999, "bonsai27 logit cos {c}");
     assert_eq!(rt, mt, "bonsai27 greedy token must match");
 }
+
+/// Isolation: per-layer, 4 sequential positions vs 1 batched call.
+#[test]
+#[ignore]
+fn bonsai27_layer_batched_isolation() -> Result<(), Box<dyn std::error::Error>> {
+    let r = root();
+    std::env::set_current_dir(&r).unwrap();
+    let load = || {
+        Qwen35Model::load(
+            &["shards_bonsai27_n1/shard_1.bmts"],
+            Card::load_dir("shards_bonsai27_n1").unwrap(),
+        )
+    };
+    let block = [9419usize, 11, 353, 2688];
+    let mut sa = load()?;
+    let mut sb = load()?;
+    let layers = sa.stages()[0].layers().to_vec();
+    // seed both with the same first token (embed only; run_layer takes normed input)
+    let mut xs_seq: Vec<Vec<f32>> = Vec::new();
+    let mut xs_bat: Vec<Vec<f32>> = Vec::new();
+    for &t in &block {
+        xs_seq.push(sa.stages_mut()[0].embed(t)?);
+        xs_bat.push(sb.stages_mut()[0].embed(t)?);
+    }
+    for il in layers {
+        // sequential: 4 run_layer calls (pos 0..3)
+        let mut outs_seq = Vec::new();
+        for (j, x) in xs_seq.iter().enumerate() {
+            outs_seq.push(sa.stages_mut()[0].run_layer(il, x, j)?);
+        }
+        // batched: one call
+        let outs_bat = sb.stages_mut()[0].run_layer_batched(il, &xs_bat.clone(), 0)?;
+        let mut worst = (0.0f32, 0usize);
+        for (j, (o1, o2)) in outs_seq.iter().zip(&outs_bat).enumerate() {
+            let d: f32 = o1.iter().zip(o2).map(|(p, q)| (p - q).abs()).fold(0.0f32, f32::max);
+            if d > worst.0 {
+                worst = (d, j);
+            }
+        }
+        if worst.0 > 1e-2 {
+            eprintln!("layer {il}: worst abs delta {:.4} at pos {} — FIRST DIVERGENCE", worst.0, worst.1);
+            return Ok(());
+        }
+        xs_seq = outs_seq;
+        xs_bat = outs_bat;
+    }
+    eprintln!("all layers match across 4 positions (sequential == batched)");
+    // output norm + batched lm_head on the final positions
+    let last = sa.stages().len() - 1;
+    let mut h_seq = Vec::new();
+    let mut h_bat = Vec::new();
+    for x in &xs_seq {
+        h_seq.push(sa.stages()[last].inner.apply_output_norm(x)?);
+    }
+    for x in &xs_bat {
+        h_bat.push(sb.stages()[last].inner.apply_output_norm(x)?);
+    }
+    for j in 0..4 {
+        let d = h_seq[j]
+            .iter()
+            .zip(&h_bat[j])
+            .fold(0.0f32, |m, (a, b)| m.max((a - b).abs()));
+        eprintln!("hidden[{j}] max_delta = {d:.6}");
+    }
+    let l_seq = sb.stages()[last].inner.logits_untied(&h_seq[0])?;
+    let l_bat = &sb.stages()[last].inner.logits_untied_batched(&h_bat)?[0];
+    let d = l_seq
+        .iter()
+        .zip(l_bat)
+        .fold(0.0f32, |m, (a, b)| m.max((a - b).abs()));
+    eprintln!("logits[0] max_delta = {d:.5}");
+    Ok(())
+}
+
+
+

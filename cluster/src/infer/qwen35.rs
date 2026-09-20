@@ -804,6 +804,247 @@ impl Qwen35Stage {
         self.inner.wmat(&format!("blk.{}.ffn_down.weight", il), &ad)
     }
 
+    // ---- DUET P3: batched (K-position) layer path for block verify ----
+
+    /// Hadamard-rotate K activations.
+    fn wh_batched(&self, xs: &[Vec<f32>]) -> Result<Vec<Vec<f32>>> {
+        xs.iter().map(|x| self.wh(x)).collect()
+    }
+
+    /// Batched FFN over K positions.
+    fn run_ffn_batched(&self, il: u32, fs: &[Vec<f32>]) -> Result<Vec<Vec<f32>>> {
+        let fh = self.wh_batched(fs)?;
+        let ups = self.inner.wmat_batched(&format!("blk.{}.ffn_up.weight", il), &fh)?;
+        let gates = self.inner.wmat_batched(&format!("blk.{}.ffn_gate.weight", il), &fh)?;
+        let acts: Vec<Vec<f32>> = gates
+            .iter()
+            .zip(&ups)
+            .map(|(g, u)| g.iter().zip(u).map(|(g, u)| silu(*g) * u).collect())
+            .collect();
+        let ads = self.wh_batched(&acts)?;
+        self.inner.wmat_batched(&format!("blk.{}.ffn_down.weight", il), &ads)
+    }
+
+    /// Batched gated-delta layer over K positions: projections amortize;
+    /// the conv + recurrence cores stay sequential (causal by nature).
+    fn run_delta_batched(&mut self, il: u32, hs: &[Vec<f32>]) -> Result<Vec<Vec<f32>>> {
+        let c = self.card.clone();
+        let p = &c.ssm;
+        let hv = p.n_v_heads;
+        let hk = p.n_k_heads;
+        let hd = c.head_v_dim();
+        let kd = p.d_state;
+        let channels = p.d_inner + 2 * hk * kd;
+        let k = hs.len();
+
+        let qkv_ins = self.wh_batched(hs)?;
+        let qkvs = self
+            .inner
+            .wmat_batched(&format!("blk.{}.attn_qkv.weight", il), &qkv_ins)?;
+        let zs = self
+            .inner
+            .wmat_batched(&format!("blk.{}.attn_gate.weight", il), &qkv_ins)?;
+        let betas = self.inner.wmat_batched(&format!("blk.{}.ssm_beta.weight", il), hs)?;
+        let alphas = self.inner.wmat_batched(&format!("blk.{}.ssm_alpha.weight", il), hs)?;
+        let dt_bias = self.inner.vec_gain(&format!("blk.{}.ssm_dt.bias", il))?;
+        let a_log = self.inner.vec_gain(&format!("blk.{}.ssm_a", il))?;
+        let conv_w = self.inner.vec_gain(&format!("blk.{}.ssm_conv1d.weight", il))?;
+        let norm_w = self.inner.vec_gain(&format!("blk.{}.ssm_norm.weight", il))?;
+
+        let di = hk * kd;
+        let scale = 1.0 / (kd as f32).sqrt();
+        let slot = self
+            .delta
+            .iter_mut()
+            .find(|(l, _)| *l == il)
+            .map(|(_, d)| d as *mut DeltaRuntime);
+        // Safety: single &mut self; raw pointer avoids double-borrow of fields
+        let d = unsafe { &mut *slot.unwrap() };
+
+        let mut outs = Vec::with_capacity(k);
+        for j in 0..k {
+            let beta: Vec<f32> = betas[j].iter().map(|b| 1.0 / (1.0 + (-b).exp())).collect();
+            let gate: Vec<f32> = (0..hv)
+                .map(|i| a_log[i] * softplus(alphas[j][i] + dt_bias[i]))
+                .collect();
+            let mut conv_out = vec![0.0f32; channels];
+            for ch_i in 0..channels {
+                let w: [f32; 4] = [
+                    conv_w[ch_i * 4],
+                    conv_w[ch_i * 4 + 1],
+                    conv_w[ch_i * 4 + 2],
+                    conv_w[ch_i * 4 + 3],
+                ];
+                let y = conv_step(&mut d.conv[ch_i], &w, qkvs[j][ch_i]);
+                conv_out[ch_i] = silu(y);
+            }
+            let mut o = vec![0.0f32; p.d_inner];
+            for v_i in 0..hv {
+                let k_i = v_i % hk;
+                let mut qh: Vec<f32> = conv_out[k_i * kd..(k_i + 1) * kd].to_vec();
+                let mut kh: Vec<f32> = conv_out[di + k_i * kd..di + (k_i + 1) * kd].to_vec();
+                let vh = &conv_out[2 * di + v_i * hd..2 * di + (v_i + 1) * hd];
+                l2_norm(&mut qh, c.eps);
+                l2_norm(&mut kh, c.eps);
+                let qs: Vec<f32> = qh.iter().map(|x| x * scale).collect();
+                let st_start = v_i * hd * hd;
+                let st = &mut d.heads[st_start..st_start + hd * hd];
+                let sp = DeltaStep { gate: gate[v_i], beta: beta[v_i] };
+                delta_head_dim(st, hd, &qs, &kh, vh, sp, &mut o[v_i * hd..(v_i + 1) * hd]);
+            }
+            let mut gated = vec![0.0f32; p.d_inner];
+            for v_i in 0..hv {
+                let y = gated_norm_rms(
+                    &o[v_i * hd..(v_i + 1) * hd],
+                    &norm_w,
+                    &zs[j][v_i * hd..(v_i + 1) * hd],
+                    c.eps,
+                );
+                gated[v_i * hd..(v_i + 1) * hd].copy_from_slice(&y);
+            }
+            let gated_in: Vec<f32> = match &self.had {
+                Some(h) if h.gdn_v_grouped => {
+                    let nk = p.n_k_heads;
+                    let rep = hv / nk;
+                    let mut g = vec![0.0f32; p.d_inner];
+                    for kk in 0..nk {
+                        for r in 0..rep {
+                            let src = (r * nk + kk) * hd;
+                            let dst = kk * rep * hd + r * hd;
+                            g[dst..dst + hd].copy_from_slice(&gated[src..src + hd]);
+                        }
+                    }
+                    g
+                }
+                _ => gated,
+            };
+            outs.push(gated_in);
+        }
+        let gated_rots = self.wh_batched(&outs)?;
+        self.inner
+            .wmat_batched(&format!("blk.{}.ssm_out.weight", il), &gated_rots)
+    }
+
+    /// Batched full attention over K positions: projections amortize;
+    /// norms/RoPE/KV-append/attention core stay sequential (causal).
+    fn run_attn_batched(&mut self, il: u32, hs: &[Vec<f32>], pos: usize) -> Result<Vec<Vec<f32>>> {
+        let c = self.card.clone();
+        let nh = c.n_head;
+        let nkv = c.n_head_kv;
+        let hd = c.attn_head_dim();
+        let qdim = nh * hd;
+        let k = hs.len();
+
+        let hrs = self.wh_batched(hs)?;
+        let qfulls = self
+            .inner
+            .wmat_batched(&format!("blk.{}.attn_q.weight", il), &hrs)?;
+        let qn = self.inner.vec_gain(&format!("blk.{}.attn_q_norm.weight", il))?;
+        let kn = self.inner.vec_gain(&format!("blk.{}.attn_k_norm.weight", il))?;
+        let ks = self
+            .inner
+            .wmat_batched(&format!("blk.{}.attn_k.weight", il), &hrs)?;
+        let vs = self
+            .inner
+            .wmat_batched(&format!("blk.{}.attn_v.weight", il), &hrs)?;
+
+        let slot = self
+            .attn
+            .iter_mut()
+            .find(|(l, _)| *l == il)
+            .map(|(_, a)| a as *mut AttnKv);
+        let a = unsafe { &mut *slot.unwrap() };
+
+        let mut outs = Vec::with_capacity(k);
+        for j in 0..k {
+            let qfull = &qfulls[j];
+            let mut q = vec![0.0f32; qdim];
+            let mut gate = vec![0.0f32; qdim];
+            for hi in 0..nh {
+                let mut qh = qfull[hi * hd * 2..hi * hd * 2 + hd].to_vec();
+                let gh = &qfull[hi * hd * 2 + hd..hi * hd * 2 + hd * 2];
+                let y = rmsnorm_head(&qh, &qn, c.eps);
+                qh.copy_from_slice(&y);
+                q[hi * hd..(hi + 1) * hd].copy_from_slice(&qh);
+                gate[hi * hd..(hi + 1) * hd].copy_from_slice(gh);
+            }
+            let mut kk = ks[j].clone();
+            let v = &vs[j];
+            for hi in 0..nkv {
+                let y = rmsnorm_head(&kk[hi * hd..(hi + 1) * hd], &kn, c.eps);
+                kk[hi * hd..(hi + 1) * hd].copy_from_slice(&y);
+            }
+            let p_j = pos + j;
+            for hi in 0..nh {
+                rope_partial_neox(&mut q[hi * hd..(hi + 1) * hd], p_j, c.n_rot, c.rope_base);
+            }
+            for hi in 0..nkv {
+                rope_partial_neox(&mut kk[hi * hd..(hi + 1) * hd], p_j, c.n_rot, c.rope_base);
+            }
+            a.k.extend_from_slice(&kk);
+            a.v.extend_from_slice(v);
+            a.seq += 1;
+
+            let ctx = AttnCtx {
+                hd,
+                kv_dim: nkv * hd,
+                scale: 1.0 / (hd as f32).sqrt(),
+                seq: a.seq,
+                k: &a.k,
+                v: &a.v,
+            };
+            let mut o = vec![0.0f32; qdim];
+            for hi in 0..nh {
+                attn_head(
+                    &q[hi * hd..(hi + 1) * hd],
+                    &ctx,
+                    hi / (nh / nkv),
+                    &mut o[hi * hd..(hi + 1) * hd],
+                )?;
+            }
+            for i in 0..qdim {
+                o[i] *= 1.0 / (1.0 + (-gate[i]).exp());
+            }
+            outs.push(o);
+        }
+        let o_rots = self.wh_batched(&outs)?;
+        self.inner
+            .wmat_batched(&format!("blk.{}.attn_output.weight", il), &o_rots)
+    }
+
+    /// Batched layer over K positions (docs/DUET.md P3 block verify).
+    /// Must agree with K sequential `run_layer` calls (equivalence gate).
+    pub fn run_layer_batched(
+        &mut self,
+        il: u32,
+        xs: &[Vec<f32>],
+        pos: usize,
+    ) -> Result<Vec<Vec<f32>>> {
+        let c = self.card.clone();
+        let attn_norm = self.inner.vec_gain(&format!("blk.{}.attn_norm.weight", il))?;
+        let hs: Vec<Vec<f32>> = xs.iter().map(|x| rmsnorm(x, &attn_norm, c.eps)).collect();
+        let me = self;
+        let os = if c.is_delta(il as usize) {
+            me.run_delta_batched(il, &hs)?
+        } else {
+            me.run_attn_batched(il, &hs, pos)?
+        };
+        let inner = &me.inner;
+        let post = inner.vec_gain(&format!("blk.{}.post_attention_norm.weight", il))?;
+        let pres: Vec<Vec<f32>> = xs
+            .iter()
+            .zip(&os)
+            .map(|(x, o)| (0..c.n_embd).map(|i| x[i] + o[i]).collect())
+            .collect();
+        let fs: Vec<Vec<f32>> = pres.iter().map(|pre| rmsnorm(pre, &post, c.eps)).collect();
+        let ffns = me.run_ffn_batched(il, &fs)?;
+        Ok(pres
+            .iter()
+            .zip(&ffns)
+            .map(|(pre, ffn)| (0..c.n_embd).map(|i| pre[i] + ffn[i]).collect())
+            .collect())
+    }
+
     fn run_delta(&mut self, il: u32, h: &[f32]) -> Result<Vec<f32>> {
         let c = self.card.clone();
         let p = &c.ssm;
@@ -1006,6 +1247,13 @@ fn rmsnorm_head(x: &[f32], w: &[f32], eps: f32) -> Vec<f32> {
     rmsnorm(x, w, eps)
 }
 
+/// Captured recurrent state for speculative rollback (DUET P3).
+struct StateSnapshot {
+    delta: Vec<Vec<(u32, DeltaRuntime)>>,
+    attn: Vec<Vec<(u32, AttnKv)>>,
+    pos: usize,
+}
+
 /// Multi-stage qwen35 pipeline model (local orchestration; TCP later).
 pub struct Qwen35Model {
     pub card: Card,
@@ -1100,6 +1348,145 @@ impl Qwen35Model {
 
     pub fn argmax(logits: &[f32]) -> usize {
         crate::infer::finite_argmax(logits)
+    }
+
+    /// Snapshot all recurrent state (delta runtimes + KV caches). Cheap
+    /// relative to a block verify (~150 MB clone vs ~seconds of compute).
+    fn snapshot_states(&self) -> StateSnapshot {
+        StateSnapshot {
+            delta: self.stages.iter().map(|s| s.delta.clone()).collect(),
+            attn: self.stages.iter().map(|s| s.attn.clone()).collect(),
+            pos: self.pos,
+        }
+    }
+
+    fn restore_states(&mut self, snap: StateSnapshot) {
+        for (s, delta) in self.stages.iter_mut().zip(snap.delta) {
+            s.delta = delta;
+        }
+        for (s, attn) in self.stages.iter_mut().zip(snap.attn) {
+            s.attn = attn;
+        }
+        self.pos = snap.pos;
+    }
+
+    /// Verify a block of K tokens in ONE batched pass: embeddings and layer
+    /// matmuls amortize the ternary weight stream across positions. Returns
+    /// full logits per position (position j = distribution after consuming
+    /// tokens[..=j]). State (KV, delta, pos) is ADVANCED by K — the caller
+    /// rolls back via `restore_states` on speculative rejection.
+    pub fn verify_block(&mut self, tokens: &[usize]) -> Result<Vec<Vec<f32>>> {
+        let pos = self.current_pos();
+        let mut xs: Vec<Vec<f32>> = Vec::with_capacity(tokens.len());
+        for &t in tokens {
+            xs.push(self.stages[0].embed(t)?);
+        }
+        for s in self.stages.as_mut_slice() {
+            let layers = s.layers().to_vec();
+            for il in layers {
+                xs = s.run_layer_batched(il, &xs, pos)?;
+            }
+        }
+        let last = self.stages.len() - 1;
+        if self.stages[last].inner.output_norm_present() {
+            xs = xs
+                .iter()
+                .map(|x| self.stages[last].inner.apply_output_norm(x))
+                .collect::<Result<_>>()?;
+        }
+        self.pos = pos + tokens.len();
+
+        // batched lm_head: one weight stream, K dots — with the Hadamard
+        // pre-rotation the scalar logits path applies (wh then untied matmul)
+        let head_stage = self
+            .stages
+            .iter()
+            .rev()
+            .find(|s| s.inner.has_output_head())
+            .ok_or_else(|| anyhow::anyhow!("no lm_head in stages"))?;
+        let rots = head_stage.wh_batched(&xs)?;
+        head_stage.inner.logits_untied_batched(&rots)
+    }
+
+    /// Speculative greedy generation v2: draft K continuations from the
+    /// n-gram table, verify the whole block in one batched pass, accept the
+    /// longest greedy-matching prefix, roll back recurrent state on
+    /// rejection. Emitted stream is IDENTICAL to plain greedy (the
+    /// accepted tokens ARE greedy argmaxes at their positions; rejected
+    /// tails roll back to a clean snapshot and recompute).
+    pub fn generate_speculative_block(
+        &mut self,
+        first: usize,
+        n: usize,
+        drafter: &mut PromptLookup,
+        k: usize,
+    ) -> Result<(Vec<usize>, SpecStats)> {
+        let mut stats = SpecStats::default();
+        let mut emitted: Vec<usize> = Vec::with_capacity(n);
+        let mut history: Vec<usize> = vec![first];
+        let mut tok = first;
+        let eos = self.tokenizer.as_ref().and_then(|t| t.eos()).map(|e| e as usize);
+
+        while emitted.len() < n {
+            drafter.observe_token(tok);
+            let drafts = drafter.draft(&history, k.saturating_sub(1));
+            if drafts.is_empty() {
+                // no draft: single greedy step
+                let h = self.step(tok)?;
+                let l = self.logits(&h)?;
+                let g = Self::argmax(&l);
+                emitted.push(g);
+                history.push(g);
+                stats.no_draft += 1;
+                tok = g;
+                if Some(g) == eos {
+                    break;
+                }
+                continue;
+            }
+
+            // block = [cur] + drafts (K positions)
+            let k_eff = (drafts.len() + 1).min(k);
+            let block: Vec<usize> = std::iter::once(tok)
+                .chain(drafts.iter().take(k_eff - 1).map(|&d| d as usize))
+                .collect();
+            let snap = self.snapshot_states();
+            let pos_before = self.pos;
+            let logits_per_pos = self.verify_block(&block)?;
+
+            // greedy argmax per position; accept longest matching prefix
+            let argmaxes: Vec<usize> =
+                logits_per_pos.iter().map(|l| Self::argmax(l)).collect();
+            let mut accept = 0usize; // accepted draft positions
+            while accept < argmaxes.len() - 1
+                && argmaxes[accept] == block[accept + 1]
+            {
+                accept += 1;
+            }
+            // emit g0..g_accept (the verified greedy tokens)
+            for gi in argmaxes.iter().take(accept + 1) {
+                if emitted.len() < n {
+                    emitted.push(*gi);
+                    history.push(*gi);
+                }
+            }
+            stats.hits += accept;
+            stats.misses += (argmaxes.len() - 1).saturating_sub(accept);
+
+            if accept + 1 < block.len() {
+                // rejection: roll recurrent state back to the block start;
+                // the next iteration feeds the verified greedy token cleanly.
+                self.restore_states(snap);
+            } else {
+                debug_assert_eq!(self.pos, pos_before + block.len());
+            }
+            let g_last = argmaxes[accept];
+            tok = g_last;
+            if Some(g_last) == eos || emitted.len() >= n {
+                break;
+            }
+        }
+        Ok((emitted, stats))
     }
 
     pub fn logits(&self, h: &[f32]) -> Result<Vec<f32>> {

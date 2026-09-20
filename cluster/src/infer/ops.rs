@@ -153,6 +153,138 @@ pub fn matvec_f16(payload: &[u8], out_len: usize, in_len: usize, x: &[f32]) -> V
     y
 }
 
+/// y = W · X with K columns sharing each weight row — the batched decode
+/// that makes speculative block-verification profitable: the dominant cost
+/// is streaming ternary weights, and K columns amortize that stream K-fold.
+///
+/// `x` is row-major [k, in_len]; returns column-major [k × out_len]
+/// (y[c * out_len + r]).
+pub fn matmul_tl1(payload: &[u8], out_len: usize, in_len: usize, x: &[f32], k: usize) -> Vec<f32> {
+    use super::dequant::PTQ1_GROUP_ELEMS;
+    debug_assert_eq!(x.len(), k * in_len, "x must be [k, in_len]");
+    let groups_per_row = in_len / PTQ1_GROUP_ELEMS;
+    let mut y = vec![0.0f32; k * out_len];
+    let nt = mt_threads().min(out_len).max(1);
+    let chunk = out_len.div_ceil(nt);
+    let simd = have_tl1_avx2();
+    std::thread::scope(|sc| {
+        let mut handles = Vec::with_capacity(nt);
+        for ci in 0..nt {
+            let base = ci * chunk;
+            let rows: Vec<usize> = (base..(base + chunk).min(out_len)).collect();
+            if rows.is_empty() {
+                continue;
+            }
+            handles.push(sc.spawn(move || {
+                let mut scratch = vec![0.0f32; rows.len() * k];
+                let args = KArgs {
+                    payload,
+                    rows: &rows,
+                    scratch: scratch.as_mut_slice(),
+                    groups_per_row,
+                    x,
+                    in_len,
+                    k,
+                };
+                if simd {
+                    #[cfg(target_arch = "x86_64")]
+                    unsafe {
+                        tl1_rows_avx2_k(args);
+                    }
+                    #[cfg(not(target_arch = "x86_64"))]
+                    {
+                        let _ = (&payload, groups_per_row, x, in_len, k, base);
+                    }
+                } else {
+                    tl1_rows_scalar_k(args);
+                }
+                (rows, scratch)
+            }));
+        }
+        // scatter row-major scratch [rows × k] into column-major y
+        for h in handles {
+            let (rows, scratch) = h.join().expect("tl1 k-worker panicked");
+            for (j, &row) in rows.iter().enumerate() {
+                for c in 0..k {
+                    y[c * out_len + row] = scratch[j * k + c];
+                }
+            }
+        }
+    });
+    y
+}
+
+/// y = W · X for any kind; TL1 gets the fused K-column kernel, everything
+/// else falls back to K matvecs (correct, unamortized).
+pub fn matmul_q(payload: &[u8], kind: QuantKind, out_len: usize, in_len: usize, x: &[f32], k: usize) -> Vec<f32> {
+    match kind {
+        QuantKind::Tl1 => matmul_tl1(payload, out_len, in_len, x, k),
+        _ => {
+            let mut y = Vec::with_capacity(k * out_len);
+            for c in 0..k {
+                y.extend(matvec_q(payload, kind, out_len, in_len, &x[c * in_len..(c + 1) * in_len]));
+            }
+            y
+        }
+    }
+}
+
+/// Kernel argument bundle (shared by scalar + SSE K-column paths).
+struct KArgs<'a> {
+    payload: &'a [u8],
+    rows: &'a [usize],
+    scratch: &'a mut [f32],
+    groups_per_row: usize,
+    x: &'a [f32],
+    in_len: usize,
+    k: usize,
+}
+
+/// Scalar K-column path: decode each group once, dot against every column.
+fn tl1_rows_scalar_k(a: KArgs<'_>) {
+    use super::dequant::{PTQ1_GROUP_BYTES, PTQ1_GROUP_ELEMS, PTQ1_POW3};
+    let KArgs { payload, rows, scratch, groups_per_row, x, in_len, k } = a;
+    let mut sums = vec![0.0f32; k];
+    for (j, &row) in rows.iter().enumerate() {
+        let row_base = row * groups_per_row * PTQ1_GROUP_BYTES;
+        sums.iter_mut().for_each(|s| *s = 0.0);
+        for g in 0..groups_per_row {
+            let gb = row_base + g * PTQ1_GROUP_BYTES;
+            let d = f16_to_f32(u16::from_le_bytes([payload[gb + 26], payload[gb + 27]]));
+            let qs = &payload[gb..gb + 24];
+            let qh = &payload[gb + 24..gb + 26];
+            let xb = g * PTQ1_GROUP_ELEMS;
+            for (c, s) in sums.iter_mut().enumerate() {
+                let xc = &x[c * in_len..(c + 1) * in_len];
+                let mut acc = *s;
+                for n in 0..5 {
+                    let pn = PTQ1_POW3[n];
+                    for m in 0..16 {
+                        let q = qs[m].wrapping_mul(pn);
+                        let t = ((((q as u16) * 3) >> 8) as i8 - 1) as f32 * d;
+                        acc += t * xc[xb + n * 16 + m];
+                    }
+                    for m in 0..8 {
+                        let q = qs[16 + m].wrapping_mul(pn);
+                        let t = ((((q as u16) * 3) >> 8) as i8 - 1) as f32 * d;
+                        acc += t * xc[xb + 80 + n * 8 + m];
+                    }
+                }
+                for n in 0..4 {
+                    let pn = PTQ1_POW3[n];
+                    for m in 0..2 {
+                        let q = qh[m].wrapping_mul(pn);
+                        let t = ((((q as u16) * 3) >> 8) as i8 - 1) as f32 * d;
+                        acc += t * xc[xb + 120 + n * 2 + m];
+                    }
+                }
+                *s = acc;
+            }
+        }
+        scratch[j * k..j * k + k].copy_from_slice(&sums);
+    }
+}
+
 /// y = W * x with TL1 (PTQ1_0) ternary weights.
 ///
 /// Fuses dequant + dot product: trits never touch memory, the zero branch is
@@ -236,6 +368,115 @@ fn tl1_rows_scalar(payload: &[u8], blk: &mut [f32], groups_per_row: usize, x: &[
 fn have_tl1_avx2() -> bool {
     static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *V.get_or_init(|| is_x86_feature_detected!("sse4.1"))
+}
+
+/// SSE4.1 K-column fused decode+dot over `rows` (docs/DUET.md P3 batched
+/// verify). Identical digit pipeline to `digits8`; the decoded f32 pairs
+/// are FMA'd against every x column, so the weight stream amortizes K-fold.
+///
+/// # Safety
+/// Same bounds contract as `tl1_rows_avx2`; requires sse4.1 (caller checks).
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "sse4.1")]
+unsafe fn tl1_rows_avx2_k(a: KArgs<'_>) {
+    #![allow(clippy::needless_range_loop)]
+    let KArgs { payload, rows, scratch, groups_per_row, x, in_len, k } = a;
+
+    use super::dequant::{PTQ1_GROUP_BYTES, PTQ1_GROUP_ELEMS, PTQ1_POW3};
+    use std::arch::x86_64::*;
+
+    #[inline]
+    #[target_feature(enable = "sse4.1")]
+    unsafe fn decode8(p: *const u8, boff: usize, pn: i16) -> (__m128, __m128) {
+        let b = _mm_loadl_epi64(p.add(boff) as *const __m128i);
+        let w = _mm_unpacklo_epi8(b, _mm_setzero_si128());
+        let mut q = _mm_mullo_epi16(w, _mm_set1_epi16(pn));
+        q = _mm_and_si128(q, _mm_set1_epi16(0xFF));
+        q = _mm_mullo_epi16(q, _mm_set1_epi16(3));
+        q = _mm_srli_epi16(q, 8);
+        q = _mm_sub_epi16(q, _mm_set1_epi16(1));
+        let flo = _mm_cvtepi32_ps(_mm_cvtepi16_epi32(q));
+        let fhi = _mm_cvtepi32_ps(_mm_cvtepi16_epi32(_mm_unpackhi_epi64(q, q)));
+        (flo, fhi)
+    }
+
+    #[inline]
+    #[target_feature(enable = "sse4.1")]
+    unsafe fn hsum(v: __m128) -> f32 {
+        let s = _mm_add_ps(v, _mm_movehl_ps(v, v));
+        let s = _mm_add_ss(s, _mm_shuffle_ps(s, s, 1));
+        _mm_cvtss_f32(s)
+    }
+
+    // K 4-lane accumulators (lo|hi halves per column)
+    let mut acc = vec![_mm_setzero_ps(); 2 * k];
+    for (j, &row) in rows.iter().enumerate() {
+        let row_base = row * groups_per_row * PTQ1_GROUP_BYTES;
+        for a in acc.iter_mut() {
+            *a = _mm_setzero_ps();
+        }
+        for g in 0..groups_per_row {
+            let gb = row_base + g * PTQ1_GROUP_BYTES;
+            let d = f16_to_f32(u16::from_le_bytes([payload[gb + 26], payload[gb + 27]]));
+            let dv = _mm_set1_ps(d);
+            let qs = payload.as_ptr().add(gb);
+            let xg = g * PTQ1_GROUP_ELEMS;
+            for n in 0..5 {
+                let pn = PTQ1_POW3[n] as i16;
+                let (lo0, hi0) = decode8(qs, 0, pn);
+                let (lo1, hi1) = decode8(qs, 8, pn);
+                let (lo2, hi2) = decode8(qs, 16, pn);
+                for c in 0..k {
+                    let xp = x.as_ptr().add(c * in_len + xg);
+                    acc[2 * c] = _mm_add_ps(
+                        _mm_mul_ps(_mm_mul_ps(lo0, dv), _mm_loadu_ps(xp.add(n * 16))),
+                        acc[2 * c],
+                    );
+                    acc[2 * c + 1] = _mm_add_ps(
+                        _mm_mul_ps(_mm_mul_ps(hi0, dv), _mm_loadu_ps(xp.add(n * 16 + 4))),
+                        acc[2 * c + 1],
+                    );
+                    acc[2 * c] = _mm_add_ps(
+                        _mm_mul_ps(_mm_mul_ps(lo1, dv), _mm_loadu_ps(xp.add(n * 16 + 8))),
+                        acc[2 * c],
+                    );
+                    acc[2 * c + 1] = _mm_add_ps(
+                        _mm_mul_ps(_mm_mul_ps(hi1, dv), _mm_loadu_ps(xp.add(n * 16 + 12))),
+                        acc[2 * c + 1],
+                    );
+                    acc[2 * c] = _mm_add_ps(
+                        _mm_mul_ps(_mm_mul_ps(lo2, dv), _mm_loadu_ps(xp.add(80 + n * 8))),
+                        acc[2 * c],
+                    );
+                    acc[2 * c + 1] = _mm_add_ps(
+                        _mm_mul_ps(_mm_mul_ps(hi2, dv), _mm_loadu_ps(xp.add(80 + n * 8 + 4))),
+                        acc[2 * c + 1],
+                    );
+                }
+            }
+            // qh tail: elements 120 + n*2 + h (8 trits, scalar)
+            let qh = qs.add(24);
+            for n in 0..4 {
+                for m in 0..2 {
+                    let q = qh.add(m).read().wrapping_mul(PTQ1_POW3[n]);
+                    let t = ((((q as u16) * 3) >> 8) as i8 - 1) as f32 * d;
+                    for c in 0..k {
+                        sum_tail_col(scratch, j, k, c, t * x[c * in_len + xg + 120 + n * 2 + m]);
+                    }
+                }
+            }
+        }
+        for c in 0..k {
+            scratch[j * k + c] += unsafe { hsum(acc[2 * c]) + hsum(acc[2 * c + 1]) };
+        }
+    }
+}
+
+/// Accumulate the scalar qh-tail contribution for column c.
+#[cfg(target_arch = "x86_64")]
+#[inline]
+fn sum_tail_col(scratch: &mut [f32], j: usize, k: usize, c: usize, v: f32) {
+    scratch[j * k + c] += v;
 }
 
 #[cfg(not(target_arch = "x86_64"))]
@@ -474,6 +715,85 @@ mod tests {
         let sum: f32 = y.iter().sum();
         eprintln!("matvec_tl1 {out_len}x{in_len}: {dt:.2}s ({:.1} MB/s)", (payload.len() as f64) / 1e6 / dt);
         assert!(y.len() == out_len && sum.is_finite());
+    }
+
+    #[test]
+    fn test_matmul_tl1_k_columns_matches_matvec() {
+        use super::super::dequant::tl1_group;
+        let (out_len, in_len, k) = (97usize, 384usize, 4usize);
+        let groups = in_len / 128;
+        let row_bytes = groups * 28;
+        let mut payload = vec![0u8; out_len * row_bytes];
+        for (i, b) in payload.iter_mut().enumerate() {
+            *b = (i as u32).wrapping_mul(0x9B ^ (i as u32 >> 5)) as u8;
+        }
+        for g in payload.chunks_exact_mut(28) {
+            g[26] = 0x10;
+            g[27] = 0x38;
+        }
+        let x: Vec<f32> = (0..k * in_len)
+            .map(|i| ((i % 11) as f32 - 5.0) * 0.25)
+            .collect();
+
+        let batched = matmul_tl1(&payload, out_len, in_len, &x, k);
+        for c in 0..k {
+            let want = matvec_tl1(&payload, out_len, in_len, &x[c * in_len..(c + 1) * in_len]);
+            for r in 0..out_len {
+                let got = batched[c * out_len + r];
+                assert!(
+                    (got - want[r]).abs() <= 1e-3 * want[r].abs().max(1.0),
+                    "col {c} row {r}: {got} vs {}", want[r]
+                );
+            }
+        }
+        let _ = tl1_group; // reference decode exercised via matvec_tl1
+    }
+
+    /// Throughput probe: the K-amortization the whole point rests on.
+    #[test]
+    #[ignore]
+    fn bench_matmul_tl1_amortization() {
+        let (out_len, in_len) = (248320usize, 5120usize);
+        let row_bytes = (in_len / 128) * 28;
+        let mut payload = vec![0u8; out_len * row_bytes];
+        for (i, b) in payload.iter_mut().enumerate() {
+            *b = (i as u32 ^ (i as u32 >> 13)).wrapping_mul(0x9E) as u8;
+        }
+        for g in payload.chunks_exact_mut(28) {
+            g[26] = 0x00;
+            g[27] = 0x3c;
+        }
+        for k in [1usize, 4, 8] {
+            let x: Vec<f32> = (0..k * in_len)
+                .map(|i| ((i % 13) as f32 - 6.0) * 0.1)
+                .collect();
+            let t = std::time::Instant::now();
+            let y = matmul_tl1(&payload, out_len, in_len, &x, k);
+            let dt = t.elapsed().as_secs_f64();
+            eprintln!(
+                "matmul_tl1 k={k}: {dt:.2}s ({:.0} tok-equiv/s)",
+                k as f64 / dt
+            );
+            assert_eq!(y.len(), k * out_len);
+        }
+    }
+
+    #[test]
+    fn test_matmul_q_fallback_matches() {
+        // f16 kind falls back to K matvecs; must agree with matvec_f16
+        let (out_len, in_len) = (16usize, 32usize);
+        // NaN-free payload: f16 = truncated top bits of tame f32 values
+        let mut payload = Vec::with_capacity(out_len * in_len * 2);
+        for i in 0..out_len * in_len {
+            let v = ((i % 17) as f32 - 8.0) * 0.25;
+            payload.extend_from_slice(&v.to_bits().to_le_bytes()[..2]);
+        }
+        let x: Vec<f32> = (0..2 * in_len).map(|i| (i % 7) as f32 * 0.5).collect();
+        let y = matmul_q(&payload, QuantKind::F16, out_len, in_len, &x, 2);
+        for c in 0..2 {
+            let want = matvec_f16(&payload, out_len, in_len, &x[c * in_len..(c + 1) * in_len]);
+            assert_eq!(&y[c * out_len..(c + 1) * out_len], &want[..]);
+        }
     }
 
     /// Fused decode+dot must agree with the reference `tl1_group` decode.
