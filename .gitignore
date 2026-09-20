@@ -24,3 +24,9 @@ keys/update.signing.key
 # tools/shard_model.py + ouro-bmts upgrade; never commit gigabytes.
 shards_bonsai27_n*/
 *.duet-staging
+
+# capnp C++ validation artifacts
+capnp/*.c++
+capnp/*.h
+schemas/*.c++
+schemas/*.h

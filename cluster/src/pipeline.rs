@@ -22,8 +22,27 @@ pub const ACTS_MAGIC: u32 = 0x4F55524F;
 pub const ACTS_VERSION: u8 = 1;
 /// Frame type code for activations.
 pub const FRAME_ACTIVATION: u8 = 0;
+/// Frame type code for DUET speculative announcements (docs/DUET.md P2):
+/// same header; the "payload" is a single u64 state hash. The receiver
+/// recomputes the activation locally (same binary, same order = bit-exact)
+/// and compares; a hit skips the payload entirely, a miss NACKs and the
+/// sender resends the full activation frame.
+pub const FRAME_SPECULATIVE: u8 = 1;
 /// Fixed header size: magic4 ver1 type1 seq4 pos4 lstart4 lend4 count4.
 pub const ACTS_HEADER_LEN: usize = 26;
+/// Payload size of a speculative frame: one u64 hash.
+pub const SPEC_HASH_LEN: usize = 8;
+
+/// SipHash-13 (fixed key) over the LE-encoded f32 activation. Deterministic
+/// across runs and processes on the same binary — the DUET fingerprint.
+pub fn state_hash(data: &[f32]) -> u64 {
+    use std::hash::Hasher;
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    for v in data {
+        h.write(&v.to_le_bytes());
+    }
+    h.finish()
+}
 
 /// An activation tensor moving between pipeline stages.
 #[derive(Debug, Clone, PartialEq)]
@@ -51,6 +70,54 @@ impl Activation {
             out.extend_from_slice(&v.to_le_bytes());
         }
         out
+    }
+
+    /// Encode a DUET speculative announcement for this activation: same
+    /// header, `n_elems = 0`, payload = the u64 state hash.
+    pub fn encode_speculative(&self, hash: u64) -> Vec<u8> {
+        let mut out = Vec::with_capacity(ACTS_HEADER_LEN + SPEC_HASH_LEN);
+        out.extend_from_slice(&ACTS_MAGIC.to_le_bytes());
+        out.push(ACTS_VERSION);
+        out.push(FRAME_SPECULATIVE);
+        out.extend_from_slice(&self.sequence.to_le_bytes());
+        out.extend_from_slice(&self.token_pos.to_le_bytes());
+        out.extend_from_slice(&self.layer_start.to_le_bytes());
+        out.extend_from_slice(&self.layer_end.to_le_bytes());
+        out.extend_from_slice(&0u32.to_le_bytes()); // no payload floats
+        out.extend_from_slice(&hash.to_le_bytes());
+        out
+    }
+
+    /// Decode a speculative announcement into its identifying metadata +
+    /// announced hash. The caller recomputes locally and compares.
+    pub fn decode_speculative(bytes: &[u8]) -> Result<(Self, u64)> {
+        if bytes.len() < ACTS_HEADER_LEN + SPEC_HASH_LEN {
+            bail!("speculative ACTS frame too short: {} bytes", bytes.len());
+        }
+        let u32_at = |off: usize| u32::from_le_bytes(bytes[off..off + 4].try_into().unwrap());
+        if u32_at(0) != ACTS_MAGIC {
+            bail!("bad ACTS magic {:#010x}", u32_at(0));
+        }
+        if bytes[4] != ACTS_VERSION {
+            bail!("unsupported ACTS version {}", bytes[4]);
+        }
+        if bytes[5] != FRAME_SPECULATIVE {
+            bail!("not a speculative frame (type {})", bytes[5]);
+        }
+        if u32_at(22) != 0 {
+            bail!("speculative frame with nonzero n_elems");
+        }
+        let meta = Self {
+            sequence: u32_at(6),
+            token_pos: u32_at(10),
+            layer_start: u32_at(14),
+            layer_end: u32_at(18),
+            data: Vec::new(),
+        };
+        let hash = u64::from_le_bytes(
+            bytes[ACTS_HEADER_LEN..ACTS_HEADER_LEN + SPEC_HASH_LEN].try_into().unwrap(),
+        );
+        Ok((meta, hash))
     }
 
     /// Decode ACTS v1 wire bytes.
@@ -199,6 +266,76 @@ mod tests {
     #[test]
     fn test_plan_empty_rejected() {
         assert!(PipelinePlan::from_json(r#"{"model":"m","nodes":[]}"#).is_err());
+    }
+
+    // ---- DUET P2: speculative ACTS (docs/DUET.md) ----
+
+    fn lcg_activation(seq: u32, n: usize) -> Activation {
+        let mut s = seq | 1;
+        let data = (0..n)
+            .map(|_| {
+                s = s.wrapping_mul(1664525).wrapping_add(1013904223);
+                ((s >> 8) as i32 as f32 - 8388608.0) / 8388608.0
+            })
+            .collect();
+        Activation { sequence: seq, token_pos: seq, layer_start: 0, layer_end: 16, data }
+    }
+
+    /// The determinism contract: same binary replaying the same sequence
+    /// must produce identical activations — 1000/1000 speculative hits.
+    #[test]
+    fn test_speculative_thousand_token_replay_all_hit() {
+        // "sender" produces; "receiver" independently recomputes.
+        let hits = (0..1000u32)
+            .filter(|&seq| {
+                let a = lcg_activation(seq, 5120);
+                let announced = state_hash(&lcg_activation(seq, 5120).data);
+                let (meta, hash) = Activation::decode_speculative(&a.encode_speculative(announced))
+                    .unwrap();
+                let local = lcg_activation(meta.sequence, 5120);
+                state_hash(&local.data) == hash
+            })
+            .count();
+        assert_eq!(hits, 1000, "same-binary replay must hit every time");
+    }
+
+    /// A one-ULP flip must be caught: miss → NACK → full payload fallback →
+    /// the final stream is exact (speculation fails, never lies).
+    #[test]
+    fn test_speculative_ulp_flip_misses_and_fallback_is_exact() {
+        let a = lcg_activation(42, 5120);
+        let announced = state_hash(&a.data);
+
+        // Receiver's local copy: one value nudged by one ULP.
+        let mut local = a.data.clone();
+        local[0] = f32::from_bits(local[0].to_bits() + 1);
+        let (_, hash) =
+            Activation::decode_speculative(&a.encode_speculative(announced)).unwrap();
+        assert_ne!(state_hash(&local), hash, "ULP flip must be caught");
+
+        // Fallback: full frame resends; the stream becomes exact.
+        let full = Activation::decode(&a.encode()).unwrap();
+        let stream: Vec<f32> = local.iter().enumerate().map(|(i, _)| {
+            if i == 0 { full.data[0] } else { local[i] }
+        }).collect();
+        assert_eq!(state_hash(&stream), announced, "post-fallback stream exact");
+    }
+
+    #[test]
+    fn test_speculative_roundtrip_and_rejects() {
+        let a = lcg_activation(7, 16);
+        let bytes = a.encode_speculative(0xDEADBEEFCAFEBABE);
+        assert_eq!(bytes.len(), ACTS_HEADER_LEN + SPEC_HASH_LEN);
+        let (meta, hash) = Activation::decode_speculative(&bytes).unwrap();
+        assert_eq!(meta.sequence, 7);
+        assert_eq!(hash, 0xDEADBEEFCAFEBABE);
+
+        // a FULL frame must not decode as speculative
+        assert!(Activation::decode_speculative(&a.encode()).is_err());
+        // truncated spec frame refused
+        assert!(Activation::decode_speculative(&bytes[..bytes.len() - 1]).is_err());
+        // garbage refused
+        assert!(Activation::decode_speculative(&[0u8; 40]).is_err());
     }
 }
 

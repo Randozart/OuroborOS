@@ -25,6 +25,10 @@ pub enum FrameClass {
     Bulk,
     /// State snapshots / rebind acks — duplicate for survivability.
     Critical,
+    /// DUET quiet-wire reconciliation (docs/DUET.md P1.5) — degradable:
+    /// rides the lane nobody wants (highest cost), rate-limited, dropped
+    /// wholesale while a pipeline stream is live (ReconcileGate).
+    Reconcile,
 }
 
 /// Which lane(s) a frame of a given class rides. Both names refer to a
@@ -79,12 +83,71 @@ pub fn schedule(class: FrameClass, edges: &[PricedEdge], stripe_round: usize) ->
                 secondary: None,
             }
         }
+        FrameClass::Reconcile => {
+            // The quiet wire: deliberately the WORST lane (highest cost) —
+            // the fast lanes stay reserved for token traffic.
+            let mut ordered: Vec<&PricedEdge> = edges.iter().collect();
+            ordered.sort_by_key(|e| lane_cost(e));
+            LaneChoice {
+                primary: ordered.last().map(|e| e.iface.clone()),
+                secondary: None,
+            }
+        }
     }
 }
 
 /// The lowest-cost (latency + jitter) lane.
 fn cheapest(edges: &[PricedEdge]) -> Option<&PricedEdge> {
     edges.iter().min_by_key(|e| lane_cost(e))
+}
+
+/// Token bucket + pause gate for the degradable Reconcile class
+/// (docs/DUET.md guard 1): reconciliation never contends with token hops.
+/// While `paused` (a pipeline stream is live), every send is refused —
+/// quiet frames die first under load, by design.
+pub struct ReconcileGate {
+    /// Bytes currently permitted.
+    tokens: f64,
+    /// Bucket size (burst ceiling).
+    capacity: f64,
+    /// Refill rate in bytes/sec.
+    refill_per_sec: f64,
+    last_refill: std::time::Instant,
+    /// Set while a latency-critical stream is active.
+    paused: bool,
+}
+
+impl ReconcileGate {
+    pub fn new(capacity: u64, refill_per_sec: u64) -> Self {
+        Self {
+            tokens: capacity as f64,
+            capacity: capacity as f64,
+            refill_per_sec: refill_per_sec as f64,
+            last_refill: std::time::Instant::now(),
+            paused: false,
+        }
+    }
+
+    /// A pipeline stream started/stopped — reconciliation hard-stops.
+    pub fn set_paused(&mut self, paused: bool) {
+        self.paused = paused;
+    }
+
+    /// May `bytes` go on the wire right now? Consumes tokens when yes.
+    pub fn allow(&mut self, bytes: u64) -> bool {
+        if self.paused {
+            return false;
+        }
+        let elapsed = self.last_refill.elapsed().as_secs_f64();
+        self.last_refill = std::time::Instant::now();
+        self.tokens = (self.tokens + elapsed * self.refill_per_sec).min(self.capacity);
+        if self.tokens >= bytes as f64 {
+            self.tokens -= bytes as f64;
+            true
+        } else {
+            false
+        }
+    }
 }
 
 /// One authenticated frame channel on a lane (docs/AIR_PATH.md §4.2).
@@ -288,6 +351,28 @@ mod tests {
     }
 
     /// `Bond::send` with no lanes refuses, never panics.
+    #[test]
+    fn test_reconcile_picks_the_worst_lane() {
+        // The quiet wire rides the lane nobody wants: highest cost (air).
+        let choice = schedule(FrameClass::Reconcile, &edges(), 0);
+        assert_eq!(choice.primary.as_deref(), Some("wlan0"));
+        let choice = schedule(FrameClass::Reconcile, &edges(), 3);
+        assert_eq!(choice.primary.as_deref(), Some("wlan0"), "stable, not striped");
+    }
+
+    #[test]
+    fn test_reconcile_gate_paused_and_budget() {
+        let mut gate = ReconcileGate::new(1000, 100); // 1KB burst, 100 B/s
+        assert!(gate.allow(500), "burst budget available");
+        assert!(!gate.allow(600), "over remaining tokens");
+        gate.set_paused(true);
+        assert!(!gate.allow(1), "paused = nothing rides the wire");
+        gate.set_paused(false);
+        assert!(!gate.allow(600), "refill is slow; tokens not restored yet");
+        std::thread::sleep(std::time::Duration::from_millis(120));
+        assert!(gate.allow(12), "100 B/s x 120ms = 12 bytes refilled");
+    }
+
     #[test]
     fn test_bond_no_lanes_refuses() {
         let mut bond = Bond::new();

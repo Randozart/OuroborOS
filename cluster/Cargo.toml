@@ -3,6 +3,13 @@ name = "ouro-cluster"
 version.workspace = true
 edition.workspace = true
 
+[features]
+default = ["capnp2"]
+# BMTS v2 (Cap'n Proto metadata). Requires the `capnp` tool at build time
+# (`pacman -S capnproto`); build with --no-default-features on hosts
+# without it (v1 JSON shards keep working either way).
+capnp2 = ["dep:capnp"]
+
 [dependencies]
 anyhow.workspace = true
 memmap2 = "0.9"
@@ -14,6 +21,10 @@ sha2.workspace = true
 ed25519-dalek.workspace = true
 rand_core.workspace = true
 libc.workspace = true
+capnp = { version = "0.27", optional = true }
 
 [build-dependencies]
 cc = "1"
+# build-script-only: links into build.rs (no capnp tool needed to compile,
+# only to RUN the codegen under the capnp2 feature)
+capnpc = "0.27"
