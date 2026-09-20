@@ -113,6 +113,113 @@ pub fn delta_q_scale() -> f32 {
 mod tests {
     use super::*;
 
+    /// Cap'n Proto card round-trip: every field survives the schema.
+    #[cfg(feature = "capnp2")]
+    #[test]
+    fn card_capnp_roundtrip() {
+        let card = Card {
+            architecture: "qwen35".into(),
+            n_layer: 64,
+            n_embd: 5120,
+            n_head: 24,
+            n_head_kv: 4,
+            n_ff: 17408,
+            n_vocab: 248320,
+            head_dim: 256,
+            eps: 1e-6,
+            rope_base: 1e7,
+            n_rot: 64,
+            full_attention_interval: 4,
+            nextn: 0,
+            draft_layers: Some((64, 65)),
+            draft_node: Some(2),
+            ssm: SsmParams {
+                conv_kernel: 4,
+                d_state: 128,
+                n_k_heads: 16,
+                n_v_heads: 48,
+                d_inner: 6144,
+            },
+            hadamard: Some(HadamardCfg {
+                block_size: 1024,
+                sign_widths: vec![5120, 6144, 17408],
+                signs: vec![-1, 1, -1, 1],
+                gdn_v_grouped: true,
+            }),
+        };
+        let bytes = card.to_capnp().unwrap();
+        let back = Card::from_capnp(&bytes).unwrap();
+        assert_eq!(card, back, "capnp roundtrip must be lossless");
+    }
+
+    #[cfg(feature = "capnp2")]
+    #[test]
+    fn card_capnp_roundtrip_no_hadamard_no_draft() {
+        let card = Card {
+            architecture: "bitnet".into(),
+            n_layer: 30,
+            n_embd: 2560,
+            n_head: 20,
+            n_head_kv: 5,
+            n_ff: 6912,
+            n_vocab: 128256,
+            head_dim: 0,
+            eps: 1e-5,
+            rope_base: 5e5,
+            n_rot: 128,
+            full_attention_interval: 1,
+            nextn: 0,
+            draft_layers: None,
+            draft_node: None,
+            ssm: SsmParams {
+                conv_kernel: 0,
+                d_state: 0,
+                n_k_heads: 0,
+                n_v_heads: 0,
+                d_inner: 0,
+            },
+            hadamard: None,
+        };
+        let bytes = card.to_capnp().unwrap();
+        let back = Card::from_capnp(&bytes).unwrap();
+        assert_eq!(card, back);
+    }
+
+    /// Rung B1 gate (docs/AIR_PATH.md Track B): the model card must carry the
+    /// draft-head placement the sharder emits; old cards load unchanged.
+    #[test]
+    fn card_parses_draft_fields() {
+        let json = r#"{
+            "architecture": "qwen35",
+            "n_layer": 65, "n_embd": 5120, "n_head": 40, "n_head_kv": 8,
+            "n_ff": 17408, "n_vocab": 248320, "eps": 1e-5, "rope_base": 1e7,
+            "n_rot": 64, "full_attention_interval": 4, "nextn": 1,
+            "ssm": {"conv_kernel": 4, "d_state": 128, "n_k_heads": 16, "n_v_heads": 48, "d_inner": 6144},
+            "keep_layers": 64,
+            "draft_layers": [64, 64],
+            "draft_node": 1
+        }"#;
+        let card: Card = serde_json::from_str(json).unwrap();
+        assert!(card.has_draft());
+        assert_eq!(card.draft_layers, Some((64, 64)));
+        assert_eq!(card.draft_node, Some(1));
+    }
+
+    #[test]
+    fn old_card_without_draft_still_loads() {
+        let json = r#"{
+            "architecture": "bitnet",
+            "n_layer": 30, "n_embd": 2048, "n_head": 16, "n_head_kv": 16,
+            "n_ff": 8192, "n_vocab": 150000, "eps": 1e-5, "rope_base": 10000,
+            "n_rot": 0, "full_attention_interval": 1, "nextn": 0,
+            "ssm": {"conv_kernel": 0, "d_state": 0, "n_k_heads": 0, "n_v_heads": 0, "d_inner": 0}
+        }"#;
+        let card: Card = serde_json::from_str(json).unwrap();
+        assert!(!card.has_draft());
+        assert_eq!(card.draft_layers, None);
+        assert_eq!(card.draft_node, None);
+    }
+
     #[test]
     fn test_delta_head_decay_only_when_beta_zero() {
         let mut state = vec![0.5f32; S * S];
@@ -217,12 +324,13 @@ mod tests {
 // ---------------------------------------------------------------------------
 
 use crate::bmts::BmtsShard;
+use crate::infer::hadamard;
 use crate::infer::ops::{rmsnorm, silu, softmax};
 use crate::infer::Stage;
 use anyhow::Result;
 use serde::Deserialize;
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, PartialEq)]
 pub struct SsmParams {
     pub conv_kernel: usize,
     pub d_state: usize,
@@ -231,8 +339,21 @@ pub struct SsmParams {
     pub d_inner: usize,
 }
 
+/// PrismML Hadamard-fold metadata (`hadamard.json`, from prism.hadamard.* KV).
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct HadamardCfg {
+    pub block_size: usize,
+    /// Sign-vector widths; one slice per distinct folded input dimension.
+    pub sign_widths: Vec<usize>,
+    /// Flat ±1 values, concatenation of per-width slices.
+    pub signs: Vec<i32>,
+    /// GDN V-grouped ssm_out feature order (perm_rep > 1 in the fork).
+    #[serde(default)]
+    pub gdn_v_grouped: bool,
+}
+
 /// model.json emitted by tools/shard_model.py
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, PartialEq)]
 pub struct Card {
     pub architecture: String,
     pub n_layer: usize,
@@ -248,15 +369,37 @@ pub struct Card {
     pub n_rot: usize,
     pub full_attention_interval: usize,
     pub nextn: usize,
+    /// MTP draft-head layer range (inclusive), if the sharder kept it.
+    /// Track B (docs/AIR_PATH.md): the draft lives on the brain node.
+    #[serde(default)]
+    pub draft_layers: Option<(usize, usize)>,
+    #[serde(default)]
+    pub draft_node: Option<usize>,
     pub ssm: SsmParams,
+    /// Hadamard fold (PTQ1_0 exports); absent for non-folded checkpoints.
+    #[serde(default)]
+    pub hadamard: Option<HadamardCfg>,
 }
 
 impl Card {
     pub fn load(path: &str) -> Result<Self> {
         Ok(serde_json::from_str(&std::fs::read_to_string(path)?)?)
     }
+
+    /// Load `model.json` from a shard dir, attaching `hadamard.json` when present.
+    pub fn load_dir(dir: &str) -> Result<Self> {
+        let mut card = Self::load(&format!("{dir}/model.json"))?;
+        if let Ok(s) = std::fs::read_to_string(format!("{dir}/hadamard.json")) {
+            card.hadamard = Some(serde_json::from_str(&s)?);
+        }
+        Ok(card)
+    }
     pub fn head_v_dim(&self) -> usize {
-        self.ssm.d_inner / self.ssm.n_v_heads
+        if self.ssm.n_v_heads == 0 {
+            0
+        } else {
+            self.ssm.d_inner / self.ssm.n_v_heads
+        }
     }
     pub fn attn_head_dim(&self) -> usize {
         if self.head_dim > 0 {
@@ -269,6 +412,11 @@ impl Card {
     /// true if layer il uses gated delta-net, false = full attention
     pub fn is_delta(&self, il: usize) -> bool {
         !(il + 1).is_multiple_of(self.full_attention_interval)
+    }
+
+    /// Whether the sharder kept an MTP draft head for the brain node.
+    pub fn has_draft(&self) -> bool {
+        self.draft_layers.is_some() && self.draft_node.is_some()
     }
 
     /// Tied-head fallback allowed only for families without untied export.
@@ -288,6 +436,120 @@ impl Card {
             rope_base: self.rope_base,
             n_vocab: self.n_vocab,
         }
+    }
+
+    /// Cap'n Proto serialization (BMTS v2 track, schemas/model.capnp).
+    /// Field-for-field with the serde card; keep in sync when Card grows.
+    #[cfg(feature = "capnp2")]
+    pub fn to_capnp(&self) -> Result<Vec<u8>> {
+        let mut msg = capnp::message::Builder::new_default();
+        let mut root = msg.init_root::<crate::model_capnp::model_card::Builder>();
+        root.set_architecture(&self.architecture);
+        root.set_n_layer(self.n_layer as u32);
+        root.set_n_embd(self.n_embd as u32);
+        root.set_n_head(self.n_head as u32);
+        root.set_n_head_kv(self.n_head_kv as u32);
+        root.set_n_ff(self.n_ff as u32);
+        root.set_n_vocab(self.n_vocab as u32);
+        root.set_eps(self.eps);
+        root.set_rope_base(self.rope_base);
+        root.set_n_rot(self.n_rot as u32);
+        root.set_head_dim(self.head_dim as u32);
+        root.set_head_v_dim(self.head_v_dim() as u32);
+        root.set_full_attention_interval(self.full_attention_interval as u32);
+        root.set_nextn(self.nextn as u32);
+
+        let mut ssm = root.reborrow().init_ssm();
+        ssm.set_conv_kernel(self.ssm.conv_kernel as u32);
+        ssm.set_d_state(self.ssm.d_state as u32);
+        ssm.set_n_k_heads(self.ssm.n_k_heads as u32);
+        ssm.set_n_v_heads(self.ssm.n_v_heads as u32);
+        ssm.set_d_inner(self.ssm.d_inner as u32);
+
+        if let Some(h) = &self.hadamard {
+            let mut hroot = root.reborrow().init_hadamard();
+            hroot.set_block_size(h.block_size as u32);
+            let mut widths = hroot.reborrow().init_sign_widths(h.sign_widths.len() as u32);
+            for (i, &w) in h.sign_widths.iter().enumerate() {
+                widths.set(i as u32, w as u32);
+            }
+            let mut signs = hroot.reborrow().init_signs(h.signs.len() as u32);
+            for (i, &s) in h.signs.iter().enumerate() {
+                signs.set(i as u32, s as i8);
+            }
+            hroot.set_gdn_v_grouped(h.gdn_v_grouped);
+        }
+
+        if let Some((a, b)) = self.draft_layers {
+            root.set_has_draft(true);
+            root.set_draft_layer_start(a as u32);
+            root.set_draft_layer_end(b as u32);
+        }
+        if let Some(n) = self.draft_node {
+            root.set_draft_node(n as u16);
+        }
+
+        Ok(capnp::serialize::write_message_to_words(&msg))
+    }
+
+    /// Inverse of `to_capnp`.
+    #[cfg(feature = "capnp2")]
+    pub fn from_capnp(bytes: &[u8]) -> Result<Self> {
+        let reader = capnp::serialize::read_message_from_flat_slice(
+            &mut &bytes[..],
+            capnp::message::ReaderOptions::new(),
+        )?;
+        let root = reader.get_root::<crate::model_capnp::model_card::Reader>()?;
+
+        let ssm_r = root.get_ssm()?;
+        let ssm = SsmParams {
+            conv_kernel: ssm_r.get_conv_kernel() as usize,
+            d_state: ssm_r.get_d_state() as usize,
+            n_k_heads: ssm_r.get_n_k_heads() as usize,
+            n_v_heads: ssm_r.get_n_v_heads() as usize,
+            d_inner: ssm_r.get_d_inner() as usize,
+        };
+        let hadamard = if root.has_hadamard() {
+            let h = root.get_hadamard()?;
+            Some(HadamardCfg {
+                block_size: h.get_block_size() as usize,
+                sign_widths: h.get_sign_widths()?.iter().map(|w| w as usize).collect(),
+                signs: h.get_signs()?.iter().map(|s| s as i32).collect(),
+                gdn_v_grouped: h.get_gdn_v_grouped(),
+            })
+        } else {
+            None
+        };
+        let draft_layers = if root.get_has_draft() {
+            Some((root.get_draft_layer_start() as usize, root.get_draft_layer_end() as usize))
+        } else {
+            None
+        };
+        let draft_node = if root.get_draft_node() != 0 {
+            Some(root.get_draft_node() as usize)
+        } else {
+            None
+        };
+
+        Ok(Card {
+            architecture: root.get_architecture()?.to_str()?.to_string(),
+            n_layer: root.get_n_layer() as usize,
+            n_embd: root.get_n_embd() as usize,
+            n_head: root.get_n_head() as usize,
+            n_head_kv: root.get_n_head_kv() as usize,
+            n_ff: root.get_n_ff() as usize,
+            n_vocab: root.get_n_vocab() as usize,
+            head_dim: root.get_head_dim() as usize,
+            eps: root.get_eps(),
+            rope_base: root.get_rope_base(),
+            n_rot: root.get_n_rot() as usize,
+            full_attention_interval: root.get_full_attention_interval() as usize,
+            nextn: root.get_nextn() as usize,
+            draft_layers,
+            draft_node,
+            ssm,
+            hadamard,
+        })
     }
 }
 
@@ -309,10 +571,57 @@ pub struct AttnKv {
     pub seq: usize,
 }
 
+/// Parsed Hadamard runtime: f32 signs ready for `hadamard::rotate_*`.
+#[derive(Debug, Clone)]
+struct HadRuntime {
+    block: usize,
+    widths: Vec<usize>,
+    signs: Vec<f32>,
+    gdn_v_grouped: bool,
+}
+
+impl HadRuntime {
+    fn from_cfg(cfg: &HadamardCfg) -> Self {
+        Self {
+            block: cfg.block_size,
+            widths: cfg.sign_widths.clone(),
+            signs: cfg.signs.iter().map(|&i| i as f32).collect(),
+            gdn_v_grouped: cfg.gdn_v_grouped,
+        }
+    }
+
+    /// Offset of the sign slice whose width matches `len`.
+    fn offset_for(&self, len: usize) -> Result<usize> {
+        let mut acc = 0usize;
+        for &w in &self.widths {
+            if w == len {
+                return Ok(acc);
+            }
+            acc += w;
+        }
+        anyhow::bail!("no hadamard sign slice for width {len}")
+    }
+
+    /// Activation-side (build_lora_mm): x' = H·(s ∘ x).
+    fn rotate_fwd_for(&self, x: &mut [f32]) -> Result<()> {
+        let off = self.offset_for(x.len())?;
+        hadamard::rotate_fwd(x, &self.signs[off..off + x.len()], self.block);
+        Ok(())
+    }
+
+    /// Embedding-side (post-lookup): h = s ∘ (H·z).
+    fn rotate_inv_for(&self, x: &mut [f32]) -> Result<()> {
+        let off = self.offset_for(x.len())?;
+        hadamard::rotate_inv(x, &self.signs[off..off + x.len()], self.block);
+        Ok(())
+    }
+}
+
 /// One pipeline stage of a qwen35 model.
 pub struct Qwen35Stage {
     pub card: Card,
     pub inner: Stage,
+    had: Option<HadRuntime>,
     delta: Vec<(u32, DeltaRuntime)>,
     attn: Vec<(u32, AttnKv)>,
     pub seq: usize,
@@ -352,12 +661,25 @@ impl Qwen35Stage {
             .filter(|&&l| !card.is_delta(l as usize))
             .map(|&l| (l, AttnKv::default()))
             .collect();
+        let had = card.hadamard.as_ref().map(HadRuntime::from_cfg);
         Ok(Self {
-            card, inner, delta, attn, seq: 0,
+            card, inner, had, delta, attn, seq: 0,
             tap: false,
             last_qkv: None, last_conv_out: None, last_q: None, last_beta: None,
             last_gate: None, last_delta_o: None, last_state: None, last_delta_out: None,
         })
+    }
+
+    /// Hadamard-rotate an activation for folded weights; identity without fold.
+    fn wh(&self, x: &[f32]) -> Result<Vec<f32>> {
+        match &self.had {
+            None => Ok(x.to_vec()),
+            Some(h) => {
+                let mut v = x.to_vec();
+                h.rotate_fwd_for(&mut v)?;
+                Ok(v)
+            }
+        }
     }
 
     pub fn layers(&self) -> &[u32] {
@@ -385,8 +707,13 @@ impl Qwen35Stage {
         self.inner.tensors.contains_key("token_embd.weight")
     }
 
+    /// Embedding lookup; un-rotates the Hadamard-latent row when present.
     pub fn embed(&self, token: usize) -> Result<Vec<f32>> {
-        self.inner.row("token_embd.weight", token)
+        let mut row = self.inner.row("token_embd.weight", token)?;
+        if let Some(h) = &self.had {
+            h.rotate_inv_for(&mut row)?;
+        }
+        Ok(row)
     }
 
     /// Run this stage's whole slice at absolute position `pos`.
@@ -410,7 +737,7 @@ impl Qwen35Stage {
     /// Greedy sample if this stage owns an lm_head (untied or tied).
     pub fn sample(&self, h: &[f32]) -> Result<Option<usize>> {
         if self.inner.has_output_head() {
-            let l = self.inner.logits_untied(h)?;
+            let l = self.logits(h)?;
             return Ok(Some(crate::infer::finite_argmax(&l)));
         }
         if self.inner.has_head() && self.card.tie_fallback() {
@@ -418,6 +745,12 @@ impl Qwen35Stage {
             return Ok(Some(crate::infer::finite_argmax(&l)));
         }
         Ok(None)
+    }
+
+    /// Logits via untied `output.weight`, rotating `h` into the folded basis.
+    pub fn logits(&self, h: &[f32]) -> Result<Vec<f32>> {
+        let hr = self.wh(h)?;
+        self.inner.logits_untied(&hr)
     }
 
     pub fn head_kind(&self) -> &'static str {
@@ -448,8 +781,18 @@ impl Qwen35Stage {
         let post = inner.vec_gain(&format!("blk.{}.post_attention_norm.weight", il))?;
         let pre: Vec<f32> = (0..c.n_embd).map(|i| x[i] + o[i]).collect();
         let f = rmsnorm(&pre, &post, c.eps);
-        let ffn = run_ffn(inner, il, &f)?;
+        let ffn = me.run_ffn(il, &f)?;
         Ok((0..c.n_embd).map(|i| pre[i] + ffn[i]).collect())
+    }
+
+    /// Shared dense FFN: PAR SwiGLU (up*sigmoid*gate then down), Hadamard-aware.
+    fn run_ffn(&self, il: u32, f: &[f32]) -> Result<Vec<f32>> {
+        let fh = self.wh(f)?;
+        let up = self.inner.wmat(&format!("blk.{}.ffn_up.weight", il), &fh)?;
+        let gate = self.inner.wmat(&format!("blk.{}.ffn_gate.weight", il), &fh)?;
+        let act: Vec<f32> = gate.iter().zip(&up).map(|(g, u)| silu(*g) * u).collect();
+        let ad = self.wh(&act)?;
+        self.inner.wmat(&format!("blk.{}.ffn_down.weight", il), &ad)
     }
 
     fn run_delta(&mut self, il: u32, h: &[f32]) -> Result<Vec<f32>> {
@@ -461,8 +804,9 @@ impl Qwen35Stage {
         let kd = p.d_state;
         let channels = p.d_inner + 2 * hk * kd;
 
-        let qkv = self.inner.wmat(&format!("blk.{}.attn_qkv.weight", il), h)?;
-        let z = self.inner.wmat(&format!("blk.{}.attn_gate.weight", il), h)?;
+        let qkv_in = self.wh(h)?;
+        let qkv = self.inner.wmat(&format!("blk.{}.attn_qkv.weight", il), &qkv_in)?;
+        let z = self.inner.wmat(&format!("blk.{}.attn_gate.weight", il), &qkv_in)?;
         let beta_raw = self.inner.wmat(&format!("blk.{}.ssm_beta.weight", il), h)?;
         let alpha_raw = self.inner.wmat(&format!("blk.{}.ssm_alpha.weight", il), h)?;
         let dt_bias = self.inner.vec_gain(&format!("blk.{}.ssm_dt.bias", il))?;
@@ -535,7 +879,28 @@ impl Qwen35Stage {
             g_i.copy_from_slice(&y);
         }
 
-        let out = self.inner.wmat(&format!("blk.{}.ssm_out.weight", il), &gated)?;
+        // GDN V-grouped fold: ssm_out rows live in grouped [hd, rep, nk]
+        // feature order; the fork permutes the activation to match
+        // (llama-graph.cpp build_lora_mm perm_rep > 1 branch) before the
+        // signs+Hadamard transform. tiled v=(rep*nk + k) -> grouped (k, rep).
+        let gated_in: Vec<f32> = match &self.had {
+            Some(h) if h.gdn_v_grouped => {
+                let nk = p.n_k_heads;
+                let rep = hv / nk;
+                let mut g = vec![0.0f32; p.d_inner];
+                for k in 0..nk {
+                    for r in 0..rep {
+                        let src = (r * nk + k) * hd;
+                        let dst = k * rep * hd + r * hd;
+                        g[dst..dst + hd].copy_from_slice(&gated[src..src + hd]);
+                    }
+                }
+                g
+            }
+            _ => gated,
+        };
+        let gated_rot = self.wh(&gated_in)?;
+        let out = self.inner.wmat(&format!("blk.{}.ssm_out.weight", il), &gated_rot)?;
         if self.tap {
             self.last_delta_out = Some(out.clone());
         }
@@ -549,11 +914,12 @@ impl Qwen35Stage {
         let hd = c.attn_head_dim();
         let qdim = nh * hd;
 
-        let qfull = self.inner.wmat(&format!("blk.{}.attn_q.weight", il), h)?;
+        let hr = self.wh(h)?;
+        let qfull = self.inner.wmat(&format!("blk.{}.attn_q.weight", il), &hr)?;
         let qn = self.inner.vec_gain(&format!("blk.{}.attn_q_norm.weight", il))?;
         let kn = self.inner.vec_gain(&format!("blk.{}.attn_k_norm.weight", il))?;
-        let mut k = self.inner.wmat(&format!("blk.{}.attn_k.weight", il), h)?;
-        let v = self.inner.wmat(&format!("blk.{}.attn_v.weight", il), h)?;
+        let mut k = self.inner.wmat(&format!("blk.{}.attn_k.weight", il), &hr)?;
+        let v = self.inner.wmat(&format!("blk.{}.attn_v.weight", il), &hr)?;
 
         // attn_q output is per-head [q(hd) | gate(hd)] interleaved
         let mut q = vec![0.0f32; qdim];
@@ -592,7 +958,8 @@ impl Qwen35Stage {
         for i in 0..qdim {
             o[i] *= 1.0 / (1.0 + (-gate[i]).exp());
         }
-        self.inner.wmat(&format!("blk.{}.attn_output.weight", il), &o)
+        let o_rot = self.wh(&o)?;
+        self.inner.wmat(&format!("blk.{}.attn_output.weight", il), &o_rot)
     }
 }
 
@@ -630,14 +997,6 @@ fn rmsnorm_head(x: &[f32], w: &[f32], eps: f32) -> Vec<f32> {
     rmsnorm(x, w, eps)
 }
 
-/// Shared dense FFN: PAR SwiGLU (up*sigmoid*gate then down).
-pub fn run_ffn(inner: &Stage, il: u32, f: &[f32]) -> Result<Vec<f32>> {
-    let up = inner.wmat(&format!("blk.{}.ffn_up.weight", il), f)?;
-    let gate = inner.wmat(&format!("blk.{}.ffn_gate.weight", il), f)?;
-    let act: Vec<f32> = gate.iter().zip(&up).map(|(g, u)| silu(*g) * u).collect();
-    inner.wmat(&format!("blk.{}.ffn_down.weight", il), &act)
-}
-
 /// Multi-stage qwen35 pipeline model (local orchestration; TCP later).
 pub struct Qwen35Model {
     pub card: Card,
@@ -669,12 +1028,20 @@ impl Qwen35Model {
         self.pos
     }
 
+    /// Stage access for differential-tap drivers (oracle comparison tests).
+    pub fn stages(&self) -> &[Qwen35Stage] {
+        &self.stages
+    }
+
+    pub fn stages_mut(&mut self) -> &mut [Qwen35Stage] {
+        &mut self.stages
+    }
+
     /// Feed one token id; returns final hidden (post output_norm) + which stage owns head.
-    pub fn step(&mut self, token: usize) -> Result<Vec<f32>> {
-        let c = self.card.clone();
+    pub fn step(&mut self, token: usize) -> Result<Vec<f32>> {        let c = self.card.clone();
         let pos = self.current_pos();
 
-        let mut x = self.stages[0].inner.row("token_embd.weight", token)?;
+        let mut x = self.stages[0].embed(token)?;
         for s in &mut self.stages {
             let layers = s.layers().to_vec();
             for il in layers {
@@ -698,10 +1065,151 @@ impl Qwen35Model {
     pub fn logits(&self, h: &[f32]) -> Result<Vec<f32>> {
         for s in self.stages.iter().rev() {
             if s.inner.has_output_head() {
-                return s.inner.logits_untied(h);
+                return s.logits(h);
             }
         }
         anyhow::bail!("no lm_head in stages")
+    }
+
+    /// Greedy generation with prompt-lookup speculation (docs/DUET.md P3).
+    ///
+    /// The drafter guesses each next token from n-grams of the history;
+    /// the model verifies by computing the true greedy argmax. Acceptance
+    /// feeds the drafted token; rejection feeds the argmax — the emitted
+    /// stream is IDENTICAL to plain greedy by construction (losslessness
+    /// contract). On this single-token engine verification costs a full
+    /// step either way, so v1 wins nothing in wall-clock: it lands the
+    /// drafter + accept/reject machinery that a batched-verify kernel
+    /// (matmul_tl1 K-column, memory amortization) will make profitable.
+    pub fn generate_speculative(
+        &mut self,
+        first: usize,
+        n: usize,
+        drafter: &mut PromptLookup,
+        k: usize,
+    ) -> Result<(Vec<usize>, SpecStats)> {
+        let mut stats = SpecStats::default();
+        let mut emitted = Vec::with_capacity(n);
+        let mut history: Vec<usize> = vec![first];
+        let mut tok = first;
+        while emitted.len() < n {
+            drafter.observe_token(tok);
+            let draft = drafter.draft(&history, k);
+            let h = self.step(tok)?;
+            let logits = self.logits(&h)?;
+            let actual = Self::argmax(&logits);
+            emitted.push(actual);
+            history.push(actual);
+            if let Some(&d) = draft.first() {
+                if d as usize == actual {
+                    stats.hits += 1;
+                } else {
+                    stats.misses += 1;
+                }
+            } else {
+                stats.no_draft += 1;
+            }
+            tok = actual;
+        }
+        Ok((emitted, stats))
+    }
+}
+
+/// Prompt-lookup drafter: 3-gram → continuation table built from the model's
+/// own output history (no draft weights needed — Bonsai has none).
+#[derive(Debug, Default)]
+pub struct PromptLookup {
+    ngram: std::collections::HashMap<(u32, u32, u32), Vec<u32>>,
+    recent: Vec<u32>,
+}
+
+impl PromptLookup {
+    /// Seed the table with an observed token sequence (the prompt).
+    pub fn observe(&mut self, tokens: &[usize]) {
+        for &t in tokens {
+            self.observe_token(t);
+        }
+    }
+
+    pub fn observe_token(&mut self, t: usize) {
+        let t = t as u32;
+        if self.recent.len() >= 3 {
+            let k = (
+                self.recent[self.recent.len() - 3],
+                self.recent[self.recent.len() - 2],
+                self.recent[self.recent.len() - 1],
+            );
+            let e = self.ngram.entry(k).or_default();
+            if !e.contains(&t) {
+                e.push(t);
+            }
+        }
+        self.recent.push(t);
+    }
+
+    /// Draft up to `k` continuations of `history` by iterated lookup.
+    pub fn draft(&self, history: &[usize], k: usize) -> Vec<u32> {
+        if history.len() < 3 || k == 0 {
+            return Vec::new();
+        }
+        let mut out = Vec::with_capacity(k);
+        let probe = |tri: (u32, u32, u32)| -> Option<u32> {
+            self.ngram.get(&tri).and_then(|v| v.first().copied())
+        };
+        let mut w: [u32; 3] = [
+            history[history.len() - 3] as u32,
+            history[history.len() - 2] as u32,
+            history[history.len() - 1] as u32,
+        ];
+        for _ in 0..k {
+            let Some(next) = probe((w[0], w[1], w[2])) else { break };
+            out.push(next);
+            w = [w[1], w[2], next];
+        }
+        out
+    }
+}
+
+/// Draft acceptance telemetry (docs/DUET.md P3 gates).
+#[derive(Debug, Default, Clone)]
+pub struct SpecStats {
+    pub hits: usize,
+    pub misses: usize,
+    pub no_draft: usize,
+}
+
+#[cfg(test)]
+mod prompt_lookup_tests {
+    use super::*;
+
+    #[test]
+    fn test_drafter_learns_and_extends() {
+        let mut d = PromptLookup::default();
+        // observe "the cat sat on the mat on the"
+        for t in [1usize, 2, 3, 4, 5, 6, 2, 3, 7] {
+            d.observe_token(t);
+        }
+        // 3-gram (5,6,2) -> 3; the chain continues (6,2,3) -> 7
+        let draft = d.draft(&[5, 6, 2], 3);
+        assert_eq!(draft, vec![3, 7], "iterated lookup chains past the first");
+    }
+
+    #[test]
+    fn test_drafter_short_history_no_draft() {
+        let mut d = PromptLookup::default();
+        d.observe(&[1, 2]);
+        assert!(d.draft(&[1, 2], 4).is_empty(), "needs a full trigram");
+        assert!(d.draft(&[], 4).is_empty());
+    }
+
+    #[test]
+    fn test_drafter_deterministic_first_choice() {
+        let mut d = PromptLookup::default();
+        for t in [1usize, 2, 3, 9, 1, 2, 3, 8] {
+            d.observe_token(t);
+        }
+        // (1,2,3) seen continuing to 9 then 8: first-seen wins (deterministic)
+        assert_eq!(d.draft(&[1, 2, 3], 1), vec![9]);
     }
 }
 

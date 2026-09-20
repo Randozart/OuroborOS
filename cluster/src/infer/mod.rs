@@ -10,13 +10,14 @@
 //! - final: output_norm -> tied lm_head (token_embd^T)
 
 mod dequant;
+pub mod hadamard;
 pub mod qwen35;
 mod ops;
 
 pub use ops::matvec_q;
 pub use dequant::{
-    dequant_f16, dequant_q3_k, dequant_q4_k, dequant_q5_k, dequant_q6_k, dequant_q8_0,
-    dequant_tq1_0, f16_to_f32, QuantKind,
+    bf16_to_f32, dequant_bf16, dequant_f16, dequant_q3_k, dequant_q4_k, dequant_q5_k,
+    dequant_q6_k, dequant_q8_0, dequant_tl1, dequant_tq1_0, f16_to_f32, QuantKind,
 };
 
 use anyhow::{bail, Result};
@@ -148,13 +149,13 @@ impl Stage {
     pub fn embed(&self, token: usize) -> Result<Vec<f32>> {
         let w = self.tensors.get("token_embd.weight")
             .ok_or_else(|| anyhow::anyhow!("stage has no token_embd"))?;
-        if w.kind != QuantKind::F16 {
-            bail!("token_embd not f16");
+        if w.kind != QuantKind::F16 && w.kind != QuantKind::Bf16 {
+            bail!("token_embd not f16/bf16");
         }
         if token >= w.out_len {
             bail!("token {} out of vocab {}", token, w.out_len);
         }
-        Ok(ops::f16_row(w.payload.bytes(), token, w.in_len))
+        self.row("token_embd.weight", token)
     }
 
     /// Logits over the vocab via this stage's `token_embd` (tied lm_head).
@@ -215,6 +216,14 @@ impl Stage {
                     *o = f16_to_f32(u16::from_le_bytes([w2[0], w2[1]]));
                 }
             }
+            QuantKind::Bf16 => {
+                for (o, w2) in out.iter_mut().zip(w.payload.bytes()[idx * k * 2..(idx + 1) * k * 2].chunks_exact(2)) {
+                    *o = bf16_to_f32(u16::from_le_bytes([w2[0], w2[1]]));
+                }
+            }
+            QuantKind::Tl1 => {
+                dequant::dequant_tl1_row(w.payload.bytes(), idx, k, &mut out);
+            }
             QuantKind::Tq1_0 => dequant::dequant_tq1_row(w.payload.bytes(), idx, rb, &mut out),
             QuantKind::Q8_0 => dequant::dequant_q8_row(w.payload.bytes(), idx, rb, &mut out),
             QuantKind::Q4K => dequant::dequant_q4k_row(w.payload.bytes(), idx, rb, &mut out),
@@ -253,6 +262,7 @@ impl Stage {
         match w.kind {
             QuantKind::F32 => Ok(pb.chunks_exact(4).map(|c| f32::from_le_bytes(c.try_into().unwrap())).collect()),
             QuantKind::F16 => Ok(pb.chunks_exact(2).map(|c| f16_to_f32(u16::from_le_bytes([c[0], c[1]]))).collect()),
+            QuantKind::Bf16 => Ok(pb.chunks_exact(2).map(|c| bf16_to_f32(u16::from_le_bytes([c[0], c[1]]))).collect()),
             other => bail!("tensor {} not a vector dtype {:?}", name, other),
         }
     }
@@ -505,5 +515,54 @@ mod tests {
         let y = matvec_q(&payload, QuantKind::Tq1_0, 640, 2560, &x);
         assert_eq!(y.len(), 640);
         assert!(y.iter().all(|v| v.is_finite()));
+    }
+
+    /// Load Bonsai 2 27B (qwen35 arch, TQ1_0 ternary weights) single-shard.
+    /// Usage: cargo test -p ouro-cluster -- --ignored bonsai27_load
+    #[test]
+    #[ignore]
+    fn bonsai27_load() {
+        let path = "../shards_bonsai27_n1/shard_1.bmts";
+        if !std::path::Path::new(path).exists() {
+            eprintln!("no shard, skipping");
+            return;
+        }
+        let shard = BmtsShard::open(path).unwrap();
+        assert_eq!(shard.node, 1);
+        assert!(shard.tensors.len() > 800);
+        eprintln!("loaded {} tensors", shard.tensors.len());
+
+        let cfg = ArchConfig::bitnet_2b();
+        let stage = Stage::from_shard(&shard, cfg).unwrap();
+        eprintln!("stage layers: {:?}", stage.layers);
+        assert_eq!(stage.layers.len(), 64);
+    }
+
+    /// Load Bonsai 2 27B via Qwen35 path and run one forward pass.
+    /// Usage: cargo test -p ouro-cluster -- --ignored bonsai27_qwen35_forward
+    #[test]
+    #[ignore]
+    fn bonsai27_qwen35_forward() {
+        use super::qwen35::{Card, Qwen35Model};
+
+        let card_path = "../shards_bonsai27_n1/model.json";
+        if !std::path::Path::new(card_path).exists() {
+            eprintln!("no model.json, skipping");
+            return;
+        }
+        let card = Card::load_dir("../shards_bonsai27_n1").unwrap();
+        eprintln!("card: arch={} layers={} embd={} head={} hadamard={}",
+            card.architecture, card.n_layer, card.n_embd, card.n_head,
+            card.hadamard.is_some());
+
+        let shards = &["../shards_bonsai27_n1/shard_1.bmts"];
+        let mut model = Qwen35Model::load(shards, card.clone()).unwrap();
+        eprintln!("model loaded OK");
+
+        // Run one forward step (token 0)
+        let h = model.step(0).unwrap();
+        eprintln!("hidden shape: {}", h.len());
+        assert_eq!(h.len(), card.n_embd);
+        assert!(h.iter().all(|v| v.is_finite()));
     }
 }

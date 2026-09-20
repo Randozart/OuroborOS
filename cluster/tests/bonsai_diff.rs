@@ -1,0 +1,415 @@
+//! Bonsai-2-27B (PTQ1_0 + Hadamard) differential vs the PrismML llama.cpp
+//! fork oracle. CONTRACTS.md L3 gate: logits cos >= 0.999 + greedy top-1.
+//!
+//! Oracle produced by tools/ouro-capture in the prism fork clone:
+//!   ouro-capture -m Ternary-Bonsai-2-27B-PTQ1_0.gguf -p "Hello" -ngl 0 \
+//!       -o /tmp/opencode/bonsai_oracle_logits.f32 -d "l_out-"
+//!
+//! Run: cargo test -p ouro-cluster --test bonsai_diff -- --ignored --nocapture
+
+use ouro_cluster::infer::qwen35::{Card, Qwen35Model};
+
+fn root() -> std::path::PathBuf {
+    std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().to_path_buf()
+}
+
+fn cos(a: &[f32], b: &[f32]) -> f32 {
+    let (mut d, mut na, mut nb) = (0.0f64, 0.0f64, 0.0f64);
+    for i in 0..a.len().min(b.len()) {
+        let (x, y) = (a[i] as f64, b[i] as f64);
+        d += x * y;
+        na += x * x;
+        nb += y * y;
+    }
+    (d / (na.sqrt() * nb.sqrt()).max(1e-30)) as f32
+}
+
+fn read_f32s(path: &str) -> std::io::Result<Vec<f32>> {
+    let b = std::fs::read(path)?;
+    Ok(b.chunks_exact(4)
+        .map(|c| f32::from_le_bytes(c.try_into().unwrap()))
+        .collect())
+}
+
+/// Parse the ouro-capture .cap record stream into name -> data.
+fn read_cap(path: &str) -> std::io::Result<Vec<(String, Vec<f32>)>> {
+    let b = std::fs::read(path)?;
+    let mut out = Vec::new();
+    let mut i = 0usize;
+    while i < b.len() {
+        let nl = u32::from_le_bytes(b[i..i + 4].try_into().unwrap()) as usize;
+        i += 4;
+        let name = String::from_utf8_lossy(&b[i..i + nl]).to_string();
+        i += nl;
+        let n = u64::from_le_bytes(b[i..i + 8].try_into().unwrap()) as usize;
+        i += 8;
+        let data: Vec<f32> = b[i..i + n * 4]
+            .chunks_exact(4)
+            .map(|c| f32::from_le_bytes(c.try_into().unwrap()))
+            .collect();
+        i += n * 4;
+        out.push((name, data));
+    }
+    Ok(out)
+}
+
+/// Isolation probe: raw embedding vs oracle `model.input_embed`, then each
+/// Hadamard variant through layer-0 attn_norm vs oracle `attn_norm-0`.
+#[test]
+#[ignore]
+fn bonsai27_probe_embed() {
+    let r = root();
+    std::env::set_current_dir(&r).unwrap();
+
+    let cap_path = std::env::var("ORACLE_CAP")
+        .unwrap_or_else(|_| "/tmp/opencode/bonsai_oracle_logits.f32.cap".into());
+    let token: usize = std::env::var("ORACLE_TOKEN").ok().and_then(|s| s.parse().ok()).unwrap_or(9419);
+    if !std::path::Path::new(&cap_path).exists() {
+        eprintln!("no oracle cap at {cap_path}");
+        return;
+    }
+    let cap = read_cap(&cap_path).unwrap();
+    let get = |name: &str| -> Option<Vec<f32>> {
+        cap.iter().find(|(n, _)| n == name).map(|(_, d)| d.clone())
+    };
+    let ref_embed = get("model.input_embed").expect("no model.input_embed in cap");
+    let ref_norm = get("attn_norm-0").expect("no attn_norm-0 in cap");
+
+    let mut model = Qwen35Model::load(
+        &["shards_bonsai27_n1/shard_1.bmts"],
+        Card::load_dir("shards_bonsai27_n1").unwrap(),
+    )
+    .unwrap();
+    let stage = &model.stages()[0];
+    let raw = stage.inner.row("token_embd.weight", token).unwrap();
+
+    let c0 = cos(&ref_embed, &raw);
+    eprintln!("raw embed:    cos={c0:.6} (n={} vs {})", ref_embed.len(), raw.len());
+
+    // attn_norm weights + eps
+    let w = stage.inner.vec_gain("blk.0.attn_norm.weight").unwrap();
+    let eps = 1e-5f32;
+    let rms = |x: &[f32]| -> Vec<f32> {
+        let n = x.len();
+        let ms = x.iter().map(|v| v * v).sum::<f32>() / n as f32;
+        let inv = 1.0 / (ms + eps).sqrt();
+        (0..n).map(|i| x[i] * inv * w[i]).collect()
+    };
+
+    let none: Vec<f32> = raw.clone();
+    let mut inv = raw.clone();
+    let mut fwd = raw.clone();
+    // replicate HadRuntime slice selection: width 5120 = first slice
+    let card_had = Card::load_dir("shards_bonsai27_n1").unwrap().hadamard.unwrap();
+    let block = card_had.block_size;
+    let signs: Vec<f32> = card_had.signs[..5120].iter().map(|&i| i as f32).collect();
+    ouro_cluster::infer::hadamard::rotate_inv(&mut inv, &signs, block);
+    ouro_cluster::infer::hadamard::rotate_fwd(&mut fwd, &signs, block);
+    for (name, v) in [("none", &none), ("inv", &inv), ("fwd", &fwd)] {
+        let y = rms(v);
+        eprintln!("attn_norm-0 via {name}: cos={:.6}", cos(&ref_norm, &y));
+    }
+}
+
+/// Greedy stream vs oracle (near-tie rule: conditional stream equality).
+/// Oracle: `ouro-capture -p "Hello" -n 4 -o /tmp/opencode/bonsai_greedy_logits.f32`
+/// produced tokens 11 353 2688 264 ("Hello, I'm a").
+#[test]
+#[ignore]
+fn bonsai27_greedy_stream_diff() {
+    let r = root();
+    std::env::set_current_dir(&r).unwrap();
+    let ref_path = std::env::var("ORACLE_GREEDY_LOGITS")
+        .unwrap_or_else(|_| "/tmp/opencode/bonsai_greedy_logits.f32".into());
+    if !std::path::Path::new(&ref_path).exists() {
+        eprintln!("no oracle greedy logits at {ref_path}");
+        return;
+    }
+    let ref_logits = read_f32s(&ref_path).unwrap();
+    let expect: Vec<usize> = std::env::var("ORACLE_GREEDY_TOKENS")
+        .ok()
+        .map(|s| s.split_whitespace().map(|t| t.parse().unwrap()).collect())
+        .unwrap_or_else(|| vec![11, 353, 2688, 264]);
+
+    let mut model = Qwen35Model::load(
+        &["shards_bonsai27_n1/shard_1.bmts"],
+        Card::load_dir("shards_bonsai27_n1").unwrap(),
+    )
+    .unwrap();
+
+    let mut tok = 9419usize; // "Hello"
+    for (step, &want) in expect.iter().enumerate() {
+        let h = model.step(tok).unwrap();
+        let logits = model.logits(&h).unwrap();
+        let top = logits
+            .iter()
+            .enumerate()
+            .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
+            .unwrap()
+            .0;
+        eprintln!("step {step}: fed={tok} top={top} (oracle {want})");
+        assert_eq!(top, want, "stream diverged at step {step}");
+        if step + 1 == expect.len() {
+            let c = cos(&ref_logits, &logits);
+            eprintln!("final-step logits cos={c:.6}");
+            assert!(c > 0.999, "final logits cos {c}");
+        }
+        tok = top;
+    }
+}
+
+/// L2: 2-node and 4-node pipeline shards reproduce the n1 reference token
+/// (and hence the oracle). Feeds "Hello" through each split in-process.
+#[test]
+#[ignore]
+fn bonsai27_pipeline_n2_n4_token_exact() {
+    let r = root();
+    std::env::set_current_dir(&r).unwrap();
+    let ref_path = std::env::var("ORACLE_LOGITS")
+        .unwrap_or_else(|_| "/tmp/opencode/bonsai_oracle_logits.f32".into());
+    let ref_logits: Option<Vec<f32>> = if std::path::Path::new(&ref_path).exists() {
+        read_f32s(&ref_path).ok()
+    } else {
+        None
+    };
+
+    let cases: [(&str, usize); 2] = [("shards_bonsai27_n2", 2), ("shards_bonsai27_n4", 4)];
+    for (dir, n) in cases {
+        let paths: Vec<String> = (1..=n)
+            .map(|i| format!("{dir}/shard_{i}.bmts"))
+            .collect();
+        let refs: Vec<&str> = paths.iter().map(|p| p.as_str()).collect();
+        let mut model = Qwen35Model::load(&refs, Card::load_dir(dir).unwrap()).unwrap();
+        let h = model.step(9419).unwrap();
+        let logits = model.logits(&h).unwrap();
+        let top = logits
+            .iter()
+            .enumerate()
+            .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
+            .unwrap()
+            .0;
+        eprintln!("{dir}: top={top}");
+        assert_eq!(top, 11, "{dir} must match oracle token 11");
+        if let Some(ref l) = ref_logits {
+            let c = cos(l, &logits);
+            eprintln!("{dir}: cos={c:.6}");
+            assert!(c > 0.999, "{dir} logit cos {c}");
+        }
+    }
+}
+
+/// P3 gate (docs/DUET.md): speculative generation must be token-identical
+/// to plain greedy — speculation changes speed, never output.
+#[test]
+#[ignore]
+fn bonsai27_speculative_lossless() {
+    let r = root();
+    std::env::set_current_dir(&r).unwrap();
+    if !std::path::Path::new("shards_bonsai27_n1/shard_1.bmts").exists() {
+        eprintln!("no shards");
+        return;
+    }
+    let n = std::env::var("SPEC_TOKENS").ok().and_then(|s| s.parse().ok()).unwrap_or(6usize);
+
+    let plain = || -> anyhow::Result<Vec<usize>> {
+        let mut model = Qwen35Model::load(
+            &["shards_bonsai27_n1/shard_1.bmts"],
+            Card::load_dir("shards_bonsai27_n1").unwrap(),
+        )?;
+        let mut tok = 9419usize;
+        let mut out = Vec::new();
+        for _ in 0..n {
+            let h = model.step(tok)?;
+            let l = model.logits(&h)?;
+            tok = l.iter().enumerate().max_by(|a, b| a.1.partial_cmp(b.1).unwrap()).unwrap().0;
+            out.push(tok);
+        }
+        Ok(out)
+    };
+
+    let spec = || -> anyhow::Result<(Vec<usize>, ouro_cluster::infer::qwen35::SpecStats)> {
+        let mut model = Qwen35Model::load(
+            &["shards_bonsai27_n1/shard_1.bmts"],
+            Card::load_dir("shards_bonsai27_n1").unwrap(),
+        )?;
+        let mut drafter = ouro_cluster::infer::qwen35::PromptLookup::default();
+        drafter.observe(&[9419]);
+        model.generate_speculative(9419, n, &mut drafter, 4)
+    };
+
+    let g = plain().unwrap();
+    let (s, stats) = spec().unwrap();
+    eprintln!("greedy: {g:?}");
+    eprintln!("spec:   {s:?} (hits {} misses {} no_draft {})", stats.hits, stats.misses, stats.no_draft);
+    assert_eq!(g, s, "speculative decode must be lossless");
+}
+
+/// Stream geometry (docs/DUET.md §7 transport-codec gate): measures the
+/// claims behind "transmit the delta, not the state" —
+/// (a) adjacent-layer cosine: does the residual stream barely move?
+/// (b) delta entropy vs state entropy: is the per-layer delta cheaper to
+///     entropy-code than the state itself?
+/// Grounds the §2 discussion with numbers instead of vibes. NOT a pass/fail
+/// contract: it prints measurements.
+#[test]
+#[ignore]
+fn bonsai27_stream_geometry() {
+    let r = root();
+    std::env::set_current_dir(&r).unwrap();
+    if !std::path::Path::new("shards_bonsai27_n1/shard_1.bmts").exists() {
+        eprintln!("no shards");
+        return;
+    }
+
+    fn entropy_bits_per_value(v: &[f32]) -> f64 {
+        // 256-bin histogram over the observed range; entropy of the bins.
+        let (mut lo, mut hi) = (f32::MAX, f32::MIN);
+        for &x in v {
+            lo = lo.min(x);
+            hi = hi.max(x);
+        }
+        if hi <= lo {
+            return 0.0;
+        }
+        let mut bins = [0u64; 256];
+        for &x in v {
+            let b = (((x - lo) / (hi - lo)) * 255.0) as usize;
+            bins[b.min(255)] += 1;
+        }
+        let n = v.len() as f64;
+        bins.iter()
+            .filter(|&&c| c > 0)
+            .map(|&c| {
+                let p = c as f64 / n;
+                -p * p.log2()
+            })
+            .sum()
+    }
+
+    let mut model = Qwen35Model::load(
+        &["shards_bonsai27_n1/shard_1.bmts"],
+        Card::load_dir("shards_bonsai27_n1").unwrap(),
+    )
+    .unwrap();
+    let pos = model.current_pos();
+    let mut x = model.stages_mut()[0].embed(9419).unwrap();
+    let mut layer_outs: Vec<(u32, Vec<f32>)> = Vec::new();
+    for s in model.stages_mut() {
+        for il in s.layers().to_vec() {
+            x = s.run_layer(il, &x, pos).unwrap();
+            layer_outs.push((il, x.clone()));
+        }
+    }
+
+    eprintln!("layer | adj_cos | state_bits | delta_bits | |dx|/|x|");
+    let (mut cos_min, mut cos_sum, mut n) = (1.0f32, 0.0f64, 0usize);
+    for w in layer_outs.windows(2) {
+        let (l0, x0) = &w[0];
+        let (l1, x1) = &w[1];
+        let d: Vec<f32> = x1.iter().zip(x0).map(|(a, b)| a - b).collect();
+        let c = cos(x0, x1);
+        let sb = entropy_bits_per_value(x1);
+        let db = entropy_bits_per_value(&d);
+        let rel = (d.iter().map(|v| v * v).sum::<f32>()).sqrt()
+            / (x1.iter().map(|v| v * v).sum::<f32>()).sqrt().max(1e-9);
+        eprintln!("{l1:5} | {c:.6} | {sb:.3} | {db:.3} | {rel:.4}");
+        cos_min = cos_min.min(c);
+        cos_sum += c as f64;
+        n += 1;
+    }
+    eprintln!(
+        "adjacent-layer cos: min={cos_min:.6} mean={:.6} over {n} boundaries",
+        cos_sum / n as f64
+    );
+}
+
+#[test]
+#[ignore] // heavy: 27B oracle + full forward pass
+fn bonsai27_oracle_diff() {
+    let r = root();
+    std::env::set_current_dir(&r).unwrap();
+
+    let logits_path = std::env::var("ORACLE_LOGITS")
+        .unwrap_or_else(|_| "/tmp/opencode/bonsai_oracle_logits.f32".into());
+    let cap_path = std::env::var("ORACLE_CAP")
+        .unwrap_or_else(|_| "/tmp/opencode/bonsai_oracle_logits.f32.cap".into());
+    let token: usize = std::env::var("ORACLE_TOKEN")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(9419); // "Hello" via prism tokenizer (add_special)
+
+    if !std::path::Path::new(&logits_path).exists() {
+        eprintln!("no oracle logits at {logits_path}");
+        return;
+    }
+
+    let ref_logits = read_f32s(&logits_path).unwrap();
+    let ref_layers = read_cap(&cap_path).unwrap_or_default();
+    eprintln!("oracle: {} logits, {} layer taps", ref_logits.len(), ref_layers.len());
+
+    // --- Rust engine: mirror Qwen35Model::step but tap per-layer outputs ---
+    let t_all = std::time::Instant::now();
+    let mut model = Qwen35Model::load(
+        &["shards_bonsai27_n1/shard_1.bmts"],
+        Card::load_dir("shards_bonsai27_n1").unwrap(),
+    )
+    .unwrap();
+    eprintln!("[t] load: {:.1}s", t_all.elapsed().as_secs_f64());
+    let pos = model.current_pos();
+
+    let mut x = model.stages_mut()[0].embed(token).unwrap();
+    let t_step = std::time::Instant::now();
+    let mut mine_layers: Vec<(u32, Vec<f32>)> = Vec::new();
+    for s in model.stages_mut() {
+        for il in s.layers().to_vec() {
+            x = s.run_layer(il, &x, pos).unwrap();
+            mine_layers.push((il, x.clone()));
+        }
+    }
+    eprintln!("[t] step: {:.1}s", t_step.elapsed().as_secs_f64());
+    let last = model.stages().len() - 1;
+    if model.stages()[last].inner.output_norm_present() {
+        x = model.stages()[last].inner.apply_output_norm(&x).unwrap();
+    }
+    let t_logits = std::time::Instant::now();
+    let mine = model.logits(&x).unwrap();
+    eprintln!("[t] logits: {:.1}s", t_logits.elapsed().as_secs_f64());
+
+    // --- per-layer comparison (diagnostic, not the gate) ---
+    let mut worst = (1.0f32, String::new());
+    for (name, refd) in &ref_layers {
+        let Some(il_str) = name.strip_prefix("l_out-") else {
+            continue; // only l_out taps map onto our per-layer outputs
+        };
+        let il: u32 = il_str.parse().unwrap_or(u32::MAX);
+        if let Some((_, mine_l)) = mine_layers.iter().find(|(l, _)| *l == il) {
+            let c = cos(refd, mine_l);
+            if c < worst.0 {
+                worst = (c, name.clone());
+            }
+            if *name == "l_out-63" || c < 0.99 {
+                eprintln!("{name}: cos={c:.6}");
+            }
+        }
+    }
+    eprintln!("layer cos: worst={:.6} @ {}", worst.0, worst.1);
+
+    // --- THE GATE: logits cos + greedy top-1 (CONTRACTS.md L3) ---
+    let c = cos(&ref_logits, &mine);
+    let rt = ref_logits
+        .iter()
+        .enumerate()
+        .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
+        .unwrap()
+        .0;
+    let mt = mine
+        .iter()
+        .enumerate()
+        .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
+        .unwrap()
+        .0;
+    let maxd = ref_logits.iter().zip(&mine).fold(0.0f32, |m, (a, b)| m.max((a - b).abs()));
+    eprintln!("bonsai27 logits: cos={c:.6} ref_top={rt} rust_top={mt} max_delta={maxd:.4}");
+    assert!(c > 0.999, "bonsai27 logit cos {c}");
+    assert_eq!(rt, mt, "bonsai27 greedy token must match");
+}

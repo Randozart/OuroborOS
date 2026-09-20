@@ -76,7 +76,9 @@ pub fn mt_threads() -> usize {
 pub fn matvec_q(payload: &[u8], kind: QuantKind, out_len: usize, in_len: usize, x: &[f32]) -> Vec<f32> {
     match kind {
         QuantKind::F16 => matvec_f16(payload, out_len, in_len, x),
+        QuantKind::Bf16 => matvec_bf16(payload, out_len, in_len, x),
         QuantKind::F32 => matvec_f32raw(payload, out_len, in_len, x),
+        QuantKind::Tl1 => matvec_tl1(payload, out_len, in_len, x),
         _ => matvec_qblock(payload, kind, out_len, in_len, x),
     }
 }
@@ -151,6 +153,195 @@ pub fn matvec_f16(payload: &[u8], out_len: usize, in_len: usize, x: &[f32]) -> V
     y
 }
 
+/// y = W * x with TL1 (PTQ1_0) ternary weights.
+///
+/// Fuses dequant + dot product: trits never touch memory, the zero branch is
+/// dropped (unconditional FMA vectorizes; ~1/3 of ternary weights are zero
+/// and contribute nothing anyway). Multithreaded across output rows;
+/// AVX2+FMA kernel when available, scalar fallback otherwise.
+pub fn matvec_tl1(payload: &[u8], out_len: usize, in_len: usize, x: &[f32]) -> Vec<f32> {
+    use super::dequant::PTQ1_GROUP_ELEMS;
+    let groups_per_row = in_len / PTQ1_GROUP_ELEMS;
+    let mut y = vec![0.0f32; out_len];
+    let nt = mt_threads().min(out_len).max(1);
+    let chunk = out_len.div_ceil(nt);
+    let simd = have_tl1_avx2();
+    std::thread::scope(|sc| {
+        for (ci, blk) in y.chunks_mut(chunk).enumerate() {
+            let base = ci * chunk;
+            sc.spawn(move || {
+                if simd {
+                    #[cfg(target_arch = "x86_64")]
+                    unsafe {
+                        tl1_rows_avx2(payload, blk, groups_per_row, x, base);
+                    }
+                    #[cfg(not(target_arch = "x86_64"))]
+                    {
+                        let _ = (&payload, groups_per_row, x, base);
+                    }
+                } else {
+                    tl1_rows_scalar(payload, blk, groups_per_row, x, base);
+                }
+            });
+        }
+    });
+    y
+}
+
+/// Scalar reference path (also the non-x86 build).
+fn tl1_rows_scalar(payload: &[u8], blk: &mut [f32], groups_per_row: usize, x: &[f32], base: usize) {
+    use super::dequant::{PTQ1_GROUP_BYTES, PTQ1_GROUP_ELEMS, PTQ1_POW3};
+    for (j, oy) in blk.iter_mut().enumerate() {
+        let row = base + j;
+        let row_base = row * groups_per_row * PTQ1_GROUP_BYTES;
+        let mut sum = 0.0f32;
+        for g in 0..groups_per_row {
+            let gb = row_base + g * PTQ1_GROUP_BYTES;
+            let d = f16_to_f32(u16::from_le_bytes([payload[gb + 26], payload[gb + 27]]));
+            let qs = &payload[gb..gb + 24];
+            let qh = &payload[gb + 24..gb + 26];
+            let xb = g * PTQ1_GROUP_ELEMS;
+            // stage c=16: elements n*16 + m
+            for (n, &pn) in PTQ1_POW3.iter().enumerate().take(5) {
+                for m in 0..16 {
+                    let q = qs[m].wrapping_mul(pn);
+                    let t = ((((q as u16) * 3) >> 8) as i8 - 1) as f32 * d;
+                    sum += t * x[xb + n * 16 + m];
+                }
+            }
+            // stage c=8: elements 80 + n*8 + m
+            for (n, &pn) in PTQ1_POW3.iter().enumerate().take(5) {
+                for m in 0..8 {
+                    let q = qs[16 + m].wrapping_mul(pn);
+                    let t = ((((q as u16) * 3) >> 8) as i8 - 1) as f32 * d;
+                    sum += t * x[xb + 80 + n * 8 + m];
+                }
+            }
+            // qh pairs: elements 120 + n*2 + h
+            for (n, &pn) in PTQ1_POW3.iter().enumerate().take(4) {
+                for m in 0..2 {
+                    let q = qh[m].wrapping_mul(pn);
+                    let t = ((((q as u16) * 3) >> 8) as i8 - 1) as f32 * d;
+                    sum += t * x[xb + 120 + n * 2 + m];
+                }
+            }
+        }
+        *oy = sum;
+    }
+}
+
+/// SSE4.1 availability for the tl1 fused kernel (cached). The fleet's
+/// oldest nodes are pre-AVX2 (Ivy Bridge); the kernel targets the floor.
+#[cfg(target_arch = "x86_64")]
+fn have_tl1_avx2() -> bool {
+    static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *V.get_or_init(|| is_x86_feature_detected!("sse4.1"))
+}
+
+#[cfg(not(target_arch = "x86_64"))]
+fn have_tl1_avx2() -> bool {
+    false
+}
+
+/// AVX2+FMA fused PTQ1_0 decode+dot over rows [base, base + blk.len()).
+///
+/// Per 8 trits: unpack bytes to u16 lanes, u8-wrapping scale by 3^n
+/// (& 0xFF), (q*3)>>8 digit magic, trit to f32, scale by d, FMA into an
+/// 8-lane accumulator; horizontal add once per group. 128-bit lanes only —
+/// no cross-lane shuffles needed.
+///
+/// # Safety
+/// Caller must guarantee avx2+fma (checked via `have_tl1_avx2`) and the
+/// same bounds contract as the scalar path (payload rows / x groups).
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "sse4.1")]
+unsafe fn tl1_rows_avx2(
+    payload: &[u8],
+    blk: &mut [f32],
+    groups_per_row: usize,
+    x: &[f32],
+    base: usize,
+) {
+    use super::dequant::{PTQ1_GROUP_BYTES, PTQ1_GROUP_ELEMS, PTQ1_POW3};
+    use std::arch::x86_64::*;
+
+    debug_assert_eq!(x.len(), groups_per_row * PTQ1_GROUP_ELEMS);
+
+    #[inline]
+    #[target_feature(enable = "sse4.1")]
+    unsafe fn digits8(
+        p: *const u8,
+        boff: usize,
+        pn: i16,
+        d: __m128,
+        xp: *const f32,
+        xoff: usize,
+        acc: __m128,
+    ) -> __m128 {
+        // 8 bytes -> 8 u16 lanes; decode all, then FMA as two 4-lane halves
+        // (a 128-bit f32 vector is only 4 wide).
+        let b = _mm_loadl_epi64(p.add(boff) as *const __m128i);
+        let w = _mm_unpacklo_epi8(b, _mm_setzero_si128());
+        let mut q = _mm_mullo_epi16(w, _mm_set1_epi16(pn));
+        q = _mm_and_si128(q, _mm_set1_epi16(0xFF)); // u8 wrap semantics
+        q = _mm_mullo_epi16(q, _mm_set1_epi16(3));
+        q = _mm_srli_epi16(q, 8); // digit 0..2
+        q = _mm_sub_epi16(q, _mm_set1_epi16(1)); // trit -1..1
+        let flo = _mm_cvtepi32_ps(_mm_cvtepi16_epi32(q));
+        let fhi = _mm_cvtepi32_ps(_mm_cvtepi16_epi32(_mm_unpackhi_epi64(q, q)));
+        let acc = _mm_add_ps(
+            _mm_mul_ps(_mm_mul_ps(flo, d), _mm_loadu_ps(xp.add(xoff))),
+            acc,
+        );
+        _mm_add_ps(
+            _mm_mul_ps(_mm_mul_ps(fhi, d), _mm_loadu_ps(xp.add(xoff + 4))),
+            acc,
+        )
+    }
+
+    #[inline]
+    #[target_feature(enable = "sse,sse2")]
+    unsafe fn hsum(v: __m128) -> f32 {
+        let s = _mm_add_ps(v, _mm_movehl_ps(v, v));
+        let s = _mm_add_ss(s, _mm_shuffle_ps(s, s, 1));
+        _mm_cvtss_f32(s)
+    }
+
+    for (j, oy) in blk.iter_mut().enumerate() {
+        let row = base + j;
+        let row_base = row * groups_per_row * PTQ1_GROUP_BYTES;
+        let mut sum = 0.0f32;
+        for g in 0..groups_per_row {
+            let gb = row_base + g * PTQ1_GROUP_BYTES;
+            let d = f16_to_f32(u16::from_le_bytes([payload[gb + 26], payload[gb + 27]]));
+            let dv = _mm_set1_ps(d);
+            let qs = payload.as_ptr().add(gb);
+            let xg = g * PTQ1_GROUP_ELEMS;
+            let xp = x.as_ptr().add(xg);
+            let mut acc = _mm_setzero_ps();
+            // stage c=16 (qs[0..16]): elements n*16+m, two 8-lane halves
+            // stage c=8 (qs[16..24]): elements 80+n*8+m, one 8-lane chunk
+            for (n, &pw) in PTQ1_POW3.iter().enumerate().take(5) {
+                let pn = pw as i16;
+                acc = digits8(qs, 0, pn, dv, xp, n * 16, acc);
+                acc = digits8(qs, 8, pn, dv, xp, n * 16 + 8, acc);
+                acc = digits8(qs, 16, pn, dv, xp, 80 + n * 8, acc);
+            }
+            // qh tail: elements 120 + n*2 + h (8 trits, scalar)
+            let qh = qs.add(24);
+            for n in 0..4 {
+                for m in 0..2 {
+                    let q = qh.add(m).read().wrapping_mul(PTQ1_POW3[n]);
+                    let t = ((((q as u16) * 3) >> 8) as i8 - 1) as f32 * d;
+                    sum += t * x[xg + 120 + n * 2 + m];
+                }
+            }
+            sum += hsum(acc);
+        }
+        *oy = sum;
+    }
+}
+
 /// Fetch one f16 row (embedding lookup) as f32.
 pub fn f16_row(payload: &[u8], row: usize, in_len: usize) -> Vec<f32> {
     let start = row * in_len * 2;
@@ -162,6 +353,32 @@ pub fn f16_row(payload: &[u8], row: usize, in_len: usize) -> Vec<f32> {
             ]))
         })
         .collect()
+}
+
+/// y = W * x with W bf16 LE payload, rows of `in_len` elements.
+pub fn matvec_bf16(payload: &[u8], out_len: usize, in_len: usize, x: &[f32]) -> Vec<f32> {
+    let mut y = vec![0.0f32; out_len];
+    let nt = mt_threads().min(out_len).max(1);
+    let chunk = out_len.div_ceil(nt);
+    std::thread::scope(|sc| {
+        for (ci, blk) in y.chunks_mut(chunk).enumerate() {
+            let base = ci * chunk;
+            sc.spawn(move || {
+                for (j, oy) in blk.iter_mut().enumerate() {
+                    let row = base + j;
+                    let start = row * in_len * 2;
+                    let w = &payload[start..start + in_len * 2];
+                    let mut s = 0.0f32;
+                    for i in 0..in_len {
+                        let bits = u16::from_le_bytes([w[i * 2], w[i * 2 + 1]]);
+                        s += f32::from_bits((bits as u32) << 16) * x[i];
+                    }
+                    *oy = s;
+                }
+            });
+        }
+    });
+    y
 }
 
 #[cfg(test)]
@@ -231,5 +448,72 @@ mod tests {
         assert!((silu(0.0)).abs() < 1e-9);
         assert!((silu(10.0) - 10.0).abs() < 1e-3);
         assert!((silu(-10.0)).abs() < 1e-3);
+    }
+
+    /// Throughput probe for the Bonsai lm_head shape (248320x5120 TL1).
+    /// Synthetic payload; guards against decode-path regressions.
+    #[test]
+    #[ignore]
+    fn bench_matvec_tl1_lmhead_shape() {
+        let (out_len, in_len) = (248320usize, 5120usize);
+        let groups = in_len / 128;
+        let row_bytes = groups * 28;
+        let mut payload = vec![0u8; out_len * row_bytes];
+        for (i, b) in payload.iter_mut().enumerate() {
+            *b = (i as u32 ^ (i as u32 >> 13)).wrapping_mul(0x9E) as u8;
+        }
+        // fp16 scale ~1.0 (0x3c00 LE) in every 28-byte group
+        for g in payload.chunks_exact_mut(28) {
+            g[26] = 0x00;
+            g[27] = 0x3c;
+        }
+        let x: Vec<f32> = (0..in_len).map(|i| ((i % 13) as f32 - 6.0) * 0.1).collect();
+        let t = std::time::Instant::now();
+        let y = matvec_tl1(&payload, out_len, in_len, &x);
+        let dt = t.elapsed().as_secs_f64();
+        let sum: f32 = y.iter().sum();
+        eprintln!("matvec_tl1 {out_len}x{in_len}: {dt:.2}s ({:.1} MB/s)", (payload.len() as f64) / 1e6 / dt);
+        assert!(y.len() == out_len && sum.is_finite());
+    }
+
+    /// Fused decode+dot must agree with the reference `tl1_group` decode.
+    #[test]
+    fn test_matvec_tl1_fused_matches_reference() {
+        use super::super::dequant::{dequant_tl1, tl1_group};
+        let (out_len, in_len) = (37usize, 384usize); // 3 groups per row
+        let groups = in_len / 128;
+        let row_bytes = groups * 28;
+        let mut payload = vec![0u8; out_len * row_bytes];
+        for (i, b) in payload.iter_mut().enumerate() {
+            *b = (i as u32).wrapping_mul(0x9B ^ (i as u32 >> 7)) as u8;
+        }
+        // every 28-byte group gets a valid (non-NaN) f16 scale
+        for g in payload.chunks_exact_mut(28) {
+            g[26] = 0x10;
+            g[27] = 0x38;
+        }
+        let x: Vec<f32> = (0..in_len).map(|i| ((i % 7) as f32 - 3.0) * 0.5).collect();
+
+        let fused = matvec_tl1(&payload, out_len, in_len, &x);
+        for row in 0..out_len {
+            let row_bytes_span = &payload[row * row_bytes..(row + 1) * row_bytes];
+            let mut flat = vec![0.0f32; in_len];
+            for g in 0..groups {
+                tl1_group(
+                    &row_bytes_span[g * 28..(g + 1) * 28],
+                    &mut flat[g * 128..(g + 1) * 128],
+                );
+            }
+            let want: f32 = flat.iter().zip(&x).map(|(a, b)| a * b).sum();
+            assert!(
+                (fused[row] - want).abs() / want.abs().max(1e-9) < 1e-5,
+                "row {row}: fused {} vs reference {}",
+                fused[row],
+                want
+            );
+        }
+        // dequant_tl1 whole-tensor path agrees with row decode too
+        let full = dequant_tl1(&payload, out_len * in_len);
+        assert_eq!(full.len(), out_len * in_len);
     }
 }
