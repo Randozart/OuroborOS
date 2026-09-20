@@ -7,7 +7,9 @@
 
 **Docs**: [`docs/HANDBOOK.md`](docs/HANDBOOK.md) (usage) ·
 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) (internals) ·
-[`CONSTITUTION.md`](CONSTITUTION.md) (law) · [`docs/DMA_ROADMAP.md`](docs/DMA_ROADMAP.md) (the DMA endgame).
+[`CONSTITUTION.md`](CONSTITUTION.md) (law) · [`docs/DMA_ROADMAP.md`](docs/DMA_ROADMAP.md) (the DMA endgame) · [`docs/PLAN9.md`](docs/PLAN9.md) (one graph, one grammar) · [`docs/AIR_PATH.md`](docs/AIR_PATH.md) (many paths, one protocol) · [`docs/BONSAI_PTQ1.md`](docs/BONSAI_PTQ1.md) (PrismML ternary format + oracle) ·
+[`docs/DUET.md`](docs/DUET.md) (Doctrine of Unified Expected Transport — prediction-before-transmission) ·
+[`docs/BONSAI_TOKENIZER.md`](docs/BONSAI_TOKENIZER.md) (text in/out — planned).
 
 ## Quick Reference
 

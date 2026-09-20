@@ -19,6 +19,12 @@ in the vendored fork.*
 | TQ1_0 == `dequantize_row_tq1_0` | `to_bits` equality, 25,600 real-tensor elems | `cargo test -p bitnet-rs --test verify_infer test_tq1` | PASSING |
 | Q8_0, Q4_K == C | bit-exact, 1024 pseudo-random blocks | `... test_kquant` | PASSING |
 | Q3_K, Q5_K, Q6_K == C | bit-exact, 512 blocks each | `... test_q356` | PASSING |
+| PTQ1_0 decoder inverts C quantizer | bit-exact, 64 random ternary groups | `cargo test -p ouro-cluster --lib test_ptq1_roundtrip` | PASSING |
+| BMTS v2 (capnp meta) round-trip + v1 compat | tensor table bit-exact; meta < JSON; card lossless | `cargo test -p ouro-cluster --lib bmts_v2 card_capnp` | PASSING |
+| DUET P1: delta-pull rebuild bit-exact + epoch refusal | rebuilt sha256 == epoch; mismatch publishes nothing; identical ⇒ 0-byte bill | `cargo test -p ouro-cluster --lib sync::` | PASSING |
+| DUET P2: speculative ACTS hit/miss | 1000-token replay 100% hit; ULP flip → NACK → exact stream | `cargo test -p ouro-cluster --lib speculative` | PASSING |
+| DUET P3: speculative decode lossless | spec stream == greedy stream, token-exact on real 27B | `cargo test --release -p ouro-cluster --test bonsai_diff -- --ignored bonsai27_speculative` | PASSING |
+| DUET P4: choice-frame budget reconcile | exact over communicated values; divergence ≤ n × tolerance; skew ⇒ fallback | `cargo test -p ouro-cluster --lib duet::` | PASSING |
 | future: IQ types, BF16, etc. | bit-exact before any use | extend verify_infer | GAP |
 
 Caught: K_SCALE_SIZE=12 stride trap; q3k output-cursor overwrite; a Rust
@@ -52,6 +58,9 @@ argument for the ladder.
 | Qwen3.8-9B full forward == llama.cpp oracle | logits cos >= 0.999 + greedy top-1 equal (measured 0.9994) | PASSING (`--test qwen_diff`) |
 | Qwen3.8-27B full forward == oracle | cos >= 0.999 + top-1 (measured 0.99993 @2614) | PASSING |
 | layer-0 9-tensor differential incl. 524K-float delta state | every tensor cos > 0.999 | PASSING |
+| **Bonsai-2-27B (PTQ1_0 + Hadamard) == PrismML fork oracle** | cos >= 0.999 + top-1 (measured **0.999998** @11; all 64 l_out > 0.99998) | PASSING (`cargo test --release -p ouro-cluster --test bonsai_diff -- --ignored`) |
+| **Bonsai-2-27B greedy 8-token stream == oracle** | "Hello" -> ", I'm a student in the University", token-exact + final cos 0.999997 | PASSING (`--test bonsai_diff bonsai27_greedy_stream`) |
+| **Bonsai-2-27B n2/n4 pipeline splits == n1 reference** | token-exact @11, cos 0.999998 both splits | PASSING (`--test bonsai_diff bonsai27_pipeline_n2_n4_token_exact`) |
 | PlacementPlan X vs reference plan on identical tokens | streams identical, else resync from checkpoint | WIP (compiler pending) |
 | post-relocation re-verify (node drop -> re-place) | L1-L2 re-pass within N seconds before first token | GAP (choreography pending) |
 
@@ -61,6 +70,7 @@ argument for the ladder.
 |---|---|---|
 | M4: dense 27B >= 10 tok/s on 4-GPU pipeline (est. ~30–35) | measured, PLAN §13.4 | GAP (post-wgpu) |
 | M4: 35B-A3B MoE >= 30 tok/s | measured | GAP |
+| Bonsai-2-27B CPU-MT baseline (Ivy Bridge i7-3770, 8 threads) | step 3.7 s/token warm-cache (17.5 s cold) + 0.2 s lm_head; SSE4.1 fused kernel, 1.8 GB/s decode | MEASURED |
 | achieved/bound-gap displayed (bytes/token / eff. BW) | every bench run | WIP — bridge benches (§16.3) report it |
 | hop RTT vs schedule prediction within 2x | pipeline telemetry | WIP |
 
