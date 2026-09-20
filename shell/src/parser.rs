@@ -97,6 +97,9 @@ pub enum Command {
     Lanes { node: String },
     /// `power?` — query context's property
     ContextPropertyQuery { property: String },
+    /// `energy?` — DUET choice-frame reconciliation of predicted vs
+    /// actual draw per node (docs/DUET.md P4)
+    EnergyQuery,
     /// `cluster.active?` — bulk query
     BulkQuery { filter: String },
     /// `n3` — set context to node
@@ -385,6 +388,9 @@ pub fn interpret(input: &str) -> Command {
         };
         return Command::Ask { max_tokens, text };
     }
+    if trimmed == "energy?" || trimmed == "energy" {
+        return Command::EnergyQuery;
+    }
     if trimmed == "shards" || trimmed == "shards." || trimmed.starts_with("shards ") {
         return Command::ShardStatus;
     }
@@ -496,6 +502,8 @@ mod tests {
             }
             other => panic!("expected Ask, got {:?}", other),
         }
+        assert!(matches!(interpret("energy?"), Command::EnergyQuery));
+        assert!(matches!(interpret("energy"), Command::EnergyQuery));
     }
 
     #[test]

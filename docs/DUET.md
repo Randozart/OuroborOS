@@ -301,6 +301,16 @@ not shipping quiet nodes' readings).
   reconciliation; wire-bill collapse measured (1 bit/as-planned node vs
   8 B f64); set-hash skew → fallback; precision contract refined during
   landing (see §5 note).
+- 2026-09-20: **P4 wired into the shell** — `energy?` reconciles
+  per-node predicted draw (TDP estimate today; learned power model is
+  Art. 4 pending) against live telemetry through `duet::reconcile`,
+  prints per-node verdicts + the budget decision. RAPL metering
+  upgraded from limit-as-draw to true interval deltas
+  (`probe/energy.rs` EnergyMeter).
+- 2026-09-20: **multi-turn `ask`** — the shell's Bonsai session is
+  persistent across REPL turns (prompt tokens ingest into the
+  recurrent state); `ask clear` resets. Demonstrated: turn 1 "Hello" →
+  ", I'm a", turn 2 " University" → " of California".
 
 ## 9. Provenance (App. C standing rule)
 

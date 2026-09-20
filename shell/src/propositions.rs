@@ -22,6 +22,10 @@ pub struct ShellConfig {
     /// Queries prefer it and fall back to the static topology when
     /// unreachable (OURO_REGISTRY env overrides).
     pub registry_addr: String,
+    /// Persistent Bonsai completion session (`ask`) — context survives
+    /// REPL turns; `ask clear` resets it. Arc<Mutex<>> keeps ShellConfig
+    /// Clone (handlers snapshot it).
+    pub bonsai: Option<std::sync::Arc<std::sync::Mutex<crate::bonsai::BonsaiSession>>>,
 }
 
 impl ShellConfig {
@@ -31,6 +35,7 @@ impl ShellConfig {
             node_addrs: Vec::new(),
             shard_map: "shards/shard_map.json".to_string(),
             registry_addr: "127.0.0.1:9501".to_string(),
+            bonsai: None,
         }
     }
 }
@@ -90,7 +95,7 @@ pub fn handle(
     scheduler: &mut Scheduler,
     ctx: &mut Context,
     fmt: &mut Formatter,
-    config: &ShellConfig,
+    config: &mut ShellConfig,
     recovery: &mut ouro_cluster::error_recovery::ErrorRecovery,
 ) -> Result<String> {
     match cmd {
@@ -520,13 +525,88 @@ pub fn handle(
         }
 
         Command::Ask { max_tokens, text } => {
+            if text == "clear" || text == "reset" {
+                return match config.bonsai.as_ref() {
+                    Some(s) => {
+                        s.lock().expect("bonsai mutex").clear();
+                        Ok("bonsai context cleared".to_string())
+                    }
+                    None => Ok("no bonsai session to clear".to_string()),
+                };
+            }
             let dir = std::env::var("OURO_BONSAI_SHARDS")
                 .unwrap_or_else(|_| "shards_bonsai27_n1".to_string());
+            if config.bonsai.is_none() {
+                match crate::bonsai::BonsaiSession::open(&dir) {
+                    Ok(s) => {
+                        config.bonsai = Some(std::sync::Arc::new(std::sync::Mutex::new(s)))
+                    }
+                    Err(e) => return Ok(format!("{e} [SKIP]")),
+                }
+            }
+            let session = config.bonsai.as_ref().unwrap();
+            let mut session = session.lock().expect("bonsai mutex");
             let mut out = format!("bonsai [{}]: ", text);
-            match crate::bonsai::ask(&dir, &text, max_tokens, |piece| out.push_str(piece)) {
+            match session.ask(&text, max_tokens, |piece| out.push_str(piece)) {
                 Ok(_) => Ok(out),
                 Err(e) => Ok(format!("{e} [SKIP]")),
             }
+        }
+
+        Command::EnergyQuery => {
+            // DUET P4 (docs/DUET.md): predicted vs actual draw, reconciled
+            // as choice frames — one as-planned bit per quiet node, a
+            // reading per drifted node; the budget decision uses the
+            // reconstruction. Predicted source today: TDP estimate (the
+            // learned power model is Art. 4 pending work).
+            let nodes: Vec<(String, f64)> = topology
+                .nodes
+                .iter()
+                .map(|n| (n.id.clone(), n.tdp_watts as f64))
+                .collect();
+            if nodes.is_empty() {
+                return Ok("no nodes in topology [SKIP]".to_string());
+            }
+            let mut actual: Vec<f64> = Vec::with_capacity(nodes.len());
+            for (name, tdp) in &nodes {
+                let live = config
+                    .node_addrs
+                    .iter()
+                    .find(|(id, _)| id == name)
+                    .and_then(|(_id, addr)| {
+                        crate::agent_client::telemetry(addr)
+                            .ok()
+                            .map(|t| t.power_watts as f64)
+                    });
+                actual.push(live.unwrap_or(*tdp)); // unreachable: assume as-planned at TDP
+            }
+            let predicted: Vec<f64> = nodes.iter().map(|(_, w)| *w).collect();
+            let tolerance = 5.0; // W — generous while the predictor is TDP
+            let r = match ouro_cluster::duet::reconcile(&predicted, &actual, tolerance) {
+                Ok(r) => r,
+                Err(e) => return Ok(format!("{e} [SKIP]")),
+            };
+            let budget = scheduler.budget.budget_watts as f64;
+            let within = r.sum <= budget;
+            let mut out = String::from("energy reconcile (predicted=TDP est, tol=5W):\n");
+            for ((name, _), (_, v)) in nodes.iter().zip(&r.verdicts) {
+                let verdict = match v {
+                    ouro_cluster::duet::Verdict::AsPlanned => "as-planned".to_string(),
+                    ouro_cluster::duet::Verdict::Drifted(w) => format!("drifted ({w:.1} W)"),
+                };
+                out.push_str(&format!("  {name}: {verdict}\n"));
+            }
+            out.push_str(&format!(
+                "draw (reconstructed): {:.1} W / budget {:.0} W — {}\n",
+                r.sum,
+                budget,
+                if within { "WITHIN" } else { "BREACH" }
+            ));
+            out.push_str(&format!(
+                "wire: {} as-planned bits, {} drift readings\n",
+                r.wire_bits, r.wire_deltas
+            ));
+            Ok(out)
         }
 
         Command::Generate { prompt } => {
@@ -1880,9 +1960,9 @@ mod tests {
         let mut sched = Scheduler::new(topo.clone());
         let mut ctx = Context::new();
         let mut fmt = Formatter::new(false);
-        let config = ShellConfig::new();
+        let mut config = ShellConfig::new();
         let cmd = Command::NodeQuery { node: "n1".into() };
-        let out = handle(cmd, &mut topo, &mut sched, &mut ctx, &mut fmt, &config, &mut test_recovery()).unwrap();
+        let out = handle(cmd, &mut topo, &mut sched, &mut ctx, &mut fmt, &mut config, &mut test_recovery()).unwrap();
         assert!(out.contains("i5-4200U"));
         assert!(out.contains("8192MiB"));
     }
@@ -1893,9 +1973,9 @@ mod tests {
         let mut sched = Scheduler::new(topo.clone());
         let mut ctx = Context::new();
         let mut fmt = Formatter::new(false);
-        let config = ShellConfig::new();
+        let mut config = ShellConfig::new();
         let mut topo = topo;
-        let out = handle(Command::Help, &mut topo, &mut sched, &mut ctx, &mut fmt, &config, &mut test_recovery()).unwrap();
+        let out = handle(Command::Help, &mut topo, &mut sched, &mut ctx, &mut fmt, &mut config, &mut test_recovery()).unwrap();
         for verb in ["budget 400w", "discover", "recover", "register", "n1.power?", "poetry"] {
             assert!(out.contains(verb), "help missing {verb}");
         }
@@ -1907,10 +1987,10 @@ mod tests {
         let mut sched = Scheduler::new(topo.clone());
         let mut ctx = Context::new();
         let mut fmt = Formatter::new(false);
-        let config = ShellConfig::new();
+        let mut config = ShellConfig::new();
         let cmd = Command::SetBudget { watts: 400 };
         let mut topo = topo;
-        let out = handle(cmd, &mut topo, &mut sched, &mut ctx, &mut fmt, &config, &mut test_recovery()).unwrap();
+        let out = handle(cmd, &mut topo, &mut sched, &mut ctx, &mut fmt, &mut config, &mut test_recovery()).unwrap();
         assert!(out.starts_with("declared: budget 400W"), "got: {out}");
         assert!(out.contains("no agents reachable to measure"), "got: {out}");
         assert_eq!(sched.budget.budget_watts, 400);
@@ -1958,10 +2038,10 @@ mod tests {
         config.topology_file = "/tmp/ouro_test_save".to_string();
 
         let mut topo = topo;
-        let out = handle(Command::Save, &mut topo, &mut sched, &mut ctx, &mut fmt, &config, &mut test_recovery()).unwrap();
+        let out = handle(Command::Save, &mut topo, &mut sched, &mut ctx, &mut fmt, &mut config, &mut test_recovery()).unwrap();
         assert!(out.contains("DONE"));
 
-        let out = handle(Command::Load, &mut topo, &mut sched, &mut ctx, &mut fmt, &config, &mut test_recovery()).unwrap();
+        let out = handle(Command::Load, &mut topo, &mut sched, &mut ctx, &mut fmt, &mut config, &mut test_recovery()).unwrap();
         assert!(out.contains("DONE"));
         assert_eq!(topo.node_count(), 1);
 
@@ -2205,7 +2285,7 @@ mod kernel_ops_tests {
             &mut st.sched,
             &mut st.ctx,
             &mut st.fmt,
-            &st.config,
+            &mut st.config,
             &mut st.recovery,
         )
         .unwrap()

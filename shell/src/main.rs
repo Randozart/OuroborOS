@@ -428,7 +428,7 @@ impl Repl {
             &mut self.scheduler,
             &mut self.ctx,
             &mut self.fmt,
-            &self.config,
+            &mut self.config,
             &mut self.recovery,
         ) {
             Ok(output) => println!("{output}"),
@@ -689,10 +689,10 @@ mod tests {
         let mut ctx = Context::new();
         let mut fmt = Formatter::new(false);
         let mut topo = topo;
-        let config = propositions::ShellConfig::new();
+        let mut config = propositions::ShellConfig::new();
         let mut recovery = ouro_cluster::error_recovery::ErrorRecovery::new();
         let cmd = interpret("n1");
-        let out = propositions::handle(cmd, &mut topo, &mut sched, &mut ctx, &mut fmt, &config, &mut recovery).unwrap();
+        let out = propositions::handle(cmd, &mut topo, &mut sched, &mut ctx, &mut fmt, &mut config, &mut recovery).unwrap();
         assert_eq!(out, "n1 selected.");
     }
 }

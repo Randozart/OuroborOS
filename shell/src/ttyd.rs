@@ -232,7 +232,7 @@ impl TtySession {
             &mut self.scheduler,
             &mut self.ctx,
             &mut self.fmt,
-            &self.config,
+            &mut self.config,
             &mut self.recovery,
         ) {
             Ok(out) => TtyResponse::Ok(out),

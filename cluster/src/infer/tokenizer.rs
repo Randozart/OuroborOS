@@ -44,7 +44,7 @@ const TYPE_USER_DEFINED: i32 = 4;
 const TYPE_UNUSED: i32 = 5;
 
 /// Byte-level BPE tokenizer for qwen35 checkpoints.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Tokenizer {
     vocab_file: VocabFile,
     id_by_token: HashMap<String, u32>,
