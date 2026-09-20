@@ -75,7 +75,7 @@ fn bonsai27_probe_embed() {
     let ref_embed = get("model.input_embed").expect("no model.input_embed in cap");
     let ref_norm = get("attn_norm-0").expect("no attn_norm-0 in cap");
 
-    let mut model = Qwen35Model::load(
+    let model = Qwen35Model::load(
         &["shards_bonsai27_n1/shard_1.bmts"],
         Card::load_dir("shards_bonsai27_n1").unwrap(),
     )
@@ -304,7 +304,7 @@ fn bonsai27_stream_geometry() {
     eprintln!("layer | adj_cos | state_bits | delta_bits | |dx|/|x|");
     let (mut cos_min, mut cos_sum, mut n) = (1.0f32, 0.0f64, 0usize);
     for w in layer_outs.windows(2) {
-        let (l0, x0) = &w[0];
+        let (_, x0) = &w[0];
         let (l1, x1) = &w[1];
         let d: Vec<f32> = x1.iter().zip(x0).map(|(a, b)| a - b).collect();
         let c = cos(x0, x1);
@@ -321,6 +321,77 @@ fn bonsai27_stream_geometry() {
         "adjacent-layer cos: min={cos_min:.6} mean={:.6} over {n} boundaries",
         cos_sum / n as f64
     );
+}
+
+/// Tokenizer gates (docs/BONSAI_TOKENIZER.md): oracle-anchored ids from
+/// the verified capture runs, plus text→tokens→generation→text e2e.
+#[test]
+#[ignore]
+fn bonsai27_tokenizer_gates() -> Result<(), Box<dyn std::error::Error>> {
+    let r = root();
+    std::env::set_current_dir(&r).unwrap();
+    if !std::path::Path::new("shards_bonsai27_n1/tokenizer.json").exists() {
+        eprintln!("no tokenizer.json (run tools/dump_tokenizer.py)");
+        return Ok(());
+    }
+    let mut model = Qwen35Model::load(
+        &["shards_bonsai27_n1/shard_1.bmts"],
+        Card::load_dir("shards_bonsai27_n1").unwrap(),
+    )
+    .unwrap();
+
+    // GATE 1: encode matches the fork's token id for "Hello"
+    let ids = model.tokenize("Hello").unwrap();
+    eprintln!("tokenize(\"Hello\") = {ids:?}");
+    assert_eq!(ids, vec![9419u32], "oracle anchor: Hello == 9419");
+
+    // GATE 2: decode of the verified oracle greedy stream
+    let stream = [11u32, 353, 2688, 264, 5286, 303, 279, 3694];
+    let text = model.detokenize(&stream).unwrap();
+    eprintln!("detokenize(stream) = {text:?}");
+    assert_eq!(text, ", I'm a student in the University");
+
+    // GATE 3: streaming decoder == full decode on the same ids
+    let mut sd = ouro_cluster::infer::tokenizer::StreamingDecoder::new(
+        ouro_cluster::infer::tokenizer::Tokenizer::load_dir("shards_bonsai27_n1").unwrap(),
+    );
+    let mut streamed = String::new();
+    for &id in &stream {
+        streamed.push_str(&sd.push(id));
+    }
+    streamed.push_str(&sd.finish());
+    assert_eq!(streamed, text, "streaming must equal full decode");
+
+    // GATE 4: roundtrip on awkward text
+    for sample in [
+        "Hello",
+        "I'm sure it's 42% done, isn't we'll've",
+        "naïve café 中文 🦀 tab\there\nnewline  trailing  ",
+    ] {
+        let rt = model.tokenize(sample).and_then(|ids| model.detokenize(&ids))?;
+        assert_eq!(rt, sample, "roundtrip failed for {sample:?}");
+    }
+
+    // GATE 5: end-to-end text→tokens→greedy gen→text, eos-aware
+    let prompt = model.tokenize("Hello")?;
+    let mut tok = prompt[0] as usize;
+    let mut gen_ids: Vec<u32> = Vec::new();
+    let eos = model.tokenizer().unwrap().eos().unwrap() as usize;
+    for _ in 0..6 {
+        let h = model.step(tok)?;
+        let l = model.logits(&h)?;
+        let next = l.iter().enumerate().max_by(|a, b| a.1.partial_cmp(b.1).unwrap()).unwrap().0;
+        if next == eos {
+            eprintln!("eos hit");
+            break;
+        }
+        gen_ids.push(next as u32);
+        tok = next;
+    }
+    let out = model.detokenize(&gen_ids)?;
+    eprintln!("generated: {out:?}");
+    assert_eq!(gen_ids, vec![11, 353, 2688, 264, 5286, 303], "greedy stream must match oracle");
+    Ok(())
 }
 
 #[test]

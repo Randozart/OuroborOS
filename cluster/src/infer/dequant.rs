@@ -617,7 +617,7 @@ mod tests {
                 for n in 0..5 {
                     q = q * 3 + xi[m + n * 16] as u32;
                 }
-                blk[m] = ((q * 256 + 242) / 243) as u8;
+                blk[m] = (q * 256).div_ceil(243) as u8; // C: (q*256+242)/243
             }
             // stage c=8: bytes qs[16..24] pack elements 80 + m + n*8
             for m in 0..8 {
@@ -625,7 +625,7 @@ mod tests {
                 for n in 0..5 {
                     q = q * 3 + xi[80 + m + n * 8] as u32;
                 }
-                blk[16 + m] = ((q * 256 + 242) / 243) as u8;
+                blk[16 + m] = (q * 256).div_ceil(243) as u8; // C: (q*256+242)/243
             }
             // qh: qh[h] packs 120+h, 122+h, 124+h, 126+h then *3 shift
             for h in 0..2 {
@@ -634,7 +634,7 @@ mod tests {
                     q = q * 3 + xi[120 + h + m * 2] as u32;
                 }
                 q *= 3;
-                blk[24 + h] = ((q * 256 + 242) / 243) as u8;
+                blk[24 + h] = (q * 256).div_ceil(243) as u8; // C: (q*256+242)/243
             }
             blk
         }

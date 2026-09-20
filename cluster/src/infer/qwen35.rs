@@ -146,6 +146,7 @@ mod tests {
                 signs: vec![-1, 1, -1, 1],
                 gdn_v_grouped: true,
             }),
+            source_dir: None,
         };
         let bytes = card.to_capnp().unwrap();
         let back = Card::from_capnp(&bytes).unwrap();
@@ -179,6 +180,7 @@ mod tests {
                 d_inner: 0,
             },
             hadamard: None,
+            source_dir: None,
         };
         let bytes = card.to_capnp().unwrap();
         let back = Card::from_capnp(&bytes).unwrap();
@@ -329,6 +331,7 @@ use crate::infer::ops::{rmsnorm, silu, softmax};
 use crate::infer::Stage;
 use anyhow::Result;
 use serde::Deserialize;
+use std::sync::Arc;
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 pub struct SsmParams {
@@ -379,6 +382,10 @@ pub struct Card {
     /// Hadamard fold (PTQ1_0 exports); absent for non-folded checkpoints.
     #[serde(default)]
     pub hadamard: Option<HadamardCfg>,
+    /// Where model.json was loaded from (set by `load_dir`); lets the
+    /// model find sidecar files (tokenizer.json). Not serialized.
+    #[serde(skip)]
+    pub source_dir: Option<String>,
 }
 
 impl Card {
@@ -389,6 +396,7 @@ impl Card {
     /// Load `model.json` from a shard dir, attaching `hadamard.json` when present.
     pub fn load_dir(dir: &str) -> Result<Self> {
         let mut card = Self::load(&format!("{dir}/model.json"))?;
+        card.source_dir = Some(dir.to_string());
         if let Ok(s) = std::fs::read_to_string(format!("{dir}/hadamard.json")) {
             card.hadamard = Some(serde_json::from_str(&s)?);
         }
@@ -533,6 +541,7 @@ impl Card {
 
         Ok(Card {
             architecture: root.get_architecture()?.to_str()?.to_string(),
+            source_dir: None,
             n_layer: root.get_n_layer() as usize,
             n_embd: root.get_n_embd() as usize,
             n_head: root.get_n_head() as usize,
@@ -1002,6 +1011,8 @@ pub struct Qwen35Model {
     pub card: Card,
     stages: Vec<Qwen35Stage>,
     pos: usize,
+    /// Attached when `{source_dir}/tokenizer.json` exists (text in/out).
+    tokenizer: Option<Arc<crate::infer::tokenizer::Tokenizer>>,
 }
 
 impl Qwen35Model {
@@ -1014,7 +1025,36 @@ impl Qwen35Model {
             }
             stages.push(Qwen35Stage::from_shard(&shard, card.clone())?);
         }
-        Ok(Self { card, stages, pos: 0 })
+        let tokenizer = card.source_dir.as_ref().and_then(|dir| {
+            let path = format!("{dir}/tokenizer.json");
+            std::path::Path::new(&path)
+                .exists()
+                .then(|| crate::infer::tokenizer::Tokenizer::load_dir(dir))
+                .and_then(|r| r.ok())
+                .map(Arc::new)
+        });
+        Ok(Self { card, stages, pos: 0, tokenizer })
+    }
+
+    /// The attached tokenizer, if the shard dir carried one.
+    pub fn tokenizer(&self) -> Option<&Arc<crate::infer::tokenizer::Tokenizer>> {
+        self.tokenizer.as_ref()
+    }
+
+    /// Text → token ids (requires an attached tokenizer).
+    pub fn tokenize(&self, text: &str) -> Result<Vec<u32>> {
+        self.tokenizer
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("no tokenizer attached (missing tokenizer.json?)"))?
+            .tokenize(text)
+    }
+
+    /// Token ids → text (requires an attached tokenizer).
+    pub fn detokenize(&self, ids: &[u32]) -> Result<String> {
+        self.tokenizer
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("no tokenizer attached"))?
+            .decode(ids)
     }
 
     pub fn reset(&mut self) {

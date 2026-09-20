@@ -121,6 +121,8 @@ pub enum Command {
     Load,
     /// `generate <text>.` — run BitNet generation on target nodes
     Generate { prompt: String },
+    /// `ask [N] <text>.` — Bonsai greedy completion, local engine, N tokens
+    Ask { max_tokens: usize, text: String },
     /// `shards.` — show pipeline plan + activation transport probe
     ShardStatus,
     /// `discover. [cidr] [port]` — sweep subnet for agents, absorb them
@@ -372,6 +374,17 @@ pub fn interpret(input: &str) -> Command {
         let prompt = rest.strip_suffix('.').unwrap_or(rest).trim().to_string();
         return Command::Generate { prompt };
     }
+    if let Some(rest) = trimmed.strip_prefix("ask ") {
+        let rest = rest.strip_suffix('.').unwrap_or(rest).trim();
+        // optional leading token budget: `ask 24 Hello world`
+        let (max_tokens, text) = match rest.split_once(' ') {
+            Some((n, t)) if n.chars().all(|c| c.is_ascii_digit()) && !n.is_empty() => {
+                (n.parse().unwrap_or(8), t.trim().to_string())
+            }
+            _ => (8, rest.to_string()),
+        };
+        return Command::Ask { max_tokens, text };
+    }
     if trimmed == "shards" || trimmed == "shards." || trimmed.starts_with("shards ") {
         return Command::ShardStatus;
     }
@@ -467,6 +480,21 @@ mod tests {
         match cmd {
             Command::Generate { prompt } => assert_eq!(prompt, "hello brave world"),
             other => panic!("expected Generate, got {:?}", other),
+        }
+        // ask: default budget, explicit budget, trailing-period strip
+        match interpret("ask Hello") {
+            Command::Ask { max_tokens, text } => {
+                assert_eq!(max_tokens, 8);
+                assert_eq!(text, "Hello");
+            }
+            other => panic!("expected Ask, got {:?}", other),
+        }
+        match interpret("ask 24 Hello, world.") {
+            Command::Ask { max_tokens, text } => {
+                assert_eq!(max_tokens, 24);
+                assert_eq!(text, "Hello, world");
+            }
+            other => panic!("expected Ask, got {:?}", other),
         }
     }
 

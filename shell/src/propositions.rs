@@ -519,6 +519,16 @@ pub fn handle(
             Ok(out)
         }
 
+        Command::Ask { max_tokens, text } => {
+            let dir = std::env::var("OURO_BONSAI_SHARDS")
+                .unwrap_or_else(|_| "shards_bonsai27_n1".to_string());
+            let mut out = format!("bonsai [{}]: ", text);
+            match crate::bonsai::ask(&dir, &text, max_tokens, |piece| out.push_str(piece)) {
+                Ok(_) => Ok(out),
+                Err(e) => Ok(format!("{e} [SKIP]")),
+            }
+        }
+
         Command::Generate { prompt } => {
             if config.node_addrs.is_empty() {
                 return Ok("No agent endpoints. Start with --nodes n1@host:port,.. [SKIP]".to_string());
@@ -2371,7 +2381,7 @@ mod kernel_ops_tests {
                 line.push(one[0] as char);
             }
             let (seq, body) = ouro_cluster::transport::auth::open_line(&key, line.trim()).unwrap();
-            let task: serde_json::Value = serde_json::from_str(&body).unwrap();
+            let task: serde_json::Value = serde_json::from_str(body).unwrap();
             let task_id = task.get("id").unwrap().as_str().unwrap().to_string();
             let out = task.get("name").unwrap().as_str().unwrap().to_string();
             let resp = serde_json::json!({

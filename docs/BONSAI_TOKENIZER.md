@@ -1,7 +1,6 @@
 # Bonsai Tokenizer — Plan (text in, text out, no C)
 
-**Status**: planned (this document is the plan; implementation lands under
-`cluster/src/infer/tokenizer.rs`). Goal: HISS serves actual text on Bonsai
+**Status**: LANDED 2026-09-20 (this document is the plan as executed). Goal: HISS serves actual text on Bonsai
 end-to-end — `ask "Hello"` → tokens → greedy generation → streamed text —
 with zero oracle trust: every gate is anchored to token ids the PrismML
 fork already emitted in verified capture runs.
@@ -70,7 +69,7 @@ for vocab (no Rust GGUF parser exists here; Python already has `read_kv`).
 | encode | `tokenize("Hello") == [9419]` | ouro-capture printed token id (verified run) |
 | decode | `detokenize([11, 353, 2688, 264, 5286, 303, 279, 3694]) == ", I'm a student in the University"` | the verified oracle greedy stream + captured pieces |
 | roundtrip | ascii / CJK / emoji / contractions / digits / trailing spaces / newlines survive encode∘decode | tokenizer's own contract |
-| end-to-end | text → tokens → 6-token greedy → text on real shards (`#[ignore]`, ~30 s release) | the whole stack |
+| end-to-end | text → tokens → 6-token greedy → text on real shards (`#[ignore]`) — PASSED: `", I'm a student in"` from `"Hello"` | the whole stack |
 
 Parity stretch: extend `ouro-capture` to tokenize a paragraph and diff
 against ours token-for-token (the fork as oracle for arbitrary text).

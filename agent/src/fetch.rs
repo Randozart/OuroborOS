@@ -242,8 +242,7 @@ mod tests {
                 }
             }
             let (shard, tensor, span) = fetch_verb(&KEY, line.trim()).unwrap();
-            let sent = handle_fetch(KEY, sock, &shard, &tensor, span).unwrap();
-            sent
+            handle_fetch(KEY, sock, &shard, &tensor, span).unwrap()
         });
 
         // Head: connect, send the fetch line, read stamp + frames.

@@ -1,4 +1,5 @@
 pub mod agent_client;
+pub mod bonsai;
 pub mod context;
 pub mod formatter;
 pub mod parser;

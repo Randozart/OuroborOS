@@ -12,6 +12,7 @@
 mod dequant;
 pub mod hadamard;
 pub mod qwen35;
+pub mod tokenizer;
 mod ops;
 
 pub use ops::matvec_q;
