@@ -30,3 +30,4 @@ capnp/*.c++
 capnp/*.h
 schemas/*.c++
 schemas/*.h
+registry-live.log
