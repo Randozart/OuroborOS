@@ -38,7 +38,8 @@ cmake -S bitnet-cpp -B "$BUILD" \
     -DGGML_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES="$ARCH" \
     -DCMAKE_CUDA_COMPILER=/opt/cuda/bin/nvcc \
     -DCMAKE_BUILD_TYPE=Release \
-    -DBITNET_ARM_TL1=OFF -DBITNET_X86_TL2=OFF >/dev/null
+    -DBITNET_ARM_TL1=OFF -DBITNET_X86_TL2=OFF \
+    -DLLAMA_BUILD_TOOLS=ON -DLLAMA_BUILD_COMMON=ON >/dev/null
 cmake --build "$BUILD" -j"$(nproc)" --config Release >/dev/null 2>&1 || {
     echo "build produced errors; showing tail:"
     cmake --build "$BUILD" -j"$(nproc)" 2>&1 | tail -15

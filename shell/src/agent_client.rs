@@ -50,6 +50,8 @@ pub struct AgentTelemetry {
     pub agent_version: String,
     #[serde(default)]
     pub image_rev: String,
+    #[serde(default)]
+    pub mac: String,
 }
 
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
@@ -335,6 +337,78 @@ pub fn fetch_manifest_with(
 /// frames. The REPL's `fetch` verb uses this.
 pub fn fetch_tensor(addr: &str, tensor: &str, offset: u64, length: u64) -> Result<Vec<u8>> {
     fetch_tensor_with(&cached_secret()?, addr, tensor, offset, length)
+}
+
+/// Agent status (declarative reconcile reads this to diff actual vs desired).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentStatus {
+    pub awake: bool,
+    #[serde(default)]
+    pub busy: bool,
+    #[serde(default)]
+    pub node: String,
+    #[serde(default)]
+    pub power_watts: u32,
+    #[serde(default)]
+    pub temp_c: u32,
+    #[serde(default)]
+    pub load_avg: f64,
+}
+
+/// Ask an agent what it admits about itself (awake, busy, draw).
+pub fn status(addr: &str) -> Result<AgentStatus> {
+    status_with(&cached_secret()?, addr)
+}
+
+/// `status` with an explicit secret (tests, multi-cluster tools).
+pub fn status_with(secret: &Secret, addr: &str) -> Result<AgentStatus> {
+    let resp = send_raw_with(secret, addr, "status", Duration::from_secs(5))?;
+    let st: AgentStatus = serde_json::from_str(&resp)
+        .with_context(|| format!("parse status from {} (raw {:?})", addr, &resp[..resp.len().min(80)]))?;
+    Ok(st)
+}
+
+/// Command an agent to suspend itself (the declarative `n1 sleep` converges
+/// here). Returns Ok when the tail reports a successful suspend request.
+pub fn sleep(addr: &str) -> Result<String> {
+    sleep_with(&cached_secret()?, addr)
+}
+
+/// `sleep` with an explicit secret (tests, multi-cluster tools).
+pub fn sleep_with(secret: &Secret, addr: &str) -> Result<String> {
+    let resp = send_raw_with(secret, addr, "sleep", Duration::from_secs(10))?;
+    let v: serde_json::Value = serde_json::from_str(&resp)
+        .with_context(|| format!("parse sleep reply from {} (raw {:?})", addr, &resp[..resp.len().min(80)]))?;
+    if v.get("status").and_then(|s| s.as_str()) == Some("ok") {
+        Ok(format!("suspended via {addr}"))
+    } else {
+        anyhow::bail!("suspend refused: {}", resp)
+    }
+}
+
+/// Wake-on-LAN: send a magic packet (6× 0xFF + MAC×16) as a UDP broadcast
+/// to `broadcast_addr`. The declared-awake-but-unreachable node is expected
+/// to have WOL enabled in its firmware. Honest: if the MAC is unknown or the
+/// send fails, this returns Err — a wake that did not go out is reported, not
+/// assumed.
+pub fn wake(mac: &str, broadcast_addr: &str) -> Result<()> {
+    use std::net::UdpSocket;
+    let hex = mac.replace([':', '-'], "");
+    if hex.len() != 12 {
+        anyhow::bail!("invalid MAC {mac:?} (want 12 hex chars)");
+    }
+    let bytes: Vec<u8> = (0..hex.len() / 2)
+        .map(|i| u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16))
+        .collect::<std::result::Result<_, _>>()
+        .map_err(|e| anyhow::anyhow!("bad MAC {mac:?}: {e}"))?;
+    let mut packet = vec![0xffu8; 6];
+    for _ in 0..16 {
+        packet.extend_from_slice(&bytes);
+    }
+    let sock = UdpSocket::bind("0.0.0.0:0")?;
+    sock.set_broadcast(true)?;
+    sock.send_to(&packet, broadcast_addr)?;
+    Ok(())
 }
 
 /// `fetch_tensor` with an explicit secret (tests, multi-cluster tools).
@@ -681,5 +755,35 @@ mod tests {
         assert_eq!(shard.tensors[1].length, 256);
 
         server.join().unwrap();
+    }
+
+    /// Wake-on-LAN: the magic packet (6× 0xFF + MAC×16) actually goes out on
+    /// the wire, and a malformed MAC is refused before any send.
+    #[test]
+    fn test_wake_magic_packet() {
+        use std::net::UdpSocket;
+        // Receiver: catches the broadcast packet on an ephemeral port.
+        let rx = UdpSocket::bind("127.0.0.1:0").unwrap();
+        rx.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+        let port = rx.local_addr().unwrap().port();
+        let rx_addr = format!("127.0.0.1:{port}");
+
+        let receiver = std::thread::spawn(move || {
+            let mut buf = [0u8; 102];
+            let (n, _) = rx.recv_from(&mut buf).unwrap();
+            (buf[..n].to_vec(), n)
+        });
+
+        wake("aa:bb:cc:dd:ee:ff", &rx_addr).unwrap();
+        let (packet, n) = receiver.join().unwrap();
+        assert_eq!(n, 102, "magic packet is 6+96 = 102 bytes");
+        assert!(packet[..6].iter().all(|&b| b == 0xff), "6× 0xFF prefix");
+        let mac: Vec<u8> = packet[6..].to_vec();
+        for chunk in mac.chunks(6) {
+            assert_eq!(chunk, [0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff], "MAC×16");
+        }
+
+        // Malformed MAC is refused before any send.
+        assert!(wake("not-a-mac", "127.0.0.1:9").is_err());
     }
 }

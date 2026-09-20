@@ -12,6 +12,9 @@ cargo clippy --workspace --all-targets -- -D warnings
 echo "== fast tier =="
 cargo test --workspace
 
+echo "== sharder gate (MTP draft routing) =="
+python3 tools/test_shard_model.py
+
 if [ "${1:-}" = "--heavy" ]; then
     echo "== parity ladder (nightly tier) =="
     cargo build --release --bin ouro-agent

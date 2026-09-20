@@ -448,7 +448,7 @@ fn main() -> Result<()> {
         .find(|w| w[0] == "--nodes")
         .map(|w| w[1].clone());
 
-    let topology = demo_topology();
+    let mut topology = demo_topology();
     let mut scheduler = Scheduler::new(topology.clone());
     let mut ctx = Context::new();
     let fmt = Formatter::new(false);
@@ -460,6 +460,40 @@ fn main() -> Result<()> {
 
     let mut config = propositions::ShellConfig::new();
     config.node_addrs = node_addrs.clone();
+
+    // Live topology at startup: the registry bus first, then `--nodes`
+    // telemetry probes. The demo topology is the labeled fallback — the
+    // shell's queries reflect real nodes whenever any are reachable.
+    let (absorbed, source) = propositions::absorb_live_nodes(&mut topology, &config);
+    if absorbed > 0 {
+        println!("topology: {absorbed} live node(s) absorbed from {source}");
+    } else if topology.nodes.is_empty() {
+        println!("topology: static demo (no registry bus, no --nodes) — queries read the model");
+    }
+
+    // The 5s reconcile tick: the declarative shell converges toward the
+    // declared state on its own. Shares the scheduler's DesiredState (Arc);
+    // reports only when there's something declared to converge on.
+    {
+        let desired = scheduler.desired.clone();
+        let config_c = config.clone();
+        std::thread::spawn(move || loop {
+            std::thread::sleep(std::time::Duration::from_secs(5));
+            let has_declarations = {
+                let Ok(d) = desired.lock() else { continue };
+                !d.is_empty()
+            };
+            if !has_declarations {
+                continue;
+            }
+            let mut scratch = ouro_hiss::context::Context::new();
+            let report = propositions::reconcile_desired(&config_c, &desired, &mut scratch);
+            // Only print when the reconcile actually took a step.
+            if !report.starts_with("nothing declared") && !report.starts_with("reconciled: no diff") {
+                println!("[{:?}] {}", std::time::Instant::now(), report);
+            }
+        });
+    }
 
     // Load the weight manifest (Rung B3) so `weights` answers from real
     // shard headers, not an empty store. Best-effort: a missing map is fine.

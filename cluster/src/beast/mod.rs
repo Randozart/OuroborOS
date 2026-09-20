@@ -1,4 +1,5 @@
 pub mod node_state;
+pub mod resource;
 pub mod topology;
 
 use anyhow::Result;

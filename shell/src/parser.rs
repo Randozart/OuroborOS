@@ -93,6 +93,8 @@ pub enum Command {
     NodeQuery { node: String },
     /// `n3.power?` — deep property query
     PropertyQuery { node: String, property: String },
+    /// `n3.lanes?` — live per-lane health (priced edges)
+    Lanes { node: String },
     /// `power?` — query context's property
     ContextPropertyQuery { property: String },
     /// `cluster.active?` — bulk query
@@ -146,6 +148,10 @@ pub enum Command {
     Drift { expected: Option<String> },
     /// `recover.` — trigger error recovery sweep
     Recover,
+    /// `reconcile` — converge the cluster toward the declared state now
+    Reconcile,
+    /// `desired` — show the declared state of the cluster
+    Desired,
     /// `poetry on.` / `poetry off.`
     Poetry { enabled: bool },
     /// `cluster?` with assignment check
@@ -182,6 +188,16 @@ pub fn parse(tokens: &[Token]) -> Command {
             }
         }
 
+        // `cluster active?` — the space-separated twin (dots are internal
+        // separators; the space form reads like prose).
+        [Token::Ident(c), Token::Ident(prop), Token::Question]
+            if c == "cluster" =>
+        {
+            Command::BulkQuery {
+                filter: prop.clone(),
+            }
+        }
+
         // `branch_sort on?` — workload assignment check
         [Token::Ident(wl), Token::Ident(pred), Token::Question] if pred == "on" => {
             Command::AssignCheck {
@@ -197,8 +213,33 @@ pub fn parse(tokens: &[Token]) -> Command {
             }
         }
 
+        // `n3.lanes?` — live per-lane health (priced edges on the node).
+        // Must precede the general `n3.power?` arm (lanes is a property too).
+        [Token::Ident(name), Token::Dot, Token::Ident(prop), Token::Question]
+            if name.starts_with('n') && prop == "lanes" =>
+        {
+            Command::Lanes { node: name.clone() }
+        }
+
         // `n3.power?`, `n3.thermal?`, etc.
         [Token::Ident(name), Token::Dot, Token::Ident(prop), Token::Question]
+            if name.starts_with('n') =>
+        {
+            Command::PropertyQuery {
+                node: name.clone(),
+                property: prop.clone(),
+            }
+        }
+
+        // `n3 lanes?` — the space-separated twin (prose form).
+        [Token::Ident(name), Token::Ident(prop), Token::Question]
+            if name.starts_with('n') && prop == "lanes" =>
+        {
+            Command::Lanes { node: name.clone() }
+        }
+
+        // `n3 power?` — space-separated property query.
+        [Token::Ident(name), Token::Ident(prop), Token::Question]
             if name.starts_with('n') =>
         {
             Command::PropertyQuery {
@@ -235,25 +276,31 @@ pub fn parse(tokens: &[Token]) -> Command {
             }
         }
 
-        // `n3休眠.` / `n3 sleep` — power state
+        // `n3休眠.` / `n3 sleep` / `n3 wake` — power state
         [Token::Ident(name), Token::Ident(state), Token::Dot]
             if name.starts_with('n')
-                && (state == "休眠" || state == "sleep") =>
+                && (state == "休眠" || state == "sleep" || state == "wake") =>
         {
             Command::PowerState {
                 node: name.clone(),
-                sleeping: true,
+                sleeping: state != "wake",
             }
         }
         [Token::Ident(name), Token::Ident(state)]
             if name.starts_with('n')
-                && (state == "休眠" || state == "sleep") =>
+                && (state == "休眠" || state == "sleep" || state == "wake") =>
         {
             Command::PowerState {
                 node: name.clone(),
-                sleeping: true,
+                sleeping: state != "wake",
             }
         }
+
+        // `reconcile` — converge now (also runs on a 5s tick)
+        [Token::Ident(r)] if r == "reconcile" => Command::Reconcile,
+
+        // `desired` — the declared state
+        [Token::Ident(d)] if d == "desired" => Command::Desired,
 
         // `budget 400w.` / `budget 400w`
         [Token::Ident(b), Token::Ident(val), Token::Dot] if b == "budget" => {
@@ -573,6 +620,31 @@ mod tests {
         assert!(
             matches!(interpret("cluster.active?"), Command::BulkQuery { filter } if filter == "active")
         );
+    }
+
+    /// The space-separated prose forms are twins of the dotted queries.
+    #[test]
+    fn test_space_separated_queries() {
+        assert!(
+            matches!(interpret("n1 power?"), Command::PropertyQuery { node, property }
+                if node == "n1" && property == "power")
+        );
+        assert!(
+            matches!(interpret("n1 lanes?"), Command::Lanes { node } if node == "n1")
+        );
+        assert!(
+            matches!(interpret("n1.lanes?"), Command::Lanes { node } if node == "n1")
+        );
+        assert!(
+            matches!(interpret("cluster active?"), Command::BulkQuery { filter } if filter == "active")
+        );
+        // The dotted and space forms must agree.
+        let dotted = interpret("n1.power?");
+        let spaced = interpret("n1 power?");
+        assert_eq!(format!("{:?}", dotted), format!("{:?}", spaced));
+        let d2 = interpret("cluster.active?");
+        let s2 = interpret("cluster active?");
+        assert_eq!(format!("{:?}", d2), format!("{:?}", s2));
     }
 }
 

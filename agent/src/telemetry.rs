@@ -32,6 +32,10 @@ pub struct Telemetry {
     /// This node's priced lanes, self-reported (docs/AIR_PATH.md §1.1).
     #[serde(default, skip_serializing_if="Vec::is_empty")]
     pub edges: Vec<ouro_cluster::transport::edge::PricedEdge>,
+    /// The primary interface's MAC address — the WOL target the head needs
+    /// to wake a declared-awake tail that has suspended itself.
+    #[serde(default, skip_serializing_if="String::is_empty")]
+    pub mac: String,
 }
 
 /// Compile-time build stamp. Nix sets OURO_BUILD_REV from the flake
@@ -94,7 +98,40 @@ pub fn collect_with_head(head: Option<&str>) -> Result<Telemetry> {
         image_rev: image_rev(),
         node_id: ouro_cluster::probe::derive_node_id(),
         edges: ouro_cluster::probe::network::probe_lanes(head_ip.as_deref()),
+        mac: read_mac(),
     })
+}
+
+/// The primary interface's MAC address: the wired iface if one is up, else
+/// any non-loopback carrier interface. Empty when no MAC is readable (the
+/// head then honestly reports "no WOL path" for wake).
+fn read_mac() -> String {
+    let mut ifaces: Vec<String> = Vec::new();
+    if let Ok(entries) = std::fs::read_dir("/sys/class/net") {
+        for e in entries.flatten() {
+            let name = e.file_name().to_string_lossy().to_string();
+            if name == "lo" {
+                continue;
+            }
+            let carrier = std::fs::read_to_string(format!("/sys/class/net/{name}/carrier"))
+                .map(|s| s.trim() == "1")
+                .unwrap_or(false);
+            if carrier {
+                ifaces.push(name);
+            }
+        }
+    }
+    // Prefer wired (non-wireless) interfaces.
+    ifaces.sort_by_key(|n| n.starts_with("wlan") as usize);
+    for name in ifaces {
+        if let Ok(mac) = std::fs::read_to_string(format!("/sys/class/net/{name}/address")) {
+            let mac = mac.trim().to_string();
+            if mac.len() == 17 {
+                return mac;
+            }
+        }
+    }
+    String::new()
 }
 
 /// Read CPU model, cores, threads, and SIMD flags from /proc/cpuinfo.

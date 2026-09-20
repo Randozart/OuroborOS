@@ -13,6 +13,7 @@ use crate::parser::Command;
 use crate::registry_client::{self, RegistryNode, RegistryStatus};
 
 /// Configuration for shell command handling.
+#[derive(Clone)]
 pub struct ShellConfig {
     pub topology_file: String,
     pub node_addrs: Vec<(String, String)>,
@@ -44,33 +45,39 @@ impl Default for ShellConfig {
 /// the long form).
 const HELP_TEXT: &str = "\
 queries
-  ?  cluster?              cluster summary
+  ?  cluster?              cluster summary (live bus + topology)
   n1?                      full node record
-  n1.power?                one property (power ram cpu cores threads simd gpu status)
+  n1.power?  n1 power?     one property (power ram cpu cores threads simd gpu status)
   power?                   same, on the context node
   cluster.active?          bulk query (active idle offline sleeping)
+  desired                  the declared state of the cluster
+  n1 lanes?                live per-lane health
+  power?                   actual draw vs budget (on the context node)
 
-placement
-  n1 assign branch_sort   route through Scheduler::schedule()
+declarations — state you declare; the cluster converges toward it
+  n1 assign branch_sort    branch_sort shall run on n1
   branch_sort on?          dry-run: would it place? where? why not?
-  budget 400w             set cluster power budget (Art. 4)
-  tasks                   the task queue: depth, age, retries, priority
-  recover                 sweep stale/failed nodes, drain the queue
+  n1 sleep   n1 wake       the node shall be asleep / awake
+  budget 400w              the cluster shall draw at most 400W
+  tasks                    declared + running workloads
+  reconcile                converge now (also runs on a 5s tick)
+  recover                  sweep stale/failed nodes, drain the queue
 
 fleet
-  register                probe this box, add it to the topology
-  unregister n3           remove a node
-  discover [cidr] [port]  one-shot LAN sweep for live agents
-  drift [rev]             which tails don't run the expected versions
-  probe                   list topology nodes
-  save  load             topology to/from JSON
+  register                 probe this box, add it to the topology
+  unregister n3            remove a node
+  discover [cidr] [port]   one-shot LAN sweep for live agents
+  drift [rev]              which tails don't run the expected versions
+  probe                    list topology nodes
+  save  load               topology to/from JSON
 
 payloads
-  generate <prompt>.       BitNet generation on the target node
-  shards.                  pipeline plan + activation transport probe
-  deploy  deploy shards  ship the agent / sync weight shards
-  n1 sleep                sleep transition (stub)
-  poetry on  poetry off  output register
+  generate <prompt>        BitNet generation on the target node
+  shards                   pipeline plan + activation transport probe
+  deploy  deploy shards    ship the agent / sync weight shards
+  weights  bind  fetch     the avenue: census, bind a span, fetch it live
+  revoke b1                release a binding
+  poetry on  poetry off    output register
 
 meta
   help                     this screen
@@ -125,6 +132,7 @@ pub fn handle(
         }
 
         Command::NodeQuery { node } => {
+            refresh_live_props(config, ctx, &node);
             let mut backend = ShellBackend { scheduler, topology, ctx, recovery, config };
             match run_dispatch(&Op::Stat(ResourcePath::parse(&node).unwrap()), &mut backend)? {
                 Resource::Node(record) => {
@@ -136,6 +144,7 @@ pub fn handle(
         }
 
         Command::PropertyQuery { node, property } => {
+            refresh_live_props(config, ctx, &node);
             let mut backend = ShellBackend { scheduler, topology, ctx, recovery, config };
             let path = ResourcePath::parse(&format!("{}.{}", node, property))
                 .map_err(|e| anyhow::anyhow!("{}", e))?;
@@ -147,10 +156,23 @@ pub fn handle(
             }
         }
 
+        Command::Lanes { node } => {
+            let entry = topology
+                .get_node(&node)
+                .ok_or_else(|| anyhow::anyhow!("no such node: {}", node))?;
+            let lanes = lanes_summary(&entry.edges);
+            if lanes.is_empty() {
+                Ok(format!("{}: no lanes reported", node))
+            } else {
+                Ok(format!("{} lanes: {}", node, lanes))
+            }
+        }
+
         Command::ContextPropertyQuery { property } => {
             let Some(node_id) = ctx.current_node().map(|s| s.to_string()) else {
                 return Ok(fmt.unknown(&format!("{}?", property)));
             };
+            refresh_live_props(config, ctx, &node_id);
             let mut backend = ShellBackend { scheduler, topology, ctx, recovery, config };
             let path = ResourcePath::parse(&format!("{}.{}", node_id, property))
                 .map_err(|e| anyhow::anyhow!("{}", e))?;
@@ -201,17 +223,29 @@ pub fn handle(
                 node,
                 class.label()
             ));
-            match run_dispatch(&op, &mut backend)? {
+            let outcome = match run_dispatch(&op, &mut backend)? {
                 Resource::Assign { node: assigned } => {
                     details.push(format!("[3] Dispatch to {}.                [OK]", assigned));
-                    Ok(fmt.assign_result(&node, &workload, true, &details))
+                    Some(assigned)
                 }
                 Resource::Queued { reason } => {
                     details.push(format!("[3] Scheduling failed: {}", reason));
-                    Ok(fmt.assign_result(&node, &workload, false, &details))
+                    None
                 }
-                other => Err(anyhow::anyhow!("unexpected resource: {:?}", other)),
+                other => return Err(anyhow::anyhow!("unexpected resource: {:?}", other)),
+            };
+
+            // Declaration: `workload` shall run on `node`. The reconcile pass
+            // dispatches it to the real agent (idempotent — once, until
+            // re-declared). If the scheduler placed it elsewhere, the
+            // declaration follows the scheduler's decision.
+            let placed = outcome.is_some();
+            let declared_node = outcome.unwrap_or_else(|| node.clone());
+            if let Ok(mut desired) = scheduler.desired.lock() {
+                desired.declare_workload(&declared_node, &workload, "");
             }
+            let report = reconcile_desired(config, &scheduler.desired, ctx);
+            Ok(format!("{}\n{}", fmt.assign_result(&node, &workload, placed, &details), report))
         }
 
         Command::AssignCheck { node, workload } => {
@@ -229,28 +263,37 @@ pub fn handle(
         }
 
         Command::PowerState { node, sleeping } => {
-            let _ = sleeping;
-            let mut backend = ShellBackend { scheduler, topology, ctx, recovery, config };
-            let op = Op::Ctl {
-                path: ResourcePath::parse(&node).unwrap(),
-                verb: "sleep".to_string(),
-            };
-            match run_dispatch(&op, &mut backend)? {
-                Resource::Ack { message } => Ok(message),
-                other => Err(anyhow::anyhow!("unexpected resource: {:?}", other)),
+            // Declaration: the node shall be asleep / awake. The cluster
+            // converges toward it (the reconcile pass executes sleep/wake
+            // over the wire). No more canned strings — the tail either
+            // suspends or honestly reports why not.
+            use ouro_cluster::scheduler::desired::DesiredNodeState;
+            if let Ok(mut desired) = scheduler.desired.lock() {
+                desired.declare_node(&node, if sleeping { DesiredNodeState::Sleeping } else { DesiredNodeState::Awake });
             }
+            let report = reconcile_desired(config, &scheduler.desired, ctx);
+            Ok(if sleeping {
+                format!("declared: {} shall sleep\n{}", node, report)
+            } else {
+                format!("declared: {} shall wake\n{}", node, report)
+            })
         }
 
         Command::SetBudget { watts } => {
+            // Declaration: the cluster shall draw at most `watts`. The
+            // scheduler enforces it at dispatch (model) and reconcile
+            // reports actual draw against it (live).
             let mut backend = ShellBackend { scheduler, topology, ctx, recovery, config };
             let op = Op::Write {
                 path: ResourcePath::parse("cluster.budget").unwrap(),
                 value: watts.to_string(),
             };
-            match run_dispatch(&op, &mut backend)? {
-                Resource::Budget { watts } => Ok(fmt.budget_set(watts)),
-                other => Err(anyhow::anyhow!("unexpected resource: {:?}", other)),
+            run_dispatch(&op, &mut backend)?;
+            if let Ok(mut desired) = scheduler.desired.lock() {
+                desired.declare_budget(Some(watts));
             }
+            let report = reconcile_desired(config, &scheduler.desired, ctx);
+            Ok(format!("declared: budget {}W\n{}", watts, report))
         }
 
         Command::Probe => {
@@ -584,6 +627,33 @@ pub fn handle(
                 Resource::Ack { message } => Ok(message),
                 other => Err(anyhow::anyhow!("unexpected resource: {:?}", other)),
             }
+        }
+
+        Command::Reconcile => {
+            Ok(reconcile_desired(config, &scheduler.desired, ctx))
+        }
+
+        Command::Desired => {
+            let Ok(desired) = scheduler.desired.lock() else {
+                return Ok("desired: lock poisoned".to_string());
+            };
+            if desired.is_empty() {
+                return Ok("desired: nothing declared".to_string());
+            }
+            let mut out = String::from("desired state:");
+            if let Some(b) = desired.budget_watts {
+                out.push_str(&format!("\n  budget: {}W", b));
+            }
+            for (node, state) in &desired.node_states {
+                out.push_str(&format!("\n  {}: {:?}", node, state));
+            }
+            for wl in &desired.workloads {
+                out.push_str(&format!("\n  {}: {} ({})", wl.node, wl.task, if wl.payload.is_empty() { "no payload" } else { &wl.payload }));
+            }
+            if !desired.dispatched.is_empty() {
+                out.push_str(&format!("\n  acted: {}", desired.dispatched.join(", ")));
+            }
+            Ok(out)
         }
 
         Command::Weights { target } => {
@@ -1305,6 +1375,216 @@ fn telemetry_to_node(addr: &str, tel: &crate::agent_client::AgentTelemetry, id: 
     }
 }
 
+/// Convert a registry-bus node record into a topology entry.
+fn registry_node_to_entry(rn: &crate::registry_client::RegistryNode) -> ouro_cluster::beast::topology::NodeEntry {
+    ouro_cluster::beast::topology::NodeEntry {
+        id: rn.id.clone(),
+        hostname: rn.hostname.clone(),
+        ip: rn.ip.clone(),
+        cpu_model: rn.cpu_model.clone(),
+        cores: rn.cores,
+        threads: rn.threads,
+        has_avx: rn.has_avx,
+        has_avx2: rn.has_avx2,
+        has_sse42: rn.has_sse42,
+        ram_mib: rn.ram_mib,
+        tdp_watts: rn.tdp_watts.max(rn.power_watts.max(15)),
+        has_gpu: rn.has_gpu,
+        gpu_model: rn.gpu_model.clone(),
+        gpu_vram_mib: rn.gpu_vram_mib,
+        gpu_driver: String::new(),
+        agent_version: rn.agent_version.clone(),
+        image_rev: rn.image_rev.clone(),
+        has_rdma: false,
+        rdma_gid: String::new(),
+        edges: Vec::new(),
+        node_id: String::new(),
+    }
+}
+
+/// Absorb live nodes into the topology at startup: the registry bus first
+/// (one signed `status` call), then any `--nodes` telemetry probes. Returns
+/// the count absorbed and the source label ("registry" / "telemetry").
+/// Neither reachable → 0 (caller keeps the demo/static topology, clearly
+/// labeled).
+pub fn absorb_live_nodes(
+    topology: &mut ClusterTopology,
+    config: &ShellConfig,
+) -> (usize, &'static str) {
+    // 1. The registry bus is the one source of truth.
+    if let Some(status) = live_status(config) {
+        let mut n = 0;
+        for rn in &status.nodes {
+            if let Some(k) = topology.nodes.iter().position(|x| x.id == rn.id) {
+                topology.nodes[k] = registry_node_to_entry(rn);
+            } else {
+                topology.nodes.push(registry_node_to_entry(rn));
+            }
+            n += 1;
+        }
+        if n > 0 {
+            return (n, "registry");
+        }
+    }
+    // 2. Fall back to `--nodes` telemetry probes.
+    let mut n = 0;
+    for (id, addr) in &config.node_addrs {
+        if let Ok(tel) = crate::agent_client::telemetry(addr) {
+            let entry = telemetry_to_node(addr, &tel, id.clone());
+            if let Some(k) = topology.nodes.iter().position(|x| x.id == *id) {
+                topology.nodes[k] = entry;
+            } else {
+                topology.nodes.push(entry);
+            }
+            n += 1;
+        }
+    }
+    (n, "telemetry")
+}
+
+/// Reconcile the declared state against the live cluster: diff, then
+/// execute the diff over the wire. Declarations are acted on once (the
+/// `dispatched` guard makes this idempotent — a 5s loop converges, it does
+/// not spam). Returns a convergence report.
+///
+/// - workload declared, agent awake & not busy  → dispatch `execute`
+/// - node declared sleeping, agent reachable    → agent `sleep`
+/// - node declared awake, agent unreachable     → WOL wake (needs MAC)
+/// - budget declared                            → actual draw vs declared
+pub fn reconcile_desired(
+    config: &ShellConfig,
+    desired: &std::sync::Arc<std::sync::Mutex<ouro_cluster::scheduler::desired::DesiredState>>,
+    ctx: &mut Context,
+) -> String {
+    use ouro_cluster::scheduler::desired::DesiredNodeState;
+
+    let snapshot = {
+        let Ok(desired) = desired.lock() else {
+            return "reconcile: desired-state lock poisoned".to_string();
+        };
+        if desired.is_empty() {
+            return "nothing declared; converged".to_string();
+        }
+        desired.clone()
+    };
+
+    let mut steps: Vec<String> = Vec::new();
+
+    // 1. Declared workloads → real tasks on real agents.
+    for wl in &snapshot.workloads {
+        let key = format!("{}:{}", wl.node, wl.task);
+        if snapshot.already_dispatched(&key) {
+            continue;
+        }
+        let Some(addr) = addr_for(config, &wl.node) else {
+            steps.push(format!("  {}: no address known — not dispatched", wl.node));
+            continue;
+        };
+        let task = crate::agent_client::AgentTask {
+            id: format!("decl-{}", wl.node),
+            name: wl.task.clone(),
+            payload: wl.payload.clone(),
+            estimated_watts: 30,
+            estimated_seconds: 60,
+        };
+        match crate::agent_client::execute(&addr, &task) {
+            Ok(r) if r.status == "Success" => {
+                steps.push(format!("  dispatched {} to {} [{}ms]", wl.task, wl.node, r.elapsed_ms));
+                if let Ok(mut desired) = desired.lock() {
+                    desired.mark_dispatched(&key);
+                }
+            }
+            Ok(r) => steps.push(format!("  {}: {} [{}]", wl.node, r.output, r.status)),
+            Err(e) => steps.push(format!("  {}: unreachable ({})", wl.node, e)),
+        }
+    }
+
+    // 2. Declared node power states → sleep / WOL wake.
+    for (node, state) in &snapshot.node_states {
+        let key = format!("{}:{:?}", node, state);
+        if snapshot.already_dispatched(&key) {
+            steps.push(format!("  {}: {} (requested)", node, match state {
+                DesiredNodeState::Sleeping => "sleeping",
+                DesiredNodeState::Awake => "awake",
+            }));
+            continue;
+        }
+        let Some(addr) = addr_for(config, node) else {
+            steps.push(format!("  {}: no address known", node));
+            continue;
+        };
+        match state {
+            DesiredNodeState::Sleeping => {
+                match crate::agent_client::sleep(&addr) {
+                    Ok(msg) => {
+                        steps.push(format!("  {}: {}", node, msg));
+                        if let Ok(mut desired) = desired.lock() {
+                            desired.mark_dispatched(&key);
+                        }
+                    }
+                    Err(e) => steps.push(format!("  {}: sleep refused ({})", node, e)),
+                }
+            }
+            DesiredNodeState::Awake => {
+                // The tail is unreachable (else it would be awake). Wake needs
+                // its MAC — cached from the last time it was awake.
+                let mac = ctx.get_property(node, "mac").map(|s| s.to_string());
+                match mac {
+                    Some(mac) => match crate::agent_client::wake(&mac, "255.255.255.255:9") {
+                        Ok(()) => {
+                            steps.push(format!("  {}: WOL sent to {}", node, mac));
+                            if let Ok(mut desired) = desired.lock() {
+                                desired.mark_dispatched(&key);
+                            }
+                        }
+                        Err(e) => steps.push(format!("  {}: WOL failed ({})", node, e)),
+                    },
+                    None => steps.push(format!("  {}: unreachable, no WOL path (no MAC known)", node)),
+                }
+            }
+        }
+    }
+
+    // 3. Declared budget → actual draw vs declared.
+    if let Some(declared) = snapshot.budget_watts {
+        let mut actual: u64 = 0;
+        let mut measured = 0;
+        for (_id, addr) in &config.node_addrs {
+            if let Ok(tel) = crate::agent_client::telemetry(addr) {
+                actual += tel.power_watts as u64;
+                measured += 1;
+            }
+        }
+        if measured == 0 {
+            steps.push(format!("  budget: declared {}W, no agents reachable to measure", declared));
+        } else {
+            let over = if actual as u32 > declared {
+                format!(" — OVER by {}W", actual as u32 - declared)
+            } else {
+                " — within budget".to_string()
+            };
+            steps.push(format!("  budget: declared {}W, actual {}W ({} measured){over}", declared, actual, measured));
+        }
+    }
+
+    if steps.is_empty() {
+        "reconciled: no diff to apply; converged".to_string()
+    } else {
+        let mut out = String::from("reconciling:\n");
+        out.push_str(&steps.join("\n"));
+        out
+    }
+}
+
+/// The live address for a node id, from the multi-homed table.
+fn addr_for(config: &ShellConfig, node: &str) -> Option<String> {
+    config
+        .node_addrs
+        .iter()
+        .find(|(id, _)| id == node)
+        .map(|(_, a)| a.clone())
+}
+
 /// Append GPU census line to a cluster summary when any node has a GPU.
 /// (Live-record variant lives below; the static variant moved into the op
 /// kernel's `stat cluster` — ShellBackend builds the census strings.)
@@ -1452,6 +1732,61 @@ fn resolve_record_property(n: &RegistryNode, property: &str, ctx: &Context) -> S
 }
 
 /// Resolve a property: live agent cache first, static topology as fallback.
+/// Build the property map from live agent telemetry.
+fn telemetry_props_map(tel: &crate::agent_client::AgentTelemetry) -> std::collections::HashMap<String, String> {
+    let mut props = std::collections::HashMap::new();
+    props.insert("power".to_string(), format!("{}W", tel.power_watts));
+    props.insert("temp".to_string(), format!("{}C", tel.temp_c));
+    props.insert("ram".to_string(), format!("{}MiB used of {}MiB", tel.ram_used_mib, tel.ram_total_mib));
+    props.insert("cpu".to_string(), tel.cpu_model.clone());
+    props.insert("status".to_string(), "AWAKE".to_string());
+    props.insert("load".to_string(), format!("{:.2}", tel.load_avg));
+    if let Some(g) = tel.gpus.first() {
+        props.insert("gpu".to_string(), format!("{} ({}MiB)", g.model, g.vram_mib));
+    }
+    if !tel.mac.is_empty() {
+        props.insert("mac".to_string(), tel.mac.clone());
+    }
+    props
+}
+
+/// Live telemetry props for a node, TTL-cached (5s): a query hits the wire
+/// at most every 5s per node. No addr in `config.node_addrs` → None.
+fn live_props(config: &ShellConfig, node: &str) -> Option<std::collections::HashMap<String, String>> {
+    use std::collections::HashMap;
+    use std::time::{Duration, Instant};
+    type PropCache = HashMap<String, (Instant, HashMap<String, String>)>;
+    static CACHE: std::sync::OnceLock<std::sync::Mutex<PropCache>> =
+        std::sync::OnceLock::new();
+    let cache = CACHE.get_or_init(|| std::sync::Mutex::new(HashMap::new()));
+    let addr = config
+        .node_addrs
+        .iter()
+        .find(|(id, _)| id == node)
+        .map(|(_, a)| a.clone())?;
+    if let Ok(mut cache) = cache.lock() {
+        if let Some((t, props)) = cache.get(node) {
+            if t.elapsed() < Duration::from_secs(5) {
+                return Some(props.clone());
+            }
+        }
+        if let Ok(tel) = crate::agent_client::telemetry(&addr) {
+            let props = telemetry_props_map(&tel);
+            cache.insert(node.to_string(), (Instant::now(), props.clone()));
+            return Some(props);
+        }
+    }
+    None
+}
+
+/// Refresh a node's live properties before a query resolves it (best-effort:
+/// no addr, agent down, or secret missing → keep whatever the cache holds).
+fn refresh_live_props(config: &ShellConfig, ctx: &mut Context, node: &str) {
+    if let Some(props) = live_props(config, node) {
+        ctx.cache_properties(node, props);
+    }
+}
+
 fn resolve_node_property(node: &ouro_cluster::beast::topology::NodeEntry, property: &str, ctx: &Context) -> String {
     if let Some(live) = ctx.get_property(&node.id, property) {
         return format!("{} (live)", live);
@@ -1566,7 +1901,8 @@ mod tests {
         let cmd = Command::SetBudget { watts: 400 };
         let mut topo = topo;
         let out = handle(cmd, &mut topo, &mut sched, &mut ctx, &mut fmt, &config, &mut test_recovery()).unwrap();
-        assert_eq!(out, "Cluster power budget: 400W. [SET]");
+        assert!(out.starts_with("declared: budget 400W"), "got: {out}");
+        assert!(out.contains("no agents reachable to measure"), "got: {out}");
         assert_eq!(sched.budget.budget_watts, 400);
     }
 
@@ -1653,6 +1989,36 @@ mod tests {
         assert_eq!(resolve_node_property(&node, "simd", &ctx), "AVX2, AVX, SSE4.2");
     }
 
+    /// Live props map from telemetry: the source of live `n1.power?` answers.
+    #[test]
+    fn test_telemetry_props_map() {
+        use crate::agent_client::{AgentTelemetry, GpuMini};
+        let tel = AgentTelemetry {
+            hostname: "live-node".into(),
+            cpu_model: "i7-3770".into(),
+            cores: 4,
+            threads: 8,
+            has_avx: true,
+            has_avx2: true,
+            has_sse42: true,
+            ram_total_mib: 32768,
+            ram_used_mib: 4096,
+            power_watts: 42,
+            temp_c: 61,
+            load_avg: 0.5,
+            agent_version: "0.1.0".into(),
+            image_rev: "abc1234".into(),
+            mac: "aa:bb:cc:dd:ee:ff".into(),
+            gpus: vec![GpuMini { model: "RTX 3060".into(), vram_mib: 12288, driver: "580".into() }],
+        };
+        let props = telemetry_props_map(&tel);
+        assert_eq!(props.get("power").unwrap(), "42W");
+        assert_eq!(props.get("ram").unwrap(), "4096MiB used of 32768MiB");
+        assert_eq!(props.get("mac").unwrap(), "aa:bb:cc:dd:ee:ff");
+        assert_eq!(props.get("status").unwrap(), "AWAKE");
+        assert_eq!(props.get("gpu").unwrap(), "RTX 3060 (12288MiB)");
+    }
+
     #[test]
     fn test_telemetry_to_node_mapping() {
         use crate::agent_client::{AgentTelemetry, GpuMini};
@@ -1676,6 +2042,7 @@ mod tests {
             }],
             agent_version: "git:test".into(),
             image_rev: "test".into(),
+            mac: String::new(),
         };
         let node = telemetry_to_node("192.168.1.50:9500", &tel, "n1".into());
         assert_eq!(node.hostname, "test-node");
@@ -1855,17 +2222,21 @@ mod kernel_ops_tests {
     #[test]
     fn test_budget_via_kernel() {
         let mut st = setup();
-        assert_eq!(run(&mut st, Command::SetBudget { watts: 400 }), "Cluster power budget: 400W. [SET]");
+        let out = run(&mut st, Command::SetBudget { watts: 400 });
+        assert!(out.starts_with("declared: budget 400W"), "got: {out}");
         assert_eq!(st.sched.budget.budget_watts, 400);
     }
 
     #[test]
     fn test_sleep_via_kernel() {
         let mut st = setup();
-        assert_eq!(
-            run(&mut st, Command::PowerState { node: "n1".into(), sleeping: true }),
-            "Node n1休眠. Power: 12W → 2W."
-        );
+        let out = run(&mut st, Command::PowerState { node: "n1".into(), sleeping: true });
+        // The declaration is recorded; the tail either suspends or the
+        // reconcile honestly reports why it cannot.
+        assert!(out.starts_with("declared: n1 shall sleep"), "got: {out}");
+        let d = st.sched.desired.lock().unwrap();
+        use ouro_cluster::scheduler::desired::DesiredNodeState;
+        assert_eq!(d.node_desired("n1"), DesiredNodeState::Sleeping);
     }
 
     #[test]
@@ -1969,6 +2340,68 @@ mod kernel_ops_tests {
         assert!(out.contains("256 bytes"), "got: {out}");
         assert!(out.contains("sha256"), "got: {out}");
         server.join().unwrap();
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The declarative shell's payoff: declare a workload, the reconcile
+    /// dispatches it to a real agent over the wire (idempotent — the second
+    /// reconcile reports it as already acted).
+    #[test]
+    fn test_reconcile_dispatches_workload_live() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        let dir = std::env::temp_dir().join(format!("ouro-hiss-reconcile-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let secret_file = dir.join("secret.hex");
+        std::fs::write(&secret_file, "0707070707070707070707070707070707070707070707070707070707070707").unwrap();
+        std::env::set_var("OURO_SECRET_FILE", secret_file.to_str().unwrap());
+
+        // Loopback agent: reads a signed task line, answers a Success result.
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        let key: ouro_cluster::transport::auth::Secret = [7u8; 32];
+        let server = std::thread::spawn(move || {
+            let (sock, _) = listener.accept().unwrap();
+            let mut sock = sock;
+            let mut line = String::new();
+            let mut one = [0u8; 1];
+            while !line.ends_with('\n') {
+                sock.read_exact(&mut one).unwrap();
+                line.push(one[0] as char);
+            }
+            let (seq, body) = ouro_cluster::transport::auth::open_line(&key, line.trim()).unwrap();
+            let task: serde_json::Value = serde_json::from_str(&body).unwrap();
+            let task_id = task.get("id").unwrap().as_str().unwrap().to_string();
+            let out = task.get("name").unwrap().as_str().unwrap().to_string();
+            let resp = serde_json::json!({
+                "task_id": task_id,
+                "status": "Success",
+                "output": out,
+                "elapsed_ms": 3,
+                "peak_watts": 30,
+            });
+            let signed = ouro_cluster::transport::auth::sign_line(&key, seq, &resp.to_string());
+            sock.write_all(signed.as_bytes()).unwrap();
+            sock.write_all(b"\n").unwrap();
+        });
+
+        // Declare a workload on n1, then reconcile.
+        let mut st = setup();
+        st.config.node_addrs = vec![("n1".to_string(), addr.clone())];
+        if let Ok(mut desired) = st.sched.desired.lock() {
+            desired.declare_workload("n1", "echo", "hello");
+        }
+        let report = reconcile_desired(&st.config, &st.sched.desired, &mut st.ctx);
+        assert!(report.contains("dispatched echo to n1"), "got: {report}");
+        assert!(report.contains("[3ms]"), "got: {report}");
+        server.join().unwrap();
+
+        // Idempotent: the second pass does not re-dispatch.
+        let report2 = reconcile_desired(&st.config, &st.sched.desired, &mut st.ctx);
+        assert!(!report2.contains("dispatched echo"), "second pass must not re-dispatch: {report2}");
+        assert!(report2.contains("reconciled: no diff"), "got: {report2}");
+
         std::fs::remove_dir_all(&dir).ok();
     }
 

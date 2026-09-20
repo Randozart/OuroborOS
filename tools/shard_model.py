@@ -3,11 +3,12 @@
 shard_model.py — Split a BitNet GGUF model across N nodes for pipeline parallelism.
 
 Usage:
-    python3 tools/shard_model.py <model.gguf> <num_nodes> [--output-dir <dir>]
+    python3 tools/shard_model.py <model.gguf> <num_nodes> [--output-dir <dir>] [--weights w1,w2,..] [--no-draft]
 
 Output:
     <output_dir>/shard_<i>.bmts — binary shard per node (BMTS format below)
-    <output_dir>/shard_map.json — layer-to-node mapping metadata
+    <output_dir>/draft.bmts    — MTP draft-head shard for the brain node (Track B)
+    <output_dir>/shard_map.json — layer-to-node mapping metadata (+ `draft` record)
 
 BMTS v1 layout (all little-endian):
     magic:    u32  0x4F55524F ("OURO")
@@ -261,6 +262,9 @@ def main():
     ap.add_argument("--output-dir", default="shards")
     ap.add_argument("--weights", default=None,
                     help="compute weights per node, e.g. 1,4,4,6 (bandwidth-proportional)")
+    ap.add_argument("--no-draft", action="store_true",
+                    help="filter MTP/nextn tensors (pre-rung-B1 behavior; default keeps "
+                         "the draft head on the brain node for Track B, docs/AIR_PATH.md)")
     args = ap.parse_args()
 
     if not os.path.exists(args.model):
@@ -269,30 +273,52 @@ def main():
     os.makedirs(args.output_dir, exist_ok=True)
     tensors, _, card = parse_gguf(args.model)
 
+    draft_enabled = (not args.no_draft) and card.get("nextn", 0) > 0
     keep_layers = card["n_layer"] - card.get("nextn", 0)
-    def keep(t):
+
+    # Partition: trunk layers (0..keep_layers), MTP draft layers (>= keep_layers)
+    # + draft-head tensors → brain node 1 (docs/AIR_PATH.md Track B rung B1).
+    trunk = []
+    draft = []
+    dropped = []
+    for t in tensors:
         n = t["name"]
         if n.startswith("v.") or ".v_" in n or n.startswith("model.visual"):
-            return False
-        if n.startswith("blk."):
+            dropped.append(n)
+        elif n.startswith("blk."):
             try:
-                return int(n.split(".")[1]) < keep_layers
+                il = int(n.split("blk.")[1].split(".")[0])
             except ValueError:
-                return True
-        if "nextn" in n:
-            return False
-        return True
-    dropped = [t["name"] for t in tensors if not keep(t)]
-    tensors = [t for t in tensors if keep(t)]
+                trunk.append(t)
+                continue
+            if il < keep_layers:
+                trunk.append(t)
+            elif draft_enabled and il < card["n_layer"]:
+                draft.append(t)
+            else:
+                dropped.append(n)
+        elif "nextn" in n:
+            if draft_enabled:
+                draft.append(t)
+            else:
+                dropped.append(n)
+        else:
+            trunk.append(t)
     if dropped:
-        print(f"filtered {len(dropped)} non-text tensors (vision/nextn)")
+        label = "vision/nextn" if not draft_enabled else "vision"
+        print(f"filtered {len(dropped)} non-text tensors ({label})")
+    if draft:
+        print(f"kept {len(draft)} MTP draft tensors on brain node 1 (nextn={card['nextn']})")
     card["keep_layers"] = keep_layers
 
+    # Ranges over the FULL tensor list so trunk + draft byte ranges are exact
+    # (also fixes a latent over-read: filtering before range computation let
+    # the last kept tensor claim trailing dropped bytes).
     ranges = tensor_data_ranges(args.model, tensors)
     weights = [float(x) for x in args.weights.split(",")] if args.weights else None
     if weights and len(weights) != args.nodes:
         sys.exit("--weights needs one value per node")
-    groups = classify(tensors, args.nodes, weights)
+    groups = classify(trunk, args.nodes, weights)
 
     shard_map = {"model": os.path.basename(args.model), "model_card": card, "nodes": []}
     total = 0
@@ -311,6 +337,30 @@ def main():
         shard_map["nodes"].append(entry)
         print(f"  node {i+1}: layers {layer_ids[0] if layer_ids else '-'}..{layer_ids[-1] if layer_ids else '-'} "
               f"{len(ts)} tensors -> {size/1e6:.1f} MB")
+
+    # MTP draft shard — the brain node's copy of the draft head (Track B).
+    if draft:
+        draft_ids = sorted({
+            int(t["name"].split("blk.")[1].split(".")[0])
+            for t in draft if t["name"].startswith("blk.")
+        })
+        dpath = os.path.join(args.output_dir, "draft.bmts")
+        write_bmts(dpath, 1, draft, ranges, args.model)
+        dsize = os.path.getsize(dpath)
+        total += dsize
+        lo = draft_ids[0] if draft_ids else keep_layers
+        hi = draft_ids[-1] if draft_ids else card["n_layer"] - 1
+        shard_map["draft"] = {
+            "node": 1,
+            "file": dpath,
+            "layers": [lo, hi],
+            "tensors": len(draft),
+            "bytes": dsize,
+        }
+        card["draft_layers"] = [lo, hi]
+        card["draft_node"] = 1
+        card["draft_bytes"] = dsize
+        print(f"  draft: layers {lo}..{hi} {len(draft)} tensors -> {dsize/1e6:.1f} MB (brain node 1)")
 
     with open(os.path.join(args.output_dir, "shard_map.json"), "w") as f:
         json.dump(shard_map, f, indent=2)

@@ -149,7 +149,7 @@ fn cmd_server(args: &[String]) -> Result<()> {
             std::thread::sleep(std::time::Duration::from_secs(60));
             // Check if client is still alive.
             match stream.write(&[]) {
-                Ok(_) => {}
+                Ok(amount) => { let _ = amount; }
                 Err(_) => {
                     println!("[dma-server] peer disconnected — waiting for next...");
                     break;

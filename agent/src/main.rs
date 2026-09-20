@@ -293,6 +293,33 @@ async fn handle_connection(
             }
             break;
         }
+        // fetch-tensor: the head names a tensor, the tail resolves where it
+        // keeps it (its own shard_map) and serves the span back over frames.
+        if let Some((tensor, span)) = fetch::fetch_tensor_verb(&secret, &line) {
+            let stdio_sock = match stream.into_std() {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("[fetch-tensor] into_std: {e}");
+                    break;
+                }
+            };
+            stdio_sock.set_nonblocking(false).unwrap_or_else(|e| {
+                eprintln!("[fetch-tensor] set_nonblocking: {e}");
+            });
+            eprintln!("[fetch-tensor] {tensor} [{}..+{}]", span.offset, span.length);
+            let secret_c = secret;
+            let shard_map_path = SHARD_MAP.get().cloned().unwrap_or_else(|| DEFAULT_SHARD_MAP.to_string());
+            match tokio::task::spawn_blocking(move || {
+                fetch::handle_fetch_tensor(secret_c, stdio_sock, &shard_map_path, &tensor, span)
+            })
+            .await
+            {
+                Ok(Ok(n)) => eprintln!("[fetch-tensor] served {n} bytes"),
+                Ok(Err(e)) => eprintln!("[fetch-tensor] failed: {e:#}"),
+                Err(e) => eprintln!("[fetch-tensor] task panic: {e}"),
+            }
+            break;
+        }
         // Task JSON: run on the blocking pool, never inline on a tokio
         // worker. A long task (gpu_selftest's OpenCL JIT alone takes ~90s
         // on first run) starves the runtime on small cores and wedges the
@@ -553,6 +580,40 @@ fn process_message(msg: &str) -> String {
         match handle_fetch_manifest() {
             Ok(json) => json,
             Err(e) => format!(r#"{{"error":"{e}"}}"#),
+        }
+    }
+    // Sleep: suspend this tail (the declarative shell's `n1 sleep`
+    // converges here). Real systemctl suspend; the result is reported
+    // honestly — a failure to suspend is an error, not a promise.
+    else if trimmed == "sleep" {
+        match std::process::Command::new("systemctl").arg("suspend").output() {
+            Ok(out) if out.status.success() => {
+                r#"{"status":"ok","action":"suspend"}"#.to_string()
+            }
+            Ok(out) => {
+                let stderr = String::from_utf8_lossy(&out.stderr);
+                format!(r#"{{"status":"error","action":"suspend","stderr":"{stderr}"}}"#)
+            }
+            Err(e) => format!(r#"{{"status":"error","action":"suspend","error":"{e}"}}"#),
+        }
+    }
+    // Status: what the tail admits about itself — awake, busy (a task is
+    // holding the rail), and its draw. The reconciliation loop reads this
+    // to diff actual vs desired.
+    else if trimmed == "status" {
+        let busy = TASK_BUSY.load(std::sync::atomic::Ordering::Relaxed);
+        let tel = telemetry::collect();
+        match tel {
+            Ok(t) => serde_json::json!({
+                "awake": true,
+                "busy": busy,
+                "node": t.hostname,
+                "power_watts": t.power_watts,
+                "temp_c": t.temp_c,
+                "load_avg": t.load_avg,
+            })
+            .to_string(),
+            Err(e) => format!(r#"{{"awake":true,"busy":{busy},"error":"{e}"}}"#),
         }
     }
     // Task execution
@@ -821,5 +882,25 @@ mod tests {
         assert!(shard2.tensors.is_empty());
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The `status` verb admits the tail's state (awake + draw) as JSON —
+    /// what the head's reconcile diffs against.
+    #[test]
+    fn test_process_status() {
+        let resp = process_message("status");
+        assert!(resp.contains("\"awake\":true"), "got: {resp}");
+        assert!(resp.contains("power_watts"), "got: {resp}");
+    }
+
+    /// `sleep` without systemctl permissions refuses honestly (an error is
+    /// reported, not a promise of suspension).
+    #[test]
+    fn test_process_sleep_reports_honestly() {
+        let resp = process_message("sleep");
+        // Either systemctl ran (and we can't guarantee it succeeded in CI) or
+        // it errored — the shape must be JSON either way, never a panic.
+        assert!(resp.starts_with('{'), "got: {resp}");
+        assert!(resp.contains("\"status\""), "got: {resp}");
     }
 }

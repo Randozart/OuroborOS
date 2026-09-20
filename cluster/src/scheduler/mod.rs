@@ -1,3 +1,4 @@
+pub mod desired;
 pub mod energy_budget;
 pub mod op_backend;
 pub mod task_queue;
@@ -45,6 +46,10 @@ pub struct Scheduler {
     /// the lane choice the bond policy made. Transient arbiter bookkeeping —
     /// never serialized.
     pub bindings: std::collections::HashMap<String, crate::op::Binding>,
+    /// The declared (desired) state of the cluster — the declarative shell's
+    /// target. Shared with the reconciliation loop (Arc<Mutex>); a fresh one
+    /// by default.
+    pub desired: std::sync::Arc<std::sync::Mutex<desired::DesiredState>>,
     bind_seq: u64,
 }
 
@@ -57,6 +62,7 @@ impl Scheduler {
             queue: task_queue::TaskQueue::new(),
             weights: Weights::new(),
             bindings: std::collections::HashMap::new(),
+            desired: std::sync::Arc::new(std::sync::Mutex::new(desired::DesiredState::new())),
             bind_seq: 0,
         }
     }

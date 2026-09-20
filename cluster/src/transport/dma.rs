@@ -39,6 +39,9 @@ pub struct QpInfo {
 }
 
 /// A queue pair — the RDMA connection endpoint.
+// `pd`/`ctx`/`port` are stored for the connection lifetime but only `qp`
+// is read today (Drop destroys the QP; the PD outlives it via RdmaDevice).
+#[allow(dead_code)]
 pub struct QueuePair {
     qp: *mut ib::ibv_qp,
     pd: *mut ib::ibv_pd,
@@ -85,7 +88,6 @@ impl RdmaDevice {
                 match name {
                     Some(n) if cname == n => {
                         target = dev;
-                        found = true;
                         break;
                     }
                     None if !found => {
@@ -192,6 +194,8 @@ impl CompletionQueue {
     }
 
     /// Create a queue pair connected to this CQ (both send and recv).
+    // Raw `pd`/`ctx` are handed to ibverbs inside an unsafe block by design.
+    #[allow(clippy::not_unsafe_ptr_arg_deref)]
     pub fn create_qp(
         &self,
         pd: *mut ib::ibv_pd,
@@ -480,11 +484,15 @@ impl QueuePair {
 
 impl MemoryRegion {
     /// Register a buffer for RDMA access. The buffer is pinned and DMA-visible.
+    // Raw `pd` is handed to ibverbs inside an unsafe block by design.
+    #[allow(clippy::not_unsafe_ptr_arg_deref)]
     pub fn new(pd: *mut ib::ibv_pd, buf: Vec<u8>, access: i32) -> Result<Self> {
         Self::new_with_remote(pd, buf, access, 0, 0)
     }
 
     /// Register with explicit remote addr/rkey (for the responder side).
+    // Raw `pd` is handed to ibverbs inside an unsafe block by design.
+    #[allow(clippy::not_unsafe_ptr_arg_deref)]
     pub fn new_with_remote(
         pd: *mut ib::ibv_pd,
         buf: Vec<u8>,
