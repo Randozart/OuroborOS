@@ -9,6 +9,8 @@
 use std::time::Duration;
 
 use anyhow::{Context, Result};
+use ouro_cluster::duet::AppetiteFrame;
+use ouro_cluster::probe::energy;
 use ouro_cluster::transport::auth::{self, Secret};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
@@ -110,7 +112,17 @@ pub async fn run(secret: Secret, head: String, period: Duration) -> Result<()> {
                 }
             };
             match exchange(&secret, &head, seq, &body).await {
-                Ok(resp) if resp.starts_with("ok") => {}
+                Ok(resp) if resp.starts_with("ok") => {
+                    // P5: parse optional appetite payload: "ok {id} {json}"
+                    if let Some(json) = resp
+                        .strip_prefix("ok ")
+                        .and_then(|s| s.split_once(' ').map(|(_, j)| j))
+                    {
+                        if let Ok(frame) = serde_json::from_str::<AppetiteFrame>(json) {
+                            apply_appetite(&frame);
+                        }
+                    }
+                }
                 Ok(resp) if resp.starts_with("unknown") => {
                     eprintln!("head-link: daemon lost our registration; re-registering");
                     break;
@@ -126,6 +138,16 @@ pub async fn run(secret: Secret, head: String, period: Duration) -> Result<()> {
             }
             seq = seq.wrapping_add(1);
         }
+    }
+}
+
+/// Apply an appetite received from the head. Fast-path reconfiguration:
+/// RAPL power limit via sysfs write. Bond lane repricing and scheduler
+/// re-dispatch happen on the head side (the head holds the scheduler).
+fn apply_appetite(frame: &AppetiteFrame) {
+    match energy::set_rapl_limit(frame.energy_budget_watts) {
+        Ok(actual) => eprintln!("appetite: rapl → {actual}W"),
+        Err(e) => eprintln!("appetite: rapl skip ({e})"),
     }
 }
 

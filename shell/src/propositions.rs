@@ -609,6 +609,62 @@ pub fn handle(
             Ok(out)
         }
 
+        // P5: `appetite <workload> <watts>w <latency>us` — broadcast
+        // the current appetite to all tails via heartbeat response.
+        Command::Appetite { workload, energy_budget_watts, latency_target_us } => {
+            use ouro_cluster::duet::{AppetiteFrame, MemoryProfile};
+            use ouro_cluster::scheduler::workload_class::WorkloadClass;
+            let wc = match workload.to_lowercase().as_str() {
+                "llm" | "llminference" | "inference" => WorkloadClass::LlmInference,
+                "gpu" | "gpucompute" | "vision" => WorkloadClass::GpuCompute,
+                "simd" | "simdfriendly" | "batch" => WorkloadClass::SimdFriendly,
+                "branch" | "branchheavy" | "sort" => WorkloadClass::BranchHeavy,
+                "recursive" | "recurse" | "tree" => WorkloadClass::Recursive,
+                "irregular" | "graph" => WorkloadClass::Irregular,
+                "smallbatch" | "small" => WorkloadClass::SmallBatch,
+                _ => WorkloadClass::Unknown,
+            };
+            let frame = AppetiteFrame::new(
+                wc,
+                energy_budget_watts,
+                latency_target_us,
+                MemoryProfile::Balanced,
+            );
+            // Send to registry daemon — it embeds the frame in every
+            // heartbeat response until cleared.
+            let addr = crate::registry_client::resolve_addr(&config.registry_addr);
+            let resp = ouro_cluster::transport::auth::secret_from_env()
+                .ok()
+                .and_then(|secret| {
+                    let json = serde_json::to_string(&frame).unwrap_or_default();
+                    crate::registry_client::set_appetite(&addr, &secret, &json).ok()
+                });
+            // Also update local scheduler budget + drain queue.
+            scheduler.budget.set_budget(energy_budget_watts);
+            let drained = scheduler.drain_queue();
+            match resp {
+                Some(r) if r.starts_with("ok") => Ok(format!(
+                    "appetite set: {:?} @ {}W / {}μs\n\
+                     registry: {}\n\
+                     {} tails adapt on next heartbeat\n\
+                     {} queued tasks re-dispatched",
+                    wc, energy_budget_watts, latency_target_us, r,
+                    topology.nodes.len(), drained.len(),
+                )),
+                Some(r) => Ok(format!(
+                    "appetite: registry rejected — {}\n\
+                     local scheduler updated ({} tasks re-dispatched)",
+                    r, drained.len(),
+                )),
+                None => Ok(format!(
+                    "appetite: registry unreachable\n\
+                     local scheduler updated ({} tasks re-dispatched)\n\
+                     [SKIP] tails will not adapt until registry is online",
+                    drained.len(),
+                )),
+            }
+        }
+
         Command::Generate { prompt } => {
             if config.node_addrs.is_empty() {
                 return Ok("No agent endpoints. Start with --nodes n1@host:port,.. [SKIP]".to_string());

@@ -8,6 +8,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::beast::topology::NodeEntry;
 use crate::beast::{NodeState, NodeStatus};
+use crate::duet::AppetiteFrame;
 use crate::probe::NodeInfo;
 
 /// Lifecycle event emitted by the registry.
@@ -84,6 +85,9 @@ pub struct Registry {
     persist_path: Option<PathBuf>,
     #[serde(default, skip)]
     heartbeat_threshold: Duration,
+    /// P5: the current appetite — embedded in every heartbeat response.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_appetite: Option<AppetiteFrame>,
 }
 
 impl Default for Registry {
@@ -99,6 +103,7 @@ impl Registry {
             events: Vec::new(),
             persist_path: None,
             heartbeat_threshold: Duration::from_secs(30),
+            pending_appetite: None,
         }
     }
 
@@ -114,6 +119,17 @@ impl Registry {
             heartbeat_threshold: threshold,
             ..self
         }
+    }
+
+    /// P5: set the current appetite. Embedded in every heartbeat response
+    /// until cleared.
+    pub fn set_appetite(&mut self, frame: AppetiteFrame) {
+        self.pending_appetite = Some(frame);
+    }
+
+    /// P5: clear the current appetite.
+    pub fn clear_appetite(&mut self) {
+        self.pending_appetite = None;
     }
 
     /// Load from disk, or start empty.

@@ -127,6 +127,7 @@ pub fn handle_bus_message(
         "register" => handle_register(reg, recovery, peer_ip, rest),
         "heartbeat" => handle_heartbeat(reg, recovery, peer_ip, rest),
         "status" => handle_status(reg),
+        "set-appetite" => handle_set_appetite(reg, rest),
         other => format!("err unknown-verb {}", other),
     }
 }
@@ -247,7 +248,33 @@ fn handle_heartbeat(
     let events = reg.heartbeat(&id, tel.power_watts, tel.temp_c, tel.load_avg, tel.status());
     recovery.process_events(&events);
     recovery.report_success(&id);
-    format!("ok {}", id)
+    // P5: embed the current appetite in the heartbeat response. The tail
+    // parses the optional JSON after "ok {id} " — old agents ignore it
+    // (they check starts_with("ok")).
+    match &reg.pending_appetite {
+        Some(frame) => {
+            let json = serde_json::to_string(frame).unwrap_or_default();
+            format!("ok {} {}", id, json)
+        }
+        None => format!("ok {}", id),
+    }
+}
+
+/// P5: set the current appetite. The shell sends this; the registry
+/// embeds it in every heartbeat response until cleared.
+fn handle_set_appetite(reg: &mut Registry, json: &str) -> String {
+    if json.is_empty() {
+        reg.clear_appetite();
+        return "ok appetite-cleared".to_string();
+    }
+    match serde_json::from_str::<crate::duet::AppetiteFrame>(json) {
+        Ok(frame) => {
+            let hash = frame.frame_hash;
+            reg.set_appetite(frame);
+            format!("ok appetite-set {hash}")
+        }
+        Err(e) => format!("err bad-appetite {e}"),
+    }
 }
 
 #[cfg(test)]
@@ -391,5 +418,65 @@ mod tests {
         assert_eq!(handle_bus_message(&mut reg, &mut rec, "10.0.0.5", &body), "registered n1");
         assert_eq!(handle_bus_message(&mut reg, &mut rec, "10.0.0.5", &body), "registered n1");
         assert_eq!(reg.len(), 1);
+    }
+
+    // ---- P5: appetite protocol tests ----
+
+    #[test]
+    fn test_set_appetite_and_heartbeat_carries_it() {
+        use crate::duet::{AppetiteFrame, MemoryProfile};
+        use crate::scheduler::workload_class::WorkloadClass;
+
+        let mut reg = Registry::new();
+        let mut rec = ErrorRecovery::new();
+        // Register a node first.
+        let body = format!("register {}", tel_json("box-a", 0.4));
+        handle_bus_message(&mut reg, &mut rec, "10.0.0.1", &body);
+
+        // Set appetite.
+        let frame = AppetiteFrame::new(WorkloadClass::LlmInference, 120, 5000, MemoryProfile::Balanced);
+        let json = serde_json::to_string(&frame).unwrap();
+        let resp = handle_bus_message(&mut reg, &mut rec, "127.0.0.1", &format!("set-appetite {}", json));
+        assert!(resp.starts_with("ok appetite-set"), "got: {}", resp);
+
+        // Heartbeat response now carries the appetite JSON.
+        let hb = format!("heartbeat {}", tel_json("box-a", 0.5));
+        let resp = handle_bus_message(&mut reg, &mut rec, "10.0.0.1", &hb);
+        assert!(resp.starts_with("ok n1 "), "heartbeat should carry appetite: {}", resp);
+        let appetite_json = resp.strip_prefix("ok n1 ").unwrap();
+        let carried: AppetiteFrame = serde_json::from_str(appetite_json).unwrap();
+        assert_eq!(carried.workload, WorkloadClass::LlmInference);
+        assert_eq!(carried.energy_budget_watts, 120);
+    }
+
+    #[test]
+    fn test_clear_appetite() {
+        use crate::duet::{AppetiteFrame, MemoryProfile};
+        use crate::scheduler::workload_class::WorkloadClass;
+
+        let mut reg = Registry::new();
+        let mut rec = ErrorRecovery::new();
+        let body = format!("register {}", tel_json("box-a", 0.4));
+        handle_bus_message(&mut reg, &mut rec, "10.0.0.1", &body);
+
+        // Set then clear.
+        let frame = AppetiteFrame::new(WorkloadClass::GpuCompute, 200, 1000, MemoryProfile::Bandwidth);
+        let json = serde_json::to_string(&frame).unwrap();
+        handle_bus_message(&mut reg, &mut rec, "127.0.0.1", &format!("set-appetite {}", json));
+        let resp = handle_bus_message(&mut reg, &mut rec, "127.0.0.1", "set-appetite");
+        assert_eq!(resp, "ok appetite-cleared");
+
+        // Heartbeat response no longer carries appetite.
+        let hb = format!("heartbeat {}", tel_json("box-a", 0.5));
+        let resp = handle_bus_message(&mut reg, &mut rec, "10.0.0.1", &hb);
+        assert_eq!(resp, "ok n1", "cleared appetite should not appear");
+    }
+
+    #[test]
+    fn test_set_appetite_rejects_bad_json() {
+        let mut reg = Registry::new();
+        let mut rec = ErrorRecovery::new();
+        let resp = handle_bus_message(&mut reg, &mut rec, "127.0.0.1", "set-appetite {bad json");
+        assert!(resp.starts_with("err bad-appetite"), "got: {}", resp);
     }
 }

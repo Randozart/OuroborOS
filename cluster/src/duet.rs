@@ -129,6 +129,81 @@ impl Reconciliation {
     }
 }
 
+// ---------------------------------------------------------------------------
+// P5 — Appetite Protocol: what the cluster is currently optimized for.
+// Embedded in heartbeat responses; tails apply as fast-path
+// reconfiguration (docs/DUET.md §P5).
+// ---------------------------------------------------------------------------
+
+use crate::scheduler::workload_class::WorkloadClass;
+
+/// Memory access pattern hint — determines bond lane pricing strategy.
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum MemoryProfile {
+    /// Stripe across all lanes; prefer GPU VRAM.
+    Bandwidth,
+    /// Single best lane; prefer RAM-heavy nodes.
+    Capacity,
+    /// Default: cost = latency + jitter.
+    Balanced,
+}
+
+/// What the cluster is currently optimized for. The head sets this;
+/// tails apply it on the next heartbeat. The `frame_hash` enables
+/// idempotent application — tails skip reconfiguration if the hash
+/// matches their current state.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AppetiteFrame {
+    pub workload: WorkloadClass,
+    pub energy_budget_watts: u32,
+    pub latency_target_us: u32,
+    pub memory_profile: MemoryProfile,
+    pub frame_hash: u64,
+}
+
+fn workload_tag(w: &WorkloadClass) -> u8 {
+    match w {
+        WorkloadClass::BranchHeavy => 0,
+        WorkloadClass::Recursive => 1,
+        WorkloadClass::SimdFriendly => 2,
+        WorkloadClass::Irregular => 3,
+        WorkloadClass::SmallBatch => 4,
+        WorkloadClass::LlmInference => 5,
+        WorkloadClass::GpuCompute => 6,
+        WorkloadClass::Unknown => 7,
+    }
+}
+
+impl AppetiteFrame {
+    pub fn hash(&self) -> u64 {
+        use std::hash::Hasher;
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        h.write(&workload_tag(&self.workload).to_le_bytes());
+        h.write(&self.energy_budget_watts.to_le_bytes());
+        h.write(&self.latency_target_us.to_le_bytes());
+        h.write(&(self.memory_profile as u8).to_le_bytes());
+        h.finish()
+    }
+
+    pub fn new(
+        workload: WorkloadClass,
+        energy_budget_watts: u32,
+        latency_target_us: u32,
+        memory_profile: MemoryProfile,
+    ) -> Self {
+        let mut f = Self {
+            workload,
+            energy_budget_watts,
+            latency_target_us,
+            memory_profile,
+            frame_hash: 0,
+        };
+        f.frame_hash = f.hash();
+        f
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -202,5 +277,36 @@ mod tests {
         let f = ChoiceFrame { set_id: "s".into(), set_hash: 42, pick: 1 };
         let b = serde_json::to_vec(&f).unwrap();
         assert_eq!(serde_json::from_slice::<ChoiceFrame>(&b).unwrap(), f);
+    }
+
+    // ---- AppetiteFrame tests (P5) ----
+
+    #[test]
+    fn test_appetite_hash_idempotent() {
+        let f = AppetiteFrame::new(WorkloadClass::LlmInference, 120, 5000, MemoryProfile::Balanced);
+        assert_eq!(f.frame_hash, f.hash(), "hash stored at construction");
+        let f2 = AppetiteFrame::new(WorkloadClass::LlmInference, 120, 5000, MemoryProfile::Balanced);
+        assert_eq!(f.frame_hash, f2.frame_hash, "same frame → same hash");
+    }
+
+    #[test]
+    fn test_appetite_hash_discriminates() {
+        let a = AppetiteFrame::new(WorkloadClass::LlmInference, 120, 5000, MemoryProfile::Balanced);
+        let b = AppetiteFrame::new(WorkloadClass::GpuCompute, 120, 5000, MemoryProfile::Balanced);
+        let c = AppetiteFrame::new(WorkloadClass::LlmInference, 200, 5000, MemoryProfile::Balanced);
+        let d = AppetiteFrame::new(WorkloadClass::LlmInference, 120, 1000, MemoryProfile::Balanced);
+        let e = AppetiteFrame::new(WorkloadClass::LlmInference, 120, 5000, MemoryProfile::Bandwidth);
+        assert_ne!(a.frame_hash, b.frame_hash, "different workload");
+        assert_ne!(a.frame_hash, c.frame_hash, "different budget");
+        assert_ne!(a.frame_hash, d.frame_hash, "different latency");
+        assert_ne!(a.frame_hash, e.frame_hash, "different memory profile");
+    }
+
+    #[test]
+    fn test_appetite_frame_serde_roundtrip() {
+        let f = AppetiteFrame::new(WorkloadClass::LlmInference, 120, 5000, MemoryProfile::Balanced);
+        let b = serde_json::to_vec(&f).unwrap();
+        let f2: AppetiteFrame = serde_json::from_slice(&b).unwrap();
+        assert_eq!(f, f2);
     }
 }

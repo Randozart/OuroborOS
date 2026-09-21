@@ -161,6 +161,12 @@ pub enum Command {
     Poetry { enabled: bool },
     /// `cluster?` with assignment check
     AssignCheck { node: String, workload: String },
+    /// `appetite <workload> <watts>w <latency>us` — broadcast appetite
+    Appetite {
+        workload: String,
+        energy_budget_watts: u32,
+        latency_target_us: u32,
+    },
     /// Unknown command
     Unknown(String),
 }
@@ -391,6 +397,31 @@ pub fn interpret(input: &str) -> Command {
     if trimmed == "energy?" || trimmed == "energy" {
         return Command::EnergyQuery;
     }
+    // P5: `appetite <workload> <watts>w <latency>us` or `app ...`
+    if trimmed.starts_with("appetite ") || trimmed.starts_with("app ") {
+        let rest = trimmed
+            .trim_start_matches("appetite")
+            .trim_start_matches("app")
+            .trim()
+            .trim_end_matches('.');
+        let parts: Vec<&str> = rest.split_whitespace().collect();
+        if parts.len() >= 3 {
+            let workload = parts[0].to_string();
+            let watts: u32 = parts[1]
+                .trim_end_matches('w')
+                .parse()
+                .unwrap_or(0);
+            let latency: u32 = parts[2]
+                .trim_end_matches("us")
+                .parse()
+                .unwrap_or(0);
+            return Command::Appetite {
+                workload,
+                energy_budget_watts: watts,
+                latency_target_us: latency,
+            };
+        }
+    }
     if trimmed == "shards" || trimmed == "shards." || trimmed.starts_with("shards ") {
         return Command::ShardStatus;
     }
@@ -504,6 +535,30 @@ mod tests {
         }
         assert!(matches!(interpret("energy?"), Command::EnergyQuery));
         assert!(matches!(interpret("energy"), Command::EnergyQuery));
+    }
+
+    #[test]
+    fn test_parse_appetite() {
+        match interpret("appetite LlmInference 120w 5000us") {
+            Command::Appetite { workload, energy_budget_watts, latency_target_us } => {
+                assert_eq!(workload, "LlmInference");
+                assert_eq!(energy_budget_watts, 120);
+                assert_eq!(latency_target_us, 5000);
+            }
+            other => panic!("expected Appetite, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_app_alias() {
+        match interpret("app GpuCompute 200w 1000us") {
+            Command::Appetite { workload, energy_budget_watts, latency_target_us } => {
+                assert_eq!(workload, "GpuCompute");
+                assert_eq!(energy_budget_watts, 200);
+                assert_eq!(latency_target_us, 1000);
+            }
+            other => panic!("expected Appetite, got {:?}", other),
+        }
     }
 
     #[test]

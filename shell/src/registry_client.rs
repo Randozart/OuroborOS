@@ -115,6 +115,40 @@ pub fn resolve_addr(configured: &str) -> String {
     std::env::var("OURO_REGISTRY").unwrap_or_else(|_| configured.to_string())
 }
 
+/// P5: send a set-appetite command to the registry daemon.
+pub fn set_appetite(addr: &str, secret: &Secret, json: &str) -> Result<String> {
+    let stream = TcpStream::connect_timeout(
+        &addr
+            .parse()
+            .with_context(|| format!("registry addr {addr:?}"))?,
+        Duration::from_millis(750),
+    )
+    .with_context(|| format!("registry daemon unreachable at {addr}"))?;
+    stream.set_nodelay(true).ok();
+    stream.set_read_timeout(Some(Duration::from_millis(1500))).ok();
+
+    let mut stream = stream;
+    let body = if json.is_empty() {
+        "set-appetite".to_string()
+    } else {
+        format!("set-appetite {}", json)
+    };
+    let line = auth::sign_line(secret, 1, &body);
+    stream
+        .write_all(line.as_bytes())
+        .and_then(|_| stream.write_all(b"\n"))
+        .and_then(|_| stream.flush())
+        .context("registry: write failed")?;
+
+    let mut reader = BufReader::new(stream);
+    let mut reply = String::new();
+    reader
+        .read_line(&mut reply)
+        .context("registry: no reply")?;
+    let (_seq, body) = auth::open_line(secret, reply.trim())?;
+    Ok(body.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

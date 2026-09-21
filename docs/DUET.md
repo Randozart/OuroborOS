@@ -311,6 +311,20 @@ not shipping quiet nodes' readings).
   persistent across REPL turns (prompt tokens ingest into the
   recurrent state); `ask clear` resets. Demonstrated: turn 1 "Hello" →
   ", I'm a", turn 2 " University" → " of California".
+- 2026-09-21: **P5 landed** — Appetite Protocol: the head declares
+  what the cluster is optimized for; tails adapt themselves to match.
+  `AppetiteFrame` (workload class, energy budget, latency target,
+  memory profile, frame hash) embedded in heartbeat responses — zero
+  new wire protocol. Agent-side: parses optional JSON from heartbeat
+  response, applies RAPL power limit via sysfs write. Head-side:
+  `appetite`/`app` HISS verb sends frame to registry daemon via
+  `set-appetite` bus verb; registry embeds it in every heartbeat
+  response until cleared. Scheduler budget updated + queue drained on
+  appetite change. Tests: AppetiteFrame hash idempotence + discriminates
+  + serde roundtrip; heartbeat carries appetite; set-appetite + clear;
+  parser: appetite/app aliases. Fast path (<1s): RAPL + bond repricing
+  + scheduler re-dispatch. Slow path (NixOS profile switch): deferred
+  to P5d.
 
 ## 9. Provenance (App. C standing rule)
 

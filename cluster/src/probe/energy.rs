@@ -115,6 +115,22 @@ impl<F: FnMut() -> Result<u64>> EnergyMeter<F> {
     }
 }
 
+/// Write the RAPL power limit. Returns the actual watts set (RAPL may
+/// round to the nearest constraint step). Fails if RAPL is unavailable
+/// or the write is rejected — the caller skips gracefully and the tail
+/// still adapts bond lanes and scheduler weights.
+pub fn set_rapl_limit(watts: u32) -> Result<u32> {
+    let rapl_base = std::path::Path::new("/sys/class/powercap/intel-rapl:0");
+    if !rapl_base.exists() {
+        anyhow::bail!("RAPL unavailable");
+    }
+    let limit_path = rapl_base.join("constraint_0/power_limit");
+    // RAPL uses microwatts
+    std::fs::write(&limit_path, format!("{}", watts * 1_000_000))?;
+    let actual = read_file_u64(&limit_path)? / 1_000_000;
+    Ok(actual as u32)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
